@@ -220,7 +220,7 @@ def g(sec,sub=None):
     if not m: return "?"
     body=m.group(1)
     if sub:
-        m2=re.search(rf"^  {sub}:\n(.*?)(?=^  \S)", body, re.S|re.M); body=m2.group(1) if m2 else ""
+        m2=re.search(rf"^  {sub}:[^\n]*\n(.*?)(?=^  \S|\Z)", body, re.S|re.M); body=m2.group(1) if m2 else ""
         m3=re.search(r"^    memcap:\s*(\S+)", body, re.M)
     else:
         m3=re.search(r"^  memcap:\s*(\S+)", body, re.M)
@@ -398,6 +398,10 @@ if not m:
 s = s[:m.start(2)] + block + s[m.start(2):]
 open(cfg, "w", encoding="utf-8").write(s)
 PY
+  fi
+  # block-size en el bloque ids-mon aunque ya existiera de una corrida anterior
+  if ! awk -v m="$TZSP_MON" '$0 ~ "^  - interface: "m"$"{f=1;next} f&&/^  - interface:/{exit} f&&/^    block-size: 131072/{ok=1} END{exit !ok}' "$CFG"; then
+    sed -i "/^  - interface: ${TZSP_MON}\$/a\    block-size: 131072" "$CFG"
   fi
   # que Suricata no inspeccione en ${IFACE} el propio flujo TZSP (doble CPU + "truncated").
   # Los datagramas TZSP >1500 B llegan fragmentados y los fragmentos no iniciales no

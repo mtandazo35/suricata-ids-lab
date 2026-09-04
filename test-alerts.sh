@@ -7,7 +7,7 @@
 #   malicioso real: solo firmas de test de ET Open.
 #
 #     1) DNS a un dominio .top          -> "ET DNS Query to a *.top domain"        (sid 2023883)
-#     2) HTTP con User-Agent Wget/3.0   -> "ET ADWARE_PUP Fake Wget User-Agent"    (sid 2007961)
+#     2) HTTP con User-Agent wget 3.0   -> "ET ADWARE_PUP Fake Wget User-Agent"    (sid 2007961 + 2013178)
 #     3) escaneo nmap al gateway        -> solo si tienes reglas de portscan (ET Open no trae)
 #
 #   Uso:  ./test-alerts.sh [target_ip]
@@ -40,9 +40,10 @@ else
 fi
 
 # ---------------------------------------------------------------- 2) HTTP User-Agent falso
-info "2/3  Peticion HTTP con User-Agent 'Wget/3.0' (ET ADWARE_PUP Fake Wget User-Agent)"
+info "2/3  Peticion HTTP con User-Agent 'wget 3.0' (ET ADWARE_PUP Fake Wget User-Agent)"
 if command -v curl >/dev/null 2>&1; then
-  curl -s --max-time 10 -A "Wget/3.0" -o /dev/null http://deb.debian.org/ \
+  # la regla compara el UA literal "wget 3.0" (con espacio), no "Wget/3.0"
+  curl -s --max-time 10 -A "wget 3.0" -o /dev/null http://deb.debian.org/ \
     && ok "peticion enviada" || warn "curl fallo (¿sin salida HTTP a internet?)"
 else
   warn "curl no instalado (apt-get install -y curl)"

@@ -61,9 +61,12 @@ info "Esperando a Suricata (5s)..."
 sleep 5
 if [ -r "$EVE" ] && grep -q "$TAG" "$EVE"; then
   ok "Suricata vio la trama en eve.json:"
-  grep "$TAG" "$EVE" | python3 - <<'PY'
+  python3 - "$EVE" "$TAG" <<'PY'
 import sys, json
-for l in sys.stdin:
+eve, tag = sys.argv[1], sys.argv[2]
+for l in open(eve, encoding="utf-8", errors="replace"):
+    if tag not in l:
+        continue
     e = json.loads(l)
     extra = e["alert"]["signature"] if e["event_type"] == "alert" else e.get("dns", {}).get("rrname", "")
     print("  - %-6s in_iface=%s %s -> %s  %s" % (e["event_type"], e.get("in_iface"), e["src_ip"], e["dest_ip"], extra))

@@ -441,16 +441,66 @@ EVEBOX_OPTS=""
 DEF
 
   # --- usuario web -------------------------------------------------------------
+  # 'users passwd' de EveBox es solo interactivo (exige TTY) y 'users rm' falla por
+  # clave foranea en cuanto el usuario tiene sesiones web. Para fijar la clave de
+  # un usuario existente se usa un ayudante que le da un pseudo-terminal.
+  cat > /usr/local/bin/evebox-passwd <<'PYP'
+#!/usr/bin/env python3
+"""evebox-passwd USUARIO CLAVE  -  cambia la clave de un usuario EveBox sin TTY."""
+import os, pty, select, sys
+if len(sys.argv) != 3:
+    sys.exit("uso: evebox-passwd USUARIO CLAVE")
+user, pw = sys.argv[1], sys.argv[2]
+d = "/var/lib/evebox"
+cmd = ["runuser", "-u", "evebox", "--", "/usr/bin/evebox", "-D", d, "-C", d, "config", "users", "passwd", user]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(cmd[0], cmd)
+out, sent = b"", 0
+while True:
+    r, _, _ = select.select([fd], [], [], 20)
+    if not r:
+        break
+    try:
+        data = os.read(fd, 4096)
+    except OSError:
+        break
+    if not data:
+        break
+    out += data
+    if sent < 2 and (b"assword" in data or b"onfirm" in data):
+        os.write(fd, (pw + "\n").encode())
+        sent += 1
+_, st = os.waitpid(pid, 0)
+okay = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0 and b"updated" in out
+if not okay:
+    sys.stderr.write("".join(l + "\n" for l in out.decode(errors="replace").splitlines() if "INFO" not in l)[-600:])
+sys.exit(0 if okay else 1)
+PYP
+  chmod 755 /usr/local/bin/evebox-passwd
+
   EVB="runuser -u evebox -- /usr/bin/evebox --data-directory ${EVEBOX_DATA} --config-directory ${EVEBOX_DATA}"
   systemctl stop evebox >/dev/null 2>&1 || true
-  HAS_ADMIN=0
-  $EVB config users list 2>/dev/null | grep -qw "$WEB_USER" && HAS_ADMIN=1
-  if [ "$HAS_ADMIN" -eq 1 ] && [ -z "$WEB_PASS" ]; then
-    WEB_NOTE="El usuario '${WEB_USER}' ya existia: clave sin cambios (cambiala con -P o con 'evebox config users passwd')."
+  # HAS_ADMIN: 1 existe, 0 no existe, -1 no se pudo consultar (entonces no se toca nada)
+  HAS_ADMIN=-1
+  if USERS_OUT="$($EVB config users list 2>/dev/null)"; then
+    if printf '%s\n' "$USERS_OUT" | grep -q "\"username\":\"${WEB_USER}\""; then HAS_ADMIN=1; else HAS_ADMIN=0; fi
+  fi
+  if [ "$HAS_ADMIN" -eq -1 ]; then
+    warn "No pude consultar los usuarios de EveBox; no toco la clave."
+    WEB_NOTE="No se pudo consultar/crear el usuario; si es la 1a instalacion EveBox genera 'admin' con clave aleatoria (journalctl -u evebox)."
+  elif [ "$HAS_ADMIN" -eq 1 ] && [ -z "$WEB_PASS" ]; then
+    WEB_NOTE="El usuario '${WEB_USER}' ya existia: clave sin cambios (para cambiarla re-ejecuta con -P 'NuevaClave')."
+  elif [ "$HAS_ADMIN" -eq 1 ]; then
+    if /usr/local/bin/evebox-passwd "$WEB_USER" "$WEB_PASS"; then
+      WEB_PASS_SHOWN="$WEB_PASS"; WEB_NOTE="Clave de '${WEB_USER}' actualizada."
+    else
+      warn "No pude cambiar la clave de '${WEB_USER}' (ver salida arriba)."
+      WEB_NOTE="La clave NO se cambio."
+    fi
   else
     # (sin 'tr | head': bajo pipefail tr muere por SIGPIPE y abortaba el script)
     [ -n "$WEB_PASS" ] || WEB_PASS="$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(16)))')"
-    if [ "$HAS_ADMIN" -eq 1 ]; then $EVB config users rm "$WEB_USER" >/dev/null 2>&1 || true; fi
     if $EVB config users add --username "$WEB_USER" --password "$WEB_PASS" >/dev/null 2>&1; then
       WEB_PASS_SHOWN="$WEB_PASS"
     else
@@ -519,7 +569,7 @@ cat <<EOF
     Clave      : ${WEB_PASS_SHOWN:-<sin cambios>}
     ${WEB_NOTE}
     Config     : ${EVEBOX_CFG}    Datos: ${EVEBOX_DATA} (SQLite, 7 dias / 5 GB)
-    Cambiar clave: re-ejecuta este instalador con -P 'NuevaClave'  (ver README)
+    Cambiar clave: evebox-passwd ${WEB_USER} 'NuevaClave'   (o re-ejecuta este instalador con -P)
     Si hay firewall externo (nube/Proxmox), abre ${WEB_PORT}/tcp.
 EOF
 fi

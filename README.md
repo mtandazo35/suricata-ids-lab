@@ -79,35 +79,34 @@ Config: `/etc/evebox/evebox.yaml` (backup con fecha en cada ejecucion).
 ### Cambiar la clave de `admin`
 
 **Opcion 1 (recomendada): re-ejecutar el instalador con `-P`.** Es idempotente:
-no reinstala nada, solo reemplaza la clave y verifica que el servicio levante.
-Al final imprime la URL, el usuario y la clave nueva.
+no reinstala nada, cambia la clave del usuario existente y verifica que el
+servicio levante. Al final imprime la URL, el usuario y la clave nueva.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -P 'TuClaveNueva'
 ```
 
-**Opcion 2: con el CLI de EveBox** (interactivo, pide la clave dos veces):
+**Opcion 2: el ayudante que deja el instalador**, sin preguntas:
 
 ```bash
-systemctl stop evebox
-runuser -u evebox -- evebox --data-directory /var/lib/evebox --config-directory /var/lib/evebox config users passwd admin
-systemctl start evebox
+evebox-passwd admin 'TuClaveNueva'
 ```
 
-> Ejecutalo siempre con `runuser -u evebox`. Si lo corres como root, la base de
-> configuracion (`/var/lib/evebox/config.sqlite`) puede quedar con dueño root y el
-> servicio deja de poder escribirla.
-
-**Clave perdida:** borra el usuario y vuelve a correr el instalador (con o sin `-P`):
+**Opcion 3: el CLI de EveBox** (interactivo, pide la clave dos veces):
 
 ```bash
-systemctl stop evebox
-runuser -u evebox -- evebox --data-directory /var/lib/evebox --config-directory /var/lib/evebox config users rm admin
-curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash
+runuser -u evebox -- evebox -D /var/lib/evebox -C /var/lib/evebox config users passwd admin
 ```
 
-Probado end-to-end el 2026-09-03 en una VM Debian 13 (virtio, Proxmox): web con
-login, ingestion 1:1 con `eve.json` y alertas visibles.
+> Por que existe el ayudante: `evebox config users passwd` exige un TTY (falla con
+> "The input device is not a TTY" desde scripts) y `users rm admin` falla por clave
+> foranea en cuanto el usuario tiene sesiones web, asi que no se puede borrar y
+> recrear. `evebox-passwd` le da un pseudo-terminal y responde las dos preguntas.
+> Ejecuta siempre el CLI con `runuser -u evebox`: como root, `config.sqlite` puede
+> quedar con dueño root y el servicio deja de poder escribirla.
+
+**Clave perdida:** la opcion 1 o la 2 la reemplazan sin necesidad de conocer la
+anterior.
 
 ## Montaje del lab
 

@@ -341,7 +341,22 @@ systemctl enable suricata >/dev/null 2>&1 || true
 systemctl restart suricata
 sleep 3
 if systemctl is-active --quiet suricata; then
-  ok "Suricata corriendo en modo IDS sobre $IFACE."
+  # el daemon ya existe pero el motor tarda ~30-60 s en cargar 50k reglas:
+  # esperar a que responda por el socket de control antes de declararlo listo
+  info "Esperando a que el motor cargue las reglas..."
+  for _ in $(seq 1 60); do
+    suricatasc -c uptime >/dev/null 2>&1 && break
+    systemctl is-active --quiet suricata || break
+    sleep 2
+  done
+  if IFACES="$(suricatasc -c iface-list 2>/dev/null | python3 -c 'import sys,json; print(" ".join(json.load(sys.stdin)["message"]["ifaces"]))' 2>/dev/null)"; then
+    ok "Suricata corriendo en modo IDS. Interfaces capturadas: ${IFACES}"
+    if [ "$TZSP" -eq 1 ] && ! printf '%s' "$IFACES" | grep -qw "$TZSP_MON"; then
+      warn "Suricata NO esta capturando ${TZSP_MON}; revisa el bloque af-packet en ${CFG}."
+    fi
+  else
+    warn "Suricata activo pero el socket de control no respondio a tiempo; revisa /var/log/suricata/suricata.log"
+  fi
 else
   systemctl --no-pager -l status suricata || true
   die "El servicio no arranco."

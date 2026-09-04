@@ -22,6 +22,16 @@ TAG="tzsp-test-$RANDOM"
 if systemctl is-active --quiet tzsp-decap 2>/dev/null; then ok "tzsp-decap activo"; else warn "tzsp-decap no esta activo (instala con -t)"; fi
 ip link show ids-mon >/dev/null 2>&1 && ok "interfaz ids-mon presente" || warn "no existe ids-mon"
 
+# Suricata tarda ~30-60 s en cargar reglas tras un (re)inicio: esperar al motor
+if command -v suricatasc >/dev/null 2>&1; then
+  for _ in $(seq 1 45); do suricatasc -c uptime >/dev/null 2>&1 && break; sleep 2; done
+  if IFACES="$(suricatasc -c iface-list 2>/dev/null)"; then
+    printf '%s' "$IFACES" | grep -q '"ids-mon"' && ok "Suricata captura ids-mon" || warn "Suricata NO captura ids-mon (interfaces: $IFACES)"
+  else
+    warn "el motor de Suricata no responde (¿arrancando?); el test puede fallar por eso"
+  fi
+fi
+
 info "Enviando trama TZSP sintetica (DNS ${TAG}.example.top) a ${DST}:${PORT}..."
 python3 - "$DST" "$PORT" "$TAG" <<'PY'
 import socket, struct, sys, random
@@ -51,12 +61,13 @@ info "Esperando a Suricata (5s)..."
 sleep 5
 if [ -r "$EVE" ] && grep -q "$TAG" "$EVE"; then
   ok "Suricata vio la trama en eve.json:"
-  grep "$TAG" "$EVE" | python3 -c '
+  grep "$TAG" "$EVE" | python3 - <<'PY'
 import sys, json
 for l in sys.stdin:
     e = json.loads(l)
     extra = e["alert"]["signature"] if e["event_type"] == "alert" else e.get("dns", {}).get("rrname", "")
-    print(f"  - {e[\"event_type\"]:6} in_iface={e.get(\"in_iface\")} {e[\"src_ip\"]} -> {e[\"dest_ip\"]}  {extra}")'
+    print("  - %-6s in_iface=%s %s -> %s  %s" % (e["event_type"], e.get("in_iface"), e["src_ip"], e["dest_ip"], extra))
+PY
   grep "$TAG" "$EVE" | grep -q '"event_type":"alert"' && ok "Alerta generada: el pipeline TZSP funciona (mirala en EveBox)." \
     || warn "Se vio el DNS pero sin alerta: revisa que las reglas ET esten cargadas (sid 2023883)."
 else

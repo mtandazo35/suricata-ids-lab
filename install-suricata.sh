@@ -128,7 +128,7 @@ ok "HOME_NET: $HOME_NET"
 info "Instalando suricata y utilidades..."
 # </dev/null: bajo 'curl | bash' el stdin es el propio script; un prompt de dpkg se lo comeria
 apt-get update -qq </dev/null
-apt-get install -y -qq -o Dpkg::Options::=--force-confold suricata suricata-update jq python3 curl ca-certificates ethtool </dev/null >/dev/null
+apt-get install -y -qq -o Dpkg::Options::=--force-confold suricata suricata-update jq python3 curl ca-certificates ethtool logrotate </dev/null >/dev/null
 ok "Suricata instalado: $(suricata -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 
 # comprobar capacidades compiladas
@@ -162,20 +162,77 @@ CFG=/etc/suricata/suricata.yaml
 STAMP="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo backup)"
 cp -a "$CFG" "${CFG}.bak-${STAMP}"
 info "Backup de config: ${CFG}.bak-${STAMP}"
+# conservar solo los 5 backups mas recientes (cada re-ejecucion crea uno)
+ls -1t "${CFG}".bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f --
 
 # HOME_NET
 sed -i "s#^\(\s*HOME_NET:\).*#\1 \"[${HOME_NET}]\"#" "$CFG"
 
-# stream: el espejo puede llegar asimetrico o con sesiones ya empezadas
-if [ "$TZSP" -eq 1 ]; then
-  sed -i "s/^\(\s*midstream:\)\s*false/\1 true/; s/^\(\s*async-oneside:\)\s*false/\1 true/" "$CFG"
-fi
-
 # interfaz af-packet (primer bloque 'interface: ...')
 sed -i "0,/^\(\s*\)- interface:.*/s//\1- interface: ${IFACE}/" "$CFG"
 
-# memcap sanos para lab (ajusta segun ancho de banda espejeado)
-sed -i "s#^\(\s*memcap:\)\s*[0-9].*mb\s*#\1 512mb  #I" "$CFG" 2>/dev/null || true
+# memcaps segun la RAM real y stream para espejo. Con un valor fijo (512mb) el
+# reensamblado TCP se llenaba a los ~5 min con espejo real y, como el memcap es
+# global, Suricata dejaba de reensamblar TODO (tambien el trafico propio): las
+# firmas HTTP dejaban de disparar. Reparto: reassembly 25% RAM, stream 6%, flow 6%,
+# defrag 1.5%. midstream/async-oneside solo con TZSP (espejo con perdidas/asimetrico);
+# en el yaml de Debian esas claves vienen comentadas, asi que se insertan bajo 'stream:'.
+RAM_MB="$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)"
+python3 - "$CFG" "$RAM_MB" "$TZSP" <<'PY'
+import sys, re
+cfg, ram, tzsp = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
+def mb(pct, lo, hi): return max(lo, min(hi, ram * pct // 100))
+want = {
+    ("flow", None): mb(6, 128, 4096),
+    ("stream", None): mb(6, 64, 4096),
+    ("stream", "reassembly"): mb(25, 256, 16384),
+    ("defrag", None): mb(1, 32, 1024),
+}
+lines = open(cfg, encoding="utf-8").read().split("\n")
+top = sub = None
+out = []
+for l in lines:
+    m = re.match(r"^([a-z][\w-]*):", l)
+    if m:
+        top, sub = m.group(1), None
+    elif re.match(r"^  ([a-z][\w-]*):\s*$", l) and top == "stream":
+        sub = re.match(r"^  ([a-z][\w-]*):", l).group(1)
+    m2 = re.match(r"^(\s*)memcap:\s*\d+\s*[mg]b\b(.*)$", l)
+    if m2:
+        key = (top, sub) if (top == "stream" and sub == "reassembly" and l.startswith("    ")) else (top, None)
+        if key in want:
+            l = f"{m2.group(1)}memcap: {want[key]}mb{m2.group(2)}"
+    out.append(l)
+s = "\n".join(out)
+if tzsp:
+    for k in ("midstream", "async-oneside"):
+        if not re.search(rf"^  {k}:\s*true\s*$", s, re.M):
+            s = re.sub(rf"^  {k}:.*\n", "", s, flags=re.M)          # quita valor previo
+            s = re.sub(r"^stream:\s*\n", f"stream:\n  {k}: true\n", s, count=1, flags=re.M)
+open(cfg, "w", encoding="utf-8").write(s)
+print(" ".join(f"{k[0]}{'.'+k[1] if k[1] else ''}={v}mb" for k, v in want.items()))
+PY
+ok "Memcaps (RAM ${RAM_MB} MB): $(python3 - "$CFG" <<'PY'
+import re,sys
+s=open(sys.argv[1],encoding="utf-8").read()
+def g(sec,sub=None):
+    m=re.search(rf"^{sec}:\n(.*?)(?=^\S)", s, re.S|re.M)
+    if not m: return "?"
+    body=m.group(1)
+    if sub:
+        m2=re.search(rf"^  {sub}:\n(.*?)(?=^  \S)", body, re.S|re.M); body=m2.group(1) if m2 else ""
+        m3=re.search(r"^    memcap:\s*(\S+)", body, re.M)
+    else:
+        m3=re.search(r"^  memcap:\s*(\S+)", body, re.M)
+    return m3.group(1) if m3 else "?"
+print(f"flow={g('flow')} stream={g('stream')} reassembly={g('stream','reassembly')} defrag={g('defrag')}")
+PY
+)"
+if [ "$TZSP" -eq 1 ]; then
+  grep -qE '^  midstream: true' "$CFG" && grep -qE '^  async-oneside: true' "$CFG" \
+    && ok "stream: midstream + async-oneside activos (espejo)." \
+    || warn "No pude activar midstream/async-oneside en ${CFG}; revisalo a mano."
+fi
 
 # archivo de interfaz para el servicio de Debian
 if [ -f /etc/default/suricata ]; then
@@ -191,7 +248,13 @@ if [ -f "$LOGROTATE_CFG" ]; then
   compgen -G "${LOGROTATE_CFG}.bak-*" >/dev/null || cp -a "$LOGROTATE_CFG" "${LOGROTATE_CFG}.bak-${STAMP}"
   grep -qE '^\s*daily' "$LOGROTATE_CFG" || sed -i '0,/{/s//{\n\tdaily\n\tmaxsize 2G/' "$LOGROTATE_CFG"
   sed -i 's/^\(\s*rotate\) 14/\1 7/' "$LOGROTATE_CFG"
-  ok "logrotate: diario, maxsize 2G, 7 copias (eve.json crece rapido con espejo)."
+  # maxsize solo actua cuando corre logrotate y el timer de Debian es diario: pasarlo a
+  # cada hora, asi eve.json nunca pasa de ~2G + una hora de escritura.
+  install -d /etc/systemd/system/logrotate.timer.d
+  printf '[Timer]\nOnCalendar=\nOnCalendar=hourly\nAccuracySec=5min\n' > /etc/systemd/system/logrotate.timer.d/10-hourly.conf
+  systemctl daemon-reload
+  systemctl enable --now logrotate.timer >/dev/null 2>&1 || true
+  ok "logrotate: cada hora, maxsize 2G, 7 copias (eve.json crece rapido con espejo)."
 fi
 
 # ============================================================================= TZSP (espejo MikroTik)
@@ -286,10 +349,11 @@ ExecStartPre=/bin/sh -c 'ip link show ${TZSP_MON} >/dev/null 2>&1 || ip link add
 ExecStartPre=/bin/sh -c 'sysctl -qw net.ipv6.conf.${TZSP_IN}.disable_ipv6=1 net.ipv6.conf.${TZSP_MON}.disable_ipv6=1 net.ipv4.conf.${TZSP_MON}.rp_filter=1 net.ipv4.conf.${TZSP_MON}.forwarding=0 net.ipv4.conf.${TZSP_MON}.arp_ignore=8 || true'
 # el SO_RCVBUF de 16 MB del receptor lo topa rmem_max
 ExecStartPre=-/usr/sbin/sysctl -qw net.core.rmem_max=16777216
-# mtu 9000: ~1% de las tramas espejeadas superan 1600 B (GRO/jumbo en el router) y se
-# perdian con EMSGSIZE; ademas Suricata dimensiona el snaplen por el MTU de la interfaz
-ExecStartPre=/sbin/ip link set ${TZSP_IN} up mtu 9000
-ExecStartPre=/sbin/ip link set ${TZSP_MON} up mtu 9000 promisc on
+# mtu 65535 (maximo de veth): el router agrega segmentos (GRO) y manda tramas de hasta
+# ~22 kB; con 1600/9000 se perdian con EMSGSIZE y cada trama perdida es un hueco mas
+# en el reensamblado. Suricata dimensiona el snaplen por el MTU (block-size 128k en ids-mon).
+ExecStartPre=/sbin/ip link set ${TZSP_IN} up mtu 65535
+ExecStartPre=/sbin/ip link set ${TZSP_MON} up mtu 65535 promisc on
 ExecStart=/usr/bin/python3 /usr/local/bin/tzsp-decap.py
 Restart=always
 RestartSec=2
@@ -323,6 +387,8 @@ block = f"""  - interface: {mon}
     defrag: yes
     use-mmap: yes
     tpacket-v3: yes
+    # tramas agregadas de hasta ~22 kB: el bloque debe ser mayor que el snaplen (MTU 65535)
+    block-size: 131072
     checksum-checks: no
 """
 # insertar antes del primer '- interface: default' de la seccion af-packet
@@ -333,12 +399,40 @@ s = s[:m.start(2)] + block + s[m.start(2):]
 open(cfg, "w", encoding="utf-8").write(s)
 PY
   fi
-  # que Suricata no inspeccione en ${IFACE} el propio flujo TZSP (doble CPU + "truncated")
-  if ! grep -qE "^\s*bpf-filter: \"not udp port ${TZSP_PORT}\"" "$CFG"; then
-    sed -i "0,/^  - interface: ${IFACE}\$/s//&\n    bpf-filter: \"not udp port ${TZSP_PORT}\"/" "$CFG"
-  fi
+  # que Suricata no inspeccione en ${IFACE} el propio flujo TZSP (doble CPU + "truncated").
+  # Los datagramas TZSP >1500 B llegan fragmentados y los fragmentos no iniciales no
+  # tienen cabecera UDP: se excluyen tambien (ip[6:2] & 0x1fff = offset de fragmento).
+  BPF="not (udp port ${TZSP_PORT} or (ip[6:2] \& 0x1fff != 0))"
+  BPF_LINE="    bpf-filter: \"${BPF}\""
+  sed -i "/^\s*bpf-filter: \"not udp port ${TZSP_PORT}\"\s*$/d; /^\s*bpf-filter: \"not (udp port ${TZSP_PORT} or/d" "$CFG"
+  sed -i "0,/^  - interface: ${IFACE}\$/s//&\n${BPF_LINE}/" "$CFG"
   # checksums: el trafico espejeado llega con csum de offload -> no validar
   sed -i "s#^\(\s*checksum-validation:\)\s*yes#\1 no #" "$CFG"
+  # eve.json: con espejo real 'flow' era el 76% del volumen y 'quic' el 6% (15 MB/s en
+  # total = 1,3 TB/dia): llenaron el disco y la base de EveBox. Para cazar CPEs
+  # infectados bastan alert/dns/http/tls/ssh/files; se comentan los tipos ruidosos.
+  python3 - "$CFG" flow quic anomaly ike bittorrent-dht <<'PY'
+import sys, re
+cfg, drop = sys.argv[1], set(sys.argv[2:])
+lines = open(cfg, encoding="utf-8").read().split("\n")
+out, i, n, changed = [], 0, len(lines), []
+in_eve = False
+while i < n:
+    l = lines[i]
+    if re.match(r"^  - eve-log:", l): in_eve = True
+    elif in_eve and re.match(r"^  - \S", l): in_eve = False
+    m = re.match(r"^(\s{8})- ([a-z0-9-]+):?\s*$", l)
+    if in_eve and m and m.group(2) in drop:
+        ind = len(m.group(1))
+        out.append(m.group(1) + "#" + l[ind:] + "   # install-suricata.sh: fuera en modo espejo")
+        changed.append(m.group(2)); i += 1
+        while i < n and (lines[i].strip() == "" or (len(lines[i]) - len(lines[i].lstrip(" ")) > ind and not lines[i].lstrip().startswith("- "))):
+            out.append(re.sub(r"^(\s*)", r"\1#", lines[i]) if lines[i].strip() else lines[i]); i += 1
+        continue
+    out.append(l); i += 1
+open(cfg, "w", encoding="utf-8").write("\n".join(out))
+print("eve-log sin: " + (", ".join(changed) if changed else "(ya estaban fuera)"))
+PY
   ok "Receptor TZSP activo: UDP ${TZSP_PORT} -> ${TZSP_MON} (Suricata lo captura)."
   if [ "$HOME_NET_GIVEN" -eq 0 ]; then
     warn "Con TZSP conviene pasar -n con las redes de tus clientes (ej: -n 172.16.0.0/12,10.0.0.0/8);"
@@ -631,7 +725,9 @@ cat <<EOF
     Escucha    : UDP ${TZSP_PORT} en ${PUB_IP:-<IP>}  ->  ${TZSP_MON} (Suricata la captura)
     Servicio   : tzsp-decap   (journalctl -u tzsp-decap -f  muestra rx/tx cada 60 s)
     Probar     : ./test-tzsp.sh   (manda una trama TZSP sintetica y espera la alerta)
-    Ruido      : reglas stream/app-layer desactivadas; midstream+async-oneside activos; BPF excluye UDP ${TZSP_PORT} en ${IFACE}
+    Ruido      : reglas stream/app-layer fuera; eve.json sin flow/quic/anomaly; BPF excluye TZSP en ${IFACE}
+    Stream     : midstream=$(grep -cE '^  midstream: true' "$CFG") async-oneside=$(grep -cE '^  async-oneside: true' "$CFG") (1 = activo); memcaps segun RAM (${RAM_MB} MB)
+    Vigila     : grep -E 'reassembly_memuse|kernel_drops' /var/log/suricata/stats.log | tail -2   (memuse debe quedar bajo el memcap)
 
     En el MikroTik (todo el trafico de una interfaz):
       /tool sniffer set streaming-enabled=yes streaming-server=${PUB_IP:-<IP>} filter-stream=yes filter-interface=<bridge-o-ether>

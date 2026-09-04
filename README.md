@@ -199,27 +199,38 @@ MikroTik --TZSP UDP/37008--> tzsp-decap.py --trama Ethernet--> veth ids-in -> id
 
 ### Ajustes automaticos en modo espejo
 
-Probado con un MikroTik real espejeando ~32k pps. Con `-t` el instalador aplica
-ademas estos ajustes, que salieron de lo observado en esa prueba:
+Con `-t` el instalador aplica lo que hizo falta al conectar un MikroTik real
+(~32k pps): sin esto el disco se llenaba y la deteccion moria a los pocos minutos.
 
-- **MTU 9000 en el par veth `ids-in`/`ids-mon`.** Alrededor del 1% de las tramas
-  espejeadas superan los 1600 bytes y con el MTU por defecto (1500) se perdian.
-- **Filtro BPF `not udp port 37008` en la interfaz principal.** Sin el, Suricata
-  inspeccionaba tambien el propio flujo TZSP que llega al servidor: doble CPU y
-  alertas `truncated packet` por cada paquete espejeado.
-- **Reglas `stream-events.rules` y `app-layer-events.rules` desactivadas** via
-  `/etc/suricata/disable.conf`, y `stream.midstream: true` +
-  `async-oneside: true`. Con espejo asimetrico (o incompleto) el 95% de las
-  alertas eran ruido del propio motor: `SURICATA STREAM ... invalid ack`,
-  `QUIC error on data`, `Applayer Mismatch`.
-- **Logrotate de Suricata diario, `maxsize 2G`, 7 copias.** Este se aplica
-  siempre, no solo con `-t`: con espejo real `eve.json` crecio 7 GB en un dia.
-  EveBox conserva sus propios datos en SQLite (7 dias / 5 GB) con independencia
-  de lo que se rote en `eve.json`, asi que las alertas siguen visibles en la web.
+- **veth `ids-in`/`ids-mon` con MTU 65535** y `block-size: 131072` en Suricata. El
+  router agrega segmentos (GRO) y manda tramas de hasta ~22 kB; con MTU 1600 o 9000
+  se perdian (`muy_grandes` en el log del receptor) y cada trama perdida es un hueco
+  mas en el reensamblado.
+- **Filtro BPF en la interfaz principal**: `not (udp port 37008 or fragmentos IP)`, para
+  que Suricata no inspeccione el propio flujo TZSP (doble CPU, alertas `truncated`).
+- **Memcaps segun la RAM real** (siempre, no solo con -t): reensamblado TCP 25 %,
+  flow 6 %, stream 6 %, defrag 1.5 %. Con el valor fijo anterior (512 MB) el
+  reensamblado se llenaba a los ~5 min y, como el memcap es global, Suricata dejaba de
+  reensamblar **todo**, tambien el trafico propio: las firmas HTTP dejaban de disparar.
+- **`stream.midstream: true` y `async-oneside: true`** (el espejo llega con perdidas y
+  sesiones ya empezadas). Se insertan bajo `stream:`; en el yaml de Debian vienen
+  comentadas.
+- **Reglas de ruido fuera** via `/etc/suricata/disable.conf`: `stream-events.rules` y
+  `app-layer-events.rules` (el 95 % de las alertas eran `SURICATA STREAM ... invalid
+  ack`, `QUIC error on data`, `Applayer Mismatch`).
+- **eve.json sin `flow`, `quic`, `anomaly`, `ike`, `bittorrent-dht`**: con espejo real
+  `flow` era el 76 % del volumen y `quic` el 6 % (15 MB/s = 1,3 TB/dia). Quedan
+  alert, dns, http, tls, ssh, files y stats, que es lo que sirve para cazar CPEs.
+  Para volver a activar alguno, descomenta su linea en `outputs: eve-log: types:`.
+- **Logrotate instalado y forzado**: cada hora (drop-in del timer), `maxsize 2G`,
+  7 copias. Debian trae rotacion semanal sin tope y en una Debian minima ni siquiera
+  viene el paquete `logrotate`. EveBox guarda sus datos aparte en SQLite (7 dias /
+  5 GB), asi que truncar o rotar eve.json no borra lo que ya se ve en la web.
 
-Cifras de referencia: ~32k pps espejeados, receptor Python sin descartes,
-Suricata con 8 hilos por interfaz y ~2% de `kernel_drops` en una VM de 8 vCPU;
-para mas volumen, mirror por hardware (Opcion C).
+Cifras de referencia: ~32k pps espejeados, receptor Python sin descartes, Suricata con
+8 hilos por interfaz y ~2 % de `kernel_drops` en una VM de 8 vCPU / 16 GB. Para mas
+volumen, mirror por hardware (Opcion C). Vigila `tcp.reassembly_memuse` en
+`stats.log`: si se pega al memcap, falta RAM.
 
 ### 1. Instalar el receptor
 

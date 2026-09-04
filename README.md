@@ -26,9 +26,10 @@ Opciones (se pasan tras `bash -s --`):
 | Opcion | Que hace | Default |
 |---|---|---|
 | `-i IFACE` | interfaz a escuchar | la de la ruta default |
-| `-n CIDR` | `HOME_NET` | red de la interfaz |
+| `-n CIDR[,CIDR]` | `HOME_NET` (varias redes separadas por coma) | red de la interfaz |
 | `-p PUERTO` | puerto de la web | `5636` |
 | `-P CLAVE` | clave del usuario web `admin` | aleatoria (se muestra al final) |
+| `-t` | **receptor TZSP** (UDP 37008) para espejo MikroTik | apagado |
 | `-W` | **sin web**, solo Suricata + logs | web activada |
 
 ```bash
@@ -142,6 +143,7 @@ login, ingestion 1:1 con `eve.json` y alertas visibles.
 
 - `suricata` + `suricata-update` (reglas **ET Open**) desde repos de Debian 13.
 - **EveBox** (web) leyendo `eve.json` a SQLite, con auth y TLS. Ver seccion arriba.
+- Con `-t`: **receptor TZSP** para espejo desde MikroTik. Ver seccion abajo.
 - Modo **IDS pasivo AF_PACKET** sobre la interfaz elegida.
 - `HOME_NET` = red de la interfaz (para que marque bien lo "saliente").
 - **Offloads apagados** en la interfaz de captura (gro/lro/tso/gso/rx-gro-hw) con un
@@ -175,24 +177,98 @@ grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 En Suricata la RAM la mandan los `memcap`, no el disco. Vigila `memcap_drop` en
 `stats.log`: mientras no aparezcan, no hace falta mas RAM.
 
-## De lab a produccion (MikroTik real)
+## Espejo desde MikroTik (TZSP)
 
-En el lab de 1 VM el trafico se genera localmente. Para analizar trafico real de
-la red MikroTik hay que **espejarlo** hacia la interfaz que Suricata escucha:
+Para analizar el trafico real de tu red MikroTik hay que **espejarlo** hacia el
+servidor. El camino sin hardware extra es **TZSP**: el router envuelve cada paquete
+en UDP/37008 y lo manda al servidor. Suricata **no** entiende TZSP crudo (solo
+genera `truncated packet`), asi que el instalador con `-t` monta un receptor:
 
-- **TZSP (software)** — en RouterOS:
-  ```
-  /tool sniffer
-  set filter-stream=yes streaming-enabled=yes streaming-server=<IP_SURICATA> \
-      filter-interface=<wan-o-bridge>
-  /tool sniffer start
-  ```
-  El TZSP (UDP/37008) hay que **desencapsularlo** antes de darselo a Suricata
-  (p. ej. con `tzsp2pcap` hacia una interfaz dummy). Pendiente como modulo aparte
-  si se decide este camino.
-- **Mirror por hardware** — en MikroTik con switch-chip (`/interface ethernet
-  switch mirror`), copia un puerto fisico hacia el NIC de Suricata. Cero carga de
-  CPU en el router; requiere puerto y cable dedicados.
+```
+MikroTik --TZSP UDP/37008--> tzsp-decap.py --trama Ethernet--> veth ids-in -> ids-mon --> Suricata
+```
 
-> Este repo cubre **IDS pasivo + web local**. El envio a Loki/Grafana y el
-> receptor TZSP se agregan como modulos cuando se necesiten.
+- `tzsp-decap.service`: desencapsulador en Python (stdlib), crea el par veth,
+  reinyecta las tramas y loguea `rx/tx` cada 60 s en `journalctl -u tzsp-decap`.
+- Suricata captura `ids-mon` como segunda interfaz af-packet, con
+  `checksum-checks: no` y `stream.checksum-validation: no` (el trafico espejeado
+  llega con checksums de offload rotos; sin esto todo seria `invalid checksum`).
+- Abre `37008/udp` en UFW si esta activo. Si hay firewall externo, abrelo tu.
+
+### 1. Instalar el receptor
+
+Pasa `-t` y en `-n` **las redes de tus clientes** (separadas por coma), para que
+Suricata sepa que es "casa" y marque bien lo saliente:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -n 172.16.0.0/12,10.0.0.0/8
+```
+
+Probar sin MikroTik (manda una trama TZSP sintetica y espera la alerta):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/test-tzsp.sh -o /root/test-tzsp.sh && chmod +x /root/test-tzsp.sh && sudo /root/test-tzsp.sh
+```
+
+### 2. Comandos en el MikroTik
+
+Sustituye `IP_SURICATA` por la IP del servidor (la que imprime el instalador).
+
+**Opcion A: todo el trafico de una interfaz** (`/tool sniffer` en modo streaming).
+Elige la interfaz donde pasa el trafico de clientes (el bridge LAN o el ether WAN):
+
+```routeros
+/tool sniffer set streaming-enabled=yes streaming-server=IP_SURICATA filter-stream=yes filter-interface=bridge
+/tool sniffer start
+# el sniffer NO sobrevive al reinicio: arrancarlo con el scheduler
+/system scheduler add name=sniffer-start start-time=startup on-event="/tool sniffer start"
+# comprobar
+/tool sniffer print
+```
+
+Filtros utiles para no espejar todo:
+
+```routeros
+# solo una red de clientes
+/tool sniffer set filter-ip-address=172.16.10.0/24
+# solo lo que sale hacia internet (reduce a la mitad)
+/tool sniffer set filter-direction=tx
+# solo DNS + HTTP + HTTPS
+/tool sniffer set filter-port=53,80,443
+```
+
+**Opcion B: selectivo por regla de firewall** (`action=sniff-tzsp` en mangle).
+Solo se espeja lo que matchea la regla; ideal para una red o un cliente concreto:
+
+```routeros
+/ip firewall mangle add chain=prerouting src-address=172.16.10.0/24 action=sniff-tzsp     sniff-target=IP_SURICATA sniff-target-port=37008 passthrough=yes comment="espejo a Suricata"
+# la respuesta (trafico de vuelta al cliente)
+/ip firewall mangle add chain=forward dst-address=172.16.10.0/24 action=sniff-tzsp     sniff-target=IP_SURICATA sniff-target-port=37008 passthrough=yes comment="espejo a Suricata (vuelta)"
+```
+
+Verificar en el servidor:
+
+```bash
+journalctl -u tzsp-decap -f          # rx/tx deben subir; ultimo_origen = IP del MikroTik
+tail -f /var/log/suricata/fast.log   # y en la web EveBox
+```
+
+> **Cuidado con el volumen.** TZSP duplica en la red todo lo que espejas y lo
+> encapsula el CPU del router. Empieza con una red pequena o con filtros, mira el
+> CPU del MikroTik (`/system resource monitor`) y `kernel_drops` en `stats.log`.
+> El desencapsulador en Python aguanta bien decenas de Mbps; para cientos de Mbps
+> conviene el espejo por hardware.
+
+**Opcion C: mirror por hardware** (switch-chip, sin CPU del router). Requiere un
+puerto libre en el MikroTik cableado a una NIC dedicada del servidor (en Proxmox,
+un bridge propio para esa NIC, sin IP). Suricata escucha esa NIC directamente
+(`-i ens19`), sin TZSP. La sintaxis depende del chip:
+
+```routeros
+# switch-chip clasico (RB, hEX, CCR con switch)
+/interface ethernet switch set switch1 mirror-source=ether2 mirror-target=ether5
+# CRS3xx / RB5009 (por puerto)
+/interface ethernet switch port set ether2 mirror-ingress=yes mirror-egress=yes     mirror-ingress-target=ether5 mirror-egress-target=ether5
+```
+
+> El envio a Loki/Grafana se agrega como modulo cuando se necesite.

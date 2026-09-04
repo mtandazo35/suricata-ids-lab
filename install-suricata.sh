@@ -11,12 +11,14 @@
 #     curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash
 #     curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -i ens18 -n 10.0.0.0/24
 #
-#   Uso:   sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] [-W] [-h]
+#   Uso:   sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] [-t] [-W] [-h]
 #
 #     -i IFACE     interfaz a escuchar (default: auto-deteccion por ruta default)
-#     -n HOME_NET  red "casa" en CIDR (default: la de la interfaz elegida)
+#     -n HOME_NET  red(es) "casa" en CIDR, separadas por coma (default: la de la interfaz)
 #     -p PUERTO    puerto de la web EveBox (default: 5636)
 #     -P CLAVE     clave del usuario web 'admin' (default: aleatoria, se muestra al final)
+#     -t           receptor TZSP (UDP 37008) para espejo desde MikroTik (/tool sniffer o
+#                  mangle action=sniff-tzsp). Desencapsula y entrega a Suricata por un veth.
 #     -W           sin web (solo Suricata + logs locales)
 #     -h           ayuda
 #
@@ -36,12 +38,13 @@ trap 'rc=$?; printf "%s[x]%s Fallo (exit %s) en la linea %s: %s\n" "$c_r" "$c_0"
 
 usage(){
   cat <<'USAGE'
-Uso: sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] [-W] [-h]
+Uso: sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] [-t] [-W] [-h]
 
   -i IFACE     interfaz a escuchar (default: auto-deteccion por ruta default)
-  -n HOME_NET  red "casa" en CIDR (default: la de la interfaz elegida)
+  -n HOME_NET  red(es) "casa" en CIDR, separadas por coma (default: la de la interfaz)
   -p PUERTO    puerto de la web EveBox (default: 5636)
   -P CLAVE     clave del usuario web 'admin' (default: aleatoria, se muestra al final)
+  -t           receptor TZSP (UDP 37008) para espejo desde MikroTik
   -W           sin web (solo Suricata + logs locales)
   -h           esta ayuda
 
@@ -53,13 +56,14 @@ USAGE
 [ "$(id -u)" -eq 0 ] || die "Ejecuta como root (sudo)."
 
 # ----------------------------------------------------------------------------- args
-IFACE=""; HOME_NET=""; WEB=1; WEB_PORT=5636; WEB_PASS=""
-while getopts "i:n:p:P:Wh" opt; do
+IFACE=""; HOME_NET=""; HOME_NET_GIVEN=0; WEB=1; WEB_PORT=5636; WEB_PASS=""; TZSP=0; TZSP_PORT=37008
+while getopts "i:n:p:P:tWh" opt; do
   case "$opt" in
     i) IFACE="$OPTARG" ;;
-    n) HOME_NET="$OPTARG" ;;
+    n) HOME_NET="$OPTARG"; HOME_NET_GIVEN=1 ;;
     p) WEB_PORT="$OPTARG" ;;
     P) WEB_PASS="$OPTARG" ;;
+    t) TZSP=1 ;;
     W) WEB=0 ;;
     h) usage; exit 0 ;;
     *) usage; exit 1 ;;
@@ -154,6 +158,155 @@ sed -i "s#^\(\s*memcap:\)\s*[0-9].*mb\s*#\1 512mb  #I" "$CFG" 2>/dev/null || tru
 if [ -f /etc/default/suricata ]; then
   sed -i "s#^IFACE=.*#IFACE=${IFACE}#" /etc/default/suricata || true
   sed -i "s#^LISTENMODE=.*#LISTENMODE=af-packet#" /etc/default/suricata || true
+fi
+
+# ============================================================================= TZSP (espejo MikroTik)
+# MikroTik manda el espejo por TZSP (UDP 37008). Suricata no entiende TZSP: si lo
+# escucha directo solo produce "truncated packet". Se instala un desencapsulador
+# (python, stdlib) que saca la trama Ethernet del TZSP y la inyecta en un par veth
+# ids-in -> ids-mon; Suricata captura ids-mon como segunda interfaz af-packet.
+# El trafico espejeado trae checksums de offload rotos: se apaga su validacion.
+TZSP_IN=ids-in; TZSP_MON=ids-mon
+if [ "$TZSP" -eq 1 ]; then
+  info "Configurando receptor TZSP (UDP ${TZSP_PORT}) -> ${TZSP_MON}..."
+  cat > /usr/local/bin/tzsp-decap.py <<'PYD'
+#!/usr/bin/env python3
+"""tzsp-decap: recibe TZSP (UDP) y reinyecta las tramas Ethernet en una interfaz.
+
+Formato TZSP: version(1)=1 | type(1) 0=recibido,1=tx | encap(2) 1=Ethernet |
+tags: 0x00=padding (sin longitud), 0x01=END (sin longitud), otros: len(1)+data |
+payload = trama Ethernet completa.
+"""
+import os, socket, struct, sys, time
+
+PORT = int(os.environ.get("TZSP_PORT", "37008"))
+OUT_IF = os.environ.get("TZSP_OUT_IF", "ids-in")
+
+def decap(d):
+    if len(d) < 5 or d[0] != 1 or d[1] not in (0, 1):
+        return None
+    if struct.unpack("!H", d[2:4])[0] != 1:
+        return None
+    i = 4
+    n = len(d)
+    while i < n:
+        tag = d[i]
+        if tag == 0x01:
+            i += 1
+            break
+        if tag == 0x00:
+            i += 1
+            continue
+        if i + 1 >= n:
+            return None
+        i += 2 + d[i + 1]
+    return d[i:] if i < n else None
+
+def main():
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    rx.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 << 20)
+    rx.bind(("0.0.0.0", PORT))
+    tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+    tx.bind((OUT_IF, 0))
+    print(f"tzsp-decap: escuchando UDP {PORT} -> {OUT_IF}", flush=True)
+    rxn = txn = bad = big = 0
+    last = time.time()
+    while True:
+        d, peer = rx.recvfrom(65535)
+        rxn += 1
+        f = decap(d)
+        if f is None or len(f) < 14:
+            bad += 1
+        else:
+            try:
+                tx.send(f)
+                txn += 1
+            except OSError:
+                big += 1
+        now = time.time()
+        if now - last >= 60:
+            print(f"tzsp-decap: rx={rxn} tx={txn} descartados={bad} muy_grandes={big} ultimo_origen={peer[0]}", flush=True)
+            last = now
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
+PYD
+  chmod 755 /usr/local/bin/tzsp-decap.py
+
+  cat > /etc/systemd/system/tzsp-decap.service <<UNIT
+[Unit]
+Description=Receptor TZSP (MikroTik) -> ${TZSP_MON} para Suricata
+After=network.target
+Before=suricata.service
+
+[Service]
+Environment=TZSP_PORT=${TZSP_PORT}
+Environment=TZSP_OUT_IF=${TZSP_IN}
+# crea el par veth si no existe; sin IPv6 para que no meta ruido propio
+ExecStartPre=/bin/sh -c 'ip link show ${TZSP_MON} >/dev/null 2>&1 || ip link add ${TZSP_IN} type veth peer name ${TZSP_MON}'
+ExecStartPre=/bin/sh -c 'sysctl -qw net.ipv6.conf.${TZSP_IN}.disable_ipv6=1 net.ipv6.conf.${TZSP_MON}.disable_ipv6=1 || true'
+ExecStartPre=/sbin/ip link set ${TZSP_IN} up mtu 1600
+ExecStartPre=/sbin/ip link set ${TZSP_MON} up mtu 1600 promisc on
+ExecStart=/usr/bin/python3 /usr/local/bin/tzsp-decap.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  install -d /etc/systemd/system/suricata.service.d
+  cat > /etc/systemd/system/suricata.service.d/20-tzsp.conf <<UNIT
+# Generado por install-suricata.sh: Suricata captura ${TZSP_MON}, que crea tzsp-decap.
+[Unit]
+Requires=tzsp-decap.service
+After=tzsp-decap.service
+UNIT
+  systemctl daemon-reload
+  systemctl enable tzsp-decap >/dev/null 2>&1 || true
+  systemctl restart tzsp-decap
+  sleep 1
+  ip link show "$TZSP_MON" >/dev/null 2>&1 || { journalctl -u tzsp-decap --no-pager -n 20; die "No se creo ${TZSP_MON}. Revisa: journalctl -u tzsp-decap"; }
+
+  # segunda interfaz af-packet en suricata.yaml (idempotente)
+  if ! grep -qE "^\s*- interface: ${TZSP_MON}\s*$" "$CFG"; then
+    python3 - "$CFG" "$TZSP_MON" <<'PY'
+import sys, re
+cfg, mon = sys.argv[1], sys.argv[2]
+s = open(cfg, encoding="utf-8").read()
+block = f"""  - interface: {mon}
+    # espejo TZSP desde MikroTik (lo crea tzsp-decap.service)
+    cluster-id: 98
+    cluster-type: cluster_flow
+    defrag: yes
+    use-mmap: yes
+    tpacket-v3: yes
+    checksum-checks: no
+"""
+# insertar antes del primer '- interface: default' de la seccion af-packet
+m = re.search(r"^af-packet:\n(.*?)(^  - interface: default\s*$)", s, re.S | re.M)
+if not m:
+    sys.exit("no encontre la seccion af-packet")
+s = s[:m.start(2)] + block + s[m.start(2):]
+open(cfg, "w", encoding="utf-8").write(s)
+PY
+  fi
+  # checksums: el trafico espejeado llega con csum de offload -> no validar
+  sed -i "s#^\(\s*checksum-validation:\)\s*yes#\1 no #" "$CFG"
+  ok "Receptor TZSP activo: UDP ${TZSP_PORT} -> ${TZSP_MON} (Suricata lo captura)."
+  if [ "$HOME_NET_GIVEN" -eq 0 ]; then
+    warn "Con TZSP conviene pasar -n con las redes de tus clientes (ej: -n 172.16.0.0/12,10.0.0.0/8);"
+    warn "ahora HOME_NET=${HOME_NET} y el trafico espejeado de otras redes no contara como 'saliente'."
+  fi
+else
+  # si antes estuvo activo y ahora no se pide, dejarlo apagado (sin borrar la interfaz del yaml
+  # para no romper: quitala a mano si quieres)
+  if systemctl is-enabled tzsp-decap >/dev/null 2>&1; then
+    warn "tzsp-decap estaba instalado; se deja como esta (re-ejecuta con -t para gestionarlo)."
+  fi
 fi
 
 # ----------------------------------------------------------------------------- validar
@@ -317,9 +470,15 @@ DEF
       ufw allow "${WEB_PORT}/tcp" comment 'EveBox web' >/dev/null && ok "UFW: abierto ${WEB_PORT}/tcp para la web."
     fi
   fi
+fi
 
-  PUB_IP="$(ip -o -4 addr show dev "$IFACE" scope global | awk '{split($4,a,"/"); print a[1]; exit}')"
-  WEB_URL="https://${PUB_IP:-<IP>}:${WEB_PORT}"
+PUB_IP="$(ip -o -4 addr show dev "$IFACE" scope global | awk '{split($4,a,"/"); print a[1]; exit}')"
+WEB_URL="https://${PUB_IP:-<IP>}:${WEB_PORT}"
+
+if [ "$TZSP" -eq 1 ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  if ! ufw status | grep -qE "^${TZSP_PORT}/udp\s+ALLOW"; then
+    ufw allow "${TZSP_PORT}/udp" comment 'TZSP MikroTik' >/dev/null && ok "UFW: abierto ${TZSP_PORT}/udp para TZSP."
+  fi
 fi
 
 # ----------------------------------------------------------------------------- resumen
@@ -347,6 +506,22 @@ cat <<EOF
     Config     : ${EVEBOX_CFG}    Datos: ${EVEBOX_DATA} (SQLite, 7 dias / 5 GB)
     Cambiar clave: re-ejecuta este instalador con -P 'NuevaClave'  (ver README)
     Si hay firewall externo (nube/Proxmox), abre ${WEB_PORT}/tcp.
+EOF
+fi
+if [ "$TZSP" -eq 1 ]; then
+cat <<EOF
+
+  ${c_g}Receptor TZSP (espejo MikroTik)${c_0}
+    Escucha    : UDP ${TZSP_PORT} en ${PUB_IP:-<IP>}  ->  ${TZSP_MON} (Suricata la captura)
+    Servicio   : tzsp-decap   (journalctl -u tzsp-decap -f  muestra rx/tx cada 60 s)
+    Probar     : ./test-tzsp.sh   (manda una trama TZSP sintetica y espera la alerta)
+
+    En el MikroTik (todo el trafico de una interfaz):
+      /tool sniffer set streaming-enabled=yes streaming-server=${PUB_IP:-<IP>} filter-stream=yes filter-interface=<bridge-o-ether>
+      /tool sniffer start
+      /system scheduler add name=sniffer-start start-time=startup on-event="/tool sniffer start"
+    O selectivo por regla (solo una red de clientes):
+      /ip firewall mangle add chain=prerouting src-address=<red-clientes> action=sniff-tzsp sniff-target=${PUB_IP:-<IP>} sniff-target-port=${TZSP_PORT} passthrough=yes
 EOF
 fi
 cat <<EOF

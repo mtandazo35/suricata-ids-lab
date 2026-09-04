@@ -31,6 +31,8 @@ info(){ printf '%s[*]%s %s\n' "$c_b" "$c_0" "$*"; }
 ok(){   printf '%s[+]%s %s\n' "$c_g" "$c_0" "$*"; }
 warn(){ printf '%s[!]%s %s\n' "$c_y" "$c_0" "$*"; }
 die(){  printf '%s[x]%s %s\n' "$c_r" "$c_0" "$*" >&2; exit 1; }
+# Nunca morir en silencio: con set -e cualquier fallo no controlado dice donde fue.
+trap 'rc=$?; printf "%s[x]%s Fallo (exit %s) en la linea %s: %s\n" "$c_r" "$c_0" "$rc" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 usage(){
   cat <<'USAGE'
@@ -201,7 +203,10 @@ if [ "$WEB" -eq 1 ]; then
       echo "${DEB_SHA}  ${DEB_LOCAL}.part" | sha256sum -c --quiet - || { rm -f "${DEB_LOCAL}.part"; die "SHA256 del .deb no coincide. Abortando."; }
       mv -f "${DEB_LOCAL}.part" "$DEB_LOCAL"
     fi
-    dpkg -i "$DEB_LOCAL" >/dev/null || apt-get install -f -y -qq >/dev/null
+    # el postinst del .deb corre con 'set -x': su traza va al log, no a pantalla
+    if ! dpkg -i "$DEB_LOCAL" >/root/evebox-install.log 2>&1; then
+      apt-get install -f -y -qq >>/root/evebox-install.log 2>&1 || { cat /root/evebox-install.log; die "dpkg -i fallo (ver /root/evebox-install.log)"; }
+    fi
   fi
   ok "EveBox instalado: $(evebox version 2>/dev/null | head -1)"
 
@@ -258,7 +263,8 @@ DEF
   if [ "$HAS_ADMIN" -eq 1 ] && [ -z "$WEB_PASS" ]; then
     WEB_NOTE="El usuario '${WEB_USER}' ya existia: clave sin cambios (cambiala con -P o con 'evebox config users passwd')."
   else
-    [ -n "$WEB_PASS" ] || WEB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+    # (sin 'tr | head': bajo pipefail tr muere por SIGPIPE y abortaba el script)
+    [ -n "$WEB_PASS" ] || WEB_PASS="$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(16)))')"
     if [ "$HAS_ADMIN" -eq 1 ]; then $EVB config users rm "$WEB_USER" >/dev/null 2>&1 || true; fi
     if $EVB config users add --username "$WEB_USER" --password "$WEB_PASS" >/dev/null 2>&1; then
       WEB_PASS_SHOWN="$WEB_PASS"

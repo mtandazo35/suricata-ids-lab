@@ -345,7 +345,7 @@ cat <<EOF
     Clave      : ${WEB_PASS_SHOWN:-<sin cambios>}
     ${WEB_NOTE}
     Config     : ${EVEBOX_CFG}    Datos: ${EVEBOX_DATA} (SQLite, 7 dias / 5 GB)
-    Cambiar clave: evebox --data-directory ${EVEBOX_DATA} --config-directory ${EVEBOX_DATA} config users passwd ${WEB_USER}
+    Cambiar clave: re-ejecuta este instalador con -P 'NuevaClave'  (ver README)
     Si hay firewall externo (nube/Proxmox), abre ${WEB_PORT}/tcp.
 EOF
 fi

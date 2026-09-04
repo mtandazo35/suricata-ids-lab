@@ -151,7 +151,9 @@ if [ "$TZSP" -eq 1 ]; then
   for line in '# install-suricata.sh: con espejo TZSP (asimetrico) estas reglas solo son ruido' \
               'group:stream-events.rules' \
               'group:app-layer-events.rules' \
-              're:msg:"SURICATA\s'; do
+              're:msg:"SURICATA\s' \
+              '# STUN (WebRTC/videollamadas): en un ISP era el 68% de las alertas, solo informativas' \
+              '2033078' '2016149' '2016150' '2033077'; do
     grep -qxF -- "$line" "$DISABLE_CONF" || echo "$line" >> "$DISABLE_CONF"
   done
   ok "Reglas de ruido stream/app-layer desactivadas (espejo TZSP)."

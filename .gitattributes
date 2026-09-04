@@ -1,0 +1,3 @@
+# Repo con scripts que corren en Linux: forzar LF aunque se edite en Windows.
+* text=auto eol=lf
+*.sh text eol=lf

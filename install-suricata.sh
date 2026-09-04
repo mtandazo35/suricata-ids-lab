@@ -118,7 +118,7 @@ ok "HOME_NET: $HOME_NET"
 export DEBIAN_FRONTEND=noninteractive
 info "Instalando suricata y utilidades..."
 apt-get update -qq
-apt-get install -y -qq suricata suricata-update jq python3 curl ca-certificates >/dev/null
+apt-get install -y -qq suricata suricata-update jq python3 curl ca-certificates ethtool >/dev/null
 ok "Suricata instalado: $(suricata -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 
 # comprobar capacidades compiladas
@@ -164,6 +164,23 @@ else
   cat /tmp/suricata-test.log
   die "La validacion fallo. Revisa /tmp/suricata-test.log y ${CFG}.bak-${STAMP}"
 fi
+
+# ----------------------------------------------------------------------------- offloads NIC
+# Con GRO/LRO (y rx-gro-hw en virtio) el kernel junta segmentos en tramas >1514
+# bytes y Suricata las descarta como "truncated packet". Se apagan en la interfaz
+# de captura ahora y en cada arranque del servicio (drop-in con ExecStartPre).
+ETHTOOL="$(command -v ethtool || echo /usr/sbin/ethtool)"
+OFFLOADS="gro off lro off tso off gso off rx-gro-hw off"
+# shellcheck disable=SC2086
+"$ETHTOOL" -K "$IFACE" $OFFLOADS >/dev/null 2>&1 || true
+install -d /etc/systemd/system/suricata.service.d
+cat > /etc/systemd/system/suricata.service.d/10-offload.conf <<UNIT
+# Generado por install-suricata.sh: sin offloads en la interfaz de captura.
+[Service]
+ExecStartPre=-${ETHTOOL} -K ${IFACE} ${OFFLOADS}
+UNIT
+systemctl daemon-reload
+ok "Offloads apagados en ${IFACE} (gro/lro/tso/gso/rx-gro-hw)."
 
 # ----------------------------------------------------------------------------- servicio
 info "Habilitando servicio..."

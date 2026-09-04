@@ -78,6 +78,9 @@ journalctl -u evebox -f
 
 Config: `/etc/evebox/evebox.yaml` (backup con fecha en cada ejecucion).
 
+Probado end-to-end el 2026-09-03 en una VM Debian 13 (virtio, Proxmox): web con
+login, ingestion 1:1 con `eve.json` y alertas visibles.
+
 ## Montaje del lab
 
 1. En Proxmox `10.0.0.2` crea una VM **Debian 13** (2 vCPU / 4–8 GB RAM basta para
@@ -99,9 +102,14 @@ Config: `/etc/evebox/evebox.yaml` (backup con fecha en cada ejecucion).
 3. Confirma que detecta:
 
    ```bash
-   sudo ./test-alerts.sh            # dispara firma ET + escaneo nmap + DNS test
+   sudo ./test-alerts.sh            # DNS .top + User-Agent Wget/3.0 + nmap al gateway
    tail -f /var/log/suricata/fast.log
    ```
+
+   Las firmas de prueba son `ET DNS Query to a *.top domain` y `ET ADWARE_PUP Fake
+   Wget User-Agent`; ambas vienen en ET Open. (El clasico testmynids.org ya no
+   resuelve.) El trafico debe **salir por la interfaz** escuchada: lo que va por
+   `lo` nunca lo ve el IDS.
 
 ## Que instala
 
@@ -109,6 +117,9 @@ Config: `/etc/evebox/evebox.yaml` (backup con fecha en cada ejecucion).
 - **EveBox** (web) leyendo `eve.json` a SQLite, con auth y TLS. Ver seccion arriba.
 - Modo **IDS pasivo AF_PACKET** sobre la interfaz elegida.
 - `HOME_NET` = red de la interfaz (para que marque bien lo "saliente").
+- **Offloads apagados** en la interfaz de captura (gro/lro/tso/gso/rx-gro-hw) con un
+  drop-in de systemd: con ellos activos el kernel entrega tramas >1514 bytes y
+  Suricata las descarta como `truncated packet` (visto en virtio/Proxmox).
 - `memcap` conservador (512mb) — subir si aparecen `kernel_drops`.
 - Servicio systemd habilitado. Backup de `suricata.yaml` con fecha.
 

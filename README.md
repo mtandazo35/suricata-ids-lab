@@ -197,6 +197,30 @@ MikroTik --TZSP UDP/37008--> tzsp-decap.py --trama Ethernet--> veth ids-in -> id
   llega con checksums de offload rotos; sin esto todo seria `invalid checksum`).
 - Abre `37008/udp` en UFW si esta activo. Si hay firewall externo, abrelo tu.
 
+### Ajustes automaticos en modo espejo
+
+Probado con un MikroTik real espejeando ~32k pps. Con `-t` el instalador aplica
+ademas estos ajustes, que salieron de lo observado en esa prueba:
+
+- **MTU 9000 en el par veth `ids-in`/`ids-mon`.** Alrededor del 1% de las tramas
+  espejeadas superan los 1600 bytes y con el MTU por defecto (1500) se perdian.
+- **Filtro BPF `not udp port 37008` en la interfaz principal.** Sin el, Suricata
+  inspeccionaba tambien el propio flujo TZSP que llega al servidor: doble CPU y
+  alertas `truncated packet` por cada paquete espejeado.
+- **Reglas `stream-events.rules` y `app-layer-events.rules` desactivadas** via
+  `/etc/suricata/disable.conf`, y `stream.midstream: true` +
+  `async-oneside: true`. Con espejo asimetrico (o incompleto) el 95% de las
+  alertas eran ruido del propio motor: `SURICATA STREAM ... invalid ack`,
+  `QUIC error on data`, `Applayer Mismatch`.
+- **Logrotate de Suricata diario, `maxsize 2G`, 7 copias.** Este se aplica
+  siempre, no solo con `-t`: con espejo real `eve.json` crecio 7 GB en un dia.
+  EveBox conserva sus propios datos en SQLite (7 dias / 5 GB) con independencia
+  de lo que se rote en `eve.json`, asi que las alertas siguen visibles en la web.
+
+Cifras de referencia: ~32k pps espejeados, receptor Python sin descartes,
+Suricata con 8 hilos por interfaz y ~2% de `kernel_drops` en una VM de 8 vCPU;
+para mas volumen, mirror por hardware (Opcion C).
+
 ### 1. Instalar el receptor
 
 Pasa `-t` y en `-n` **las redes de tus clientes** (separadas por coma), para que
@@ -261,11 +285,24 @@ journalctl -u tzsp-decap -f          # rx/tx deben subir; ultimo_origen = IP del
 tail -f /var/log/suricata/fast.log   # y en la web EveBox
 ```
 
+Como leer el log del receptor (una linea cada 60 s):
+
+| Campo | Significado |
+|---|---|
+| `rx` | paquetes TZSP recibidos del MikroTik |
+| `tx` | tramas Ethernet entregadas a Suricata por el veth |
+| `muy_grandes` | tramas mayores que el MTU del veth; deben ser 0 con MTU 9000 |
+| `ultimo_origen` | IP del MikroTik que esta espejeando |
+
+`rx` y `tx` deben subir juntos; si `rx` sube y `tx` no, el veth esta caido o
+Suricata no escucha `ids-mon`. Si `rx` no se mueve, el problema esta en el
+router o en el firewall (UDP 37008).
+
 > **Cuidado con el volumen.** TZSP duplica en la red todo lo que espejas y lo
 > encapsula el CPU del router. Empieza con una red pequena o con filtros, mira el
 > CPU del MikroTik (`/system resource monitor`) y `kernel_drops` en `stats.log`.
-> El desencapsulador en Python aguanta bien decenas de Mbps; para cientos de Mbps
-> conviene el espejo por hardware.
+> El desencapsulador en Python aguanto ~32k pps (~100-150 Mbps) sin descartes en la
+> prueba real; para varios cientos de Mbps conviene el espejo por hardware.
 
 **Opcion C: mirror por hardware** (switch-chip, sin CPU del router). Requiere un
 puerto libre en el MikroTik cableado a una NIC dedicada del servidor (en Proxmox,

@@ -141,6 +141,18 @@ fi
 # ----------------------------------------------------------------------------- reglas
 info "Descargando reglas ET Open..."
 suricata-update update-sources >/dev/null 2>&1 || true
+if [ "$TZSP" -eq 1 ]; then
+  # con espejo TZSP (asimetrico) el 95% de las alertas eran STREAM invalid ack/out of window,
+  # QUIC error, Applayer Mismatch: puro ruido. suricata-update lee este archivo por defecto.
+  DISABLE_CONF=/etc/suricata/disable.conf
+  touch "$DISABLE_CONF"
+  for line in '# install-suricata.sh: con espejo TZSP (asimetrico) estas reglas solo son ruido' \
+              'group:stream-events.rules' \
+              'group:app-layer-events.rules'; do
+    grep -qxF -- "$line" "$DISABLE_CONF" || echo "$line" >> "$DISABLE_CONF"
+  done
+  ok "Reglas de ruido stream/app-layer desactivadas (espejo TZSP)."
+fi
 suricata-update --no-test >/dev/null 2>&1 || suricata-update --no-test || warn "suricata-update reporto avisos (normal la 1a vez)."
 RULES_COUNT="$(grep -c '^alert' /var/lib/suricata/rules/suricata.rules 2>/dev/null || true)"; RULES_COUNT="${RULES_COUNT:-?}"
 ok "Reglas cargadas: ${RULES_COUNT}"
@@ -154,6 +166,11 @@ info "Backup de config: ${CFG}.bak-${STAMP}"
 # HOME_NET
 sed -i "s#^\(\s*HOME_NET:\).*#\1 \"[${HOME_NET}]\"#" "$CFG"
 
+# stream: el espejo puede llegar asimetrico o con sesiones ya empezadas
+if [ "$TZSP" -eq 1 ]; then
+  sed -i "s/^\(\s*midstream:\)\s*false/\1 true/; s/^\(\s*async-oneside:\)\s*false/\1 true/" "$CFG"
+fi
+
 # interfaz af-packet (primer bloque 'interface: ...')
 sed -i "0,/^\(\s*\)- interface:.*/s//\1- interface: ${IFACE}/" "$CFG"
 
@@ -164,6 +181,17 @@ sed -i "s#^\(\s*memcap:\)\s*[0-9].*mb\s*#\1 512mb  #I" "$CFG" 2>/dev/null || tru
 if [ -f /etc/default/suricata ]; then
   sed -i "s#^IFACE=.*#IFACE=${IFACE}#" /etc/default/suricata || true
   sed -i "s#^LISTENMODE=.*#LISTENMODE=af-packet#" /etc/default/suricata || true
+fi
+
+# ----------------------------------------------------------------------------- logrotate
+# Debian trae rotate 14 + copytruncate sin frecuencia (semanal) ni maxsize: con espejo
+# real eve.json crecia ~7 GB/dia. Se fuerza diario, tope 2G y 7 copias (idempotente).
+LOGROTATE_CFG=/etc/logrotate.d/suricata
+if [ -f "$LOGROTATE_CFG" ]; then
+  compgen -G "${LOGROTATE_CFG}.bak-*" >/dev/null || cp -a "$LOGROTATE_CFG" "${LOGROTATE_CFG}.bak-${STAMP}"
+  grep -qE '^\s*daily' "$LOGROTATE_CFG" || sed -i '0,/{/s//{\n\tdaily\n\tmaxsize 2G/' "$LOGROTATE_CFG"
+  sed -i 's/^\(\s*rotate\) 14/\1 7/' "$LOGROTATE_CFG"
+  ok "logrotate: diario, maxsize 2G, 7 copias (eve.json crece rapido con espejo)."
 fi
 
 # ============================================================================= TZSP (espejo MikroTik)
@@ -258,8 +286,10 @@ ExecStartPre=/bin/sh -c 'ip link show ${TZSP_MON} >/dev/null 2>&1 || ip link add
 ExecStartPre=/bin/sh -c 'sysctl -qw net.ipv6.conf.${TZSP_IN}.disable_ipv6=1 net.ipv6.conf.${TZSP_MON}.disable_ipv6=1 net.ipv4.conf.${TZSP_MON}.rp_filter=1 net.ipv4.conf.${TZSP_MON}.forwarding=0 net.ipv4.conf.${TZSP_MON}.arp_ignore=8 || true'
 # el SO_RCVBUF de 16 MB del receptor lo topa rmem_max
 ExecStartPre=-/usr/sbin/sysctl -qw net.core.rmem_max=16777216
-ExecStartPre=/sbin/ip link set ${TZSP_IN} up mtu 1600
-ExecStartPre=/sbin/ip link set ${TZSP_MON} up mtu 1600 promisc on
+# mtu 9000: ~1% de las tramas espejeadas superan 1600 B (GRO/jumbo en el router) y se
+# perdian con EMSGSIZE; ademas Suricata dimensiona el snaplen por el MTU de la interfaz
+ExecStartPre=/sbin/ip link set ${TZSP_IN} up mtu 9000
+ExecStartPre=/sbin/ip link set ${TZSP_MON} up mtu 9000 promisc on
 ExecStart=/usr/bin/python3 /usr/local/bin/tzsp-decap.py
 Restart=always
 RestartSec=2
@@ -302,6 +332,10 @@ if not m:
 s = s[:m.start(2)] + block + s[m.start(2):]
 open(cfg, "w", encoding="utf-8").write(s)
 PY
+  fi
+  # que Suricata no inspeccione en ${IFACE} el propio flujo TZSP (doble CPU + "truncated")
+  if ! grep -qE "^\s*bpf-filter: \"not udp port ${TZSP_PORT}\"" "$CFG"; then
+    sed -i "0,/^  - interface: ${IFACE}\$/s//&\n    bpf-filter: \"not udp port ${TZSP_PORT}\"/" "$CFG"
   fi
   # checksums: el trafico espejeado llega con csum de offload -> no validar
   sed -i "s#^\(\s*checksum-validation:\)\s*yes#\1 no #" "$CFG"
@@ -597,6 +631,7 @@ cat <<EOF
     Escucha    : UDP ${TZSP_PORT} en ${PUB_IP:-<IP>}  ->  ${TZSP_MON} (Suricata la captura)
     Servicio   : tzsp-decap   (journalctl -u tzsp-decap -f  muestra rx/tx cada 60 s)
     Probar     : ./test-tzsp.sh   (manda una trama TZSP sintetica y espera la alerta)
+    Ruido      : reglas stream/app-layer desactivadas; midstream+async-oneside activos; BPF excluye UDP ${TZSP_PORT} en ${IFACE}
 
     En el MikroTik (todo el trafico de una interfaz):
       /tool sniffer set streaming-enabled=yes streaming-server=${PUB_IP:-<IP>} filter-stream=yes filter-interface=<bridge-o-ether>

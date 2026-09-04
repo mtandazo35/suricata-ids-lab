@@ -70,13 +70,23 @@ sleep 5
 
 AFTER="$(wc -l < "$FAST" 2>/dev/null || echo 0)"
 NEW=$(( AFTER - BEFORE ))
+# Capturar la ventana UNA sola vez: con trafico real fast.log crece mientras se lee
+# y dos 'tail' seguidos devuelven lineas distintas (el conteo se descuadra).
+NEWLINES=""
+[ "$NEW" -gt 0 ] && NEWLINES="$(tail -n "$NEW" "$FAST")"
 echo
 if [ "$NEW" -gt 0 ]; then
   ok "¡${NEW} alerta(s) nueva(s)! Suricata esta detectando. Ultimas:"
   echo "---------------------------------------------------------------"
-  tail -n "$NEW" "$FAST" | cut -c1-160
+  # Mostrar solo las firmas de prueba (con miles de alertas de fondo no se puede volcar todo).
+  TESTLINES="$(printf '%s\n' "$NEWLINES" | grep -E '2023883|2007961|2013178' || true)"
+  HITS=0
+  [ -n "$TESTLINES" ] && HITS="$(printf '%s\n' "$TESTLINES" | wc -l)"
+  OTHERS=$(( NEW - HITS ))
+  # tope: 19 lineas de prueba + 1 de resumen = 20 como maximo
+  [ "$HITS" -gt 0 ] && printf '%s\n' "$TESTLINES" | head -n 19 | cut -c1-160
+  [ "$OTHERS" -gt 0 ] && echo "... y ${OTHERS} alertas mas de fondo (no mostradas)"
   echo "---------------------------------------------------------------"
-  HITS=$(tail -n "$NEW" "$FAST" | grep -cE '2023883|2007961|2013178' || true)
   if [ "${HITS:-0}" -gt 0 ]; then
     ok "de ellas ${HITS} son las firmas de prueba (sid 2023883 / 2007961 / 2013178)"
   else

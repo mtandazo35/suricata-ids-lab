@@ -146,9 +146,12 @@ if [ "$TZSP" -eq 1 ]; then
   # QUIC error, Applayer Mismatch: puro ruido. suricata-update lee este archivo por defecto.
   DISABLE_CONF=/etc/suricata/disable.conf
   touch "$DISABLE_CONF"
+  # Las reglas de diagnostico interno ("SURICATA ...") viven en 22 archivos *-events.rules
+  # (stream, decoder, quic, tls, http, http2...). Se desactivan todas por su msg.
   for line in '# install-suricata.sh: con espejo TZSP (asimetrico) estas reglas solo son ruido' \
               'group:stream-events.rules' \
-              'group:app-layer-events.rules'; do
+              'group:app-layer-events.rules' \
+              're:msg:"SURICATA\s'; do
     grep -qxF -- "$line" "$DISABLE_CONF" || echo "$line" >> "$DISABLE_CONF"
   done
   ok "Reglas de ruido stream/app-layer desactivadas (espejo TZSP)."
@@ -170,6 +173,10 @@ sed -i "s#^\(\s*HOME_NET:\).*#\1 \"[${HOME_NET}]\"#" "$CFG"
 
 # interfaz af-packet (primer bloque 'interface: ...')
 sed -i "0,/^\(\s*\)- interface:.*/s//\1- interface: ${IFACE}/" "$CFG"
+# use-mmap + tpacket-v3 en la interfaz principal (Suricata avisa si falta; solo vienen comentados)
+if ! awk -v m="$IFACE" '$0 ~ "^  - interface: "m"$"{f=1;next} f&&/^  - interface:/{exit} f&&/^    tpacket-v3: yes/{ok=1} END{exit !ok}' "$CFG"; then
+  sed -i "/^  - interface: ${IFACE}\$/a\    use-mmap: yes\n    tpacket-v3: yes" "$CFG"
+fi
 
 # memcaps segun la RAM real y stream para espejo. Con un valor fijo (512mb) el
 # reensamblado TCP se llenaba a los ~5 min con espejo real y, como el memcap es
@@ -205,13 +212,24 @@ for l in lines:
     out.append(l)
 s = "\n".join(out)
 if tzsp:
-    for k in ("midstream", "async-oneside"):
+    # midstream/async-oneside: espejo con perdidas y sesiones ya empezadas.
+    # bypass: junto con tls encryption-handling=bypass, deja de reensamblar los flujos
+    # cifrados tras el handshake (la mayoria del trafico): sin esto el reensamblado
+    # crecia ~100 MB/min sin meseta con espejo real.
+    for k in ("midstream", "async-oneside", "bypass"):
         if not re.search(rf"^  {k}:\s*true\s*$", s, re.M):
             s = re.sub(rf"^  {k}:.*\n", "", s, flags=re.M)          # quita valor previo
             s = re.sub(r"^stream:\s*\n", f"stream:\n  {k}: true\n", s, count=1, flags=re.M)
 open(cfg, "w", encoding="utf-8").write(s)
-print(" ".join(f"{k[0]}{'.'+k[1] if k[1] else ''}={v}mb" for k, v in want.items()))
 PY
+if [ "$TZSP" -eq 1 ]; then
+  # TLS: no seguir inspeccionando tras el handshake (bypass del flujo)
+  sed -i 's/^\(\s*\)#encryption-handling: default\s*$/\1encryption-handling: bypass/' "$CFG"
+  # flujos TCP establecidos: 600 -> 300 s (el espejo deja flujos huerfanos que nunca cierran)
+  sed -i '/^flow-timeouts:/,/^[a-z]/{/^  tcp:/,/^  [a-z]/{s/^\(\s*established:\)\s*600\s*$/\1 300/}}' "$CFG"
+  # profundidad de reensamblado por flujo: 1mb -> 512kb (acota memoria por flujo)
+  sed -i 's/^\(\s*depth:\)\s*1mb\(.*\)$/\1 512kb\2/' "$CFG"
+fi
 ok "Memcaps (RAM ${RAM_MB} MB): $(python3 - "$CFG" <<'PY'
 import re,sys
 s=open(sys.argv[1],encoding="utf-8").read()
@@ -412,10 +430,11 @@ PY
   sed -i "0,/^  - interface: ${IFACE}\$/s//&\n${BPF_LINE}/" "$CFG"
   # checksums: el trafico espejeado llega con csum de offload -> no validar
   sed -i "s#^\(\s*checksum-validation:\)\s*yes#\1 no #" "$CFG"
-  # eve.json: con espejo real 'flow' era el 76% del volumen y 'quic' el 6% (15 MB/s en
-  # total = 1,3 TB/dia): llenaron el disco y la base de EveBox. Para cazar CPEs
-  # infectados bastan alert/dns/http/tls/ssh/files; se comentan los tipos ruidosos.
-  python3 - "$CFG" flow quic anomaly ike bittorrent-dht <<'PY'
+  # eve.json: con espejo real 'flow' era el 76% del volumen, 'dns' el 15% y 'quic' el 6%
+  # (15 MB/s = 1,3 TB/dia): llenaron el disco y EveBox (SQLite) solo ingiere ~600 ev/s.
+  # eve.json queda para EveBox con alert/http/tls/ssh/files/stats; el DNS (solo
+  # consultas) va aparte a dns.json, que rota con el mismo logrotate.
+  python3 - "$CFG" flow dns quic anomaly ike bittorrent-dht <<'PY'
 import sys, re
 cfg, drop = sys.argv[1], set(sys.argv[2:])
 lines = open(cfg, encoding="utf-8").read().split("\n")
@@ -437,6 +456,30 @@ while i < n:
 open(cfg, "w", encoding="utf-8").write("\n".join(out))
 print("eve-log sin: " + (", ".join(changed) if changed else "(ya estaban fuera)"))
 PY
+  # segunda salida EVE solo con consultas DNS (dns.json), antes de '- http-log:'
+  if ! grep -qE '^\s*filename: dns\.json' "$CFG"; then
+    python3 - "$CFG" <<'PY'
+import sys, re
+cfg = sys.argv[1]
+s = open(cfg, encoding="utf-8").read()
+block = """  - eve-log:
+      # install-suricata.sh: DNS aparte (solo consultas) para no ahogar EveBox
+      enabled: yes
+      filetype: regular
+      filename: dns.json
+      types:
+        - dns:
+            requests: yes
+            responses: no
+"""
+m = re.search(r"^  - http-log:", s, re.M)
+if not m:
+    sys.exit("no encontre '- http-log:' en outputs")
+s = s[:m.start()] + block + s[m.start():]
+open(cfg, "w", encoding="utf-8").write(s)
+PY
+  fi
+  ok "eve.json solo alert/http/tls/ssh/files/stats (para EveBox); DNS en dns.json (solo consultas)."
   ok "Receptor TZSP activo: UDP ${TZSP_PORT} -> ${TZSP_MON} (Suricata lo captura)."
   if [ "$HOME_NET_GIVEN" -eq 0 ]; then
     warn "Con TZSP conviene pasar -n con las redes de tus clientes (ej: -n 172.16.0.0/12,10.0.0.0/8);"
@@ -729,8 +772,8 @@ cat <<EOF
     Escucha    : UDP ${TZSP_PORT} en ${PUB_IP:-<IP>}  ->  ${TZSP_MON} (Suricata la captura)
     Servicio   : tzsp-decap   (journalctl -u tzsp-decap -f  muestra rx/tx cada 60 s)
     Probar     : ./test-tzsp.sh   (manda una trama TZSP sintetica y espera la alerta)
-    Ruido      : reglas stream/app-layer fuera; eve.json sin flow/quic/anomaly; BPF excluye TZSP en ${IFACE}
-    Stream     : midstream=$(grep -cE '^  midstream: true' "$CFG") async-oneside=$(grep -cE '^  async-oneside: true' "$CFG") (1 = activo); memcaps segun RAM (${RAM_MB} MB)
+    Ruido      : reglas "SURICATA *" fuera; eve.json sin flow/dns/quic/anomaly (DNS en dns.json); BPF excluye TZSP en ${IFACE}
+    Stream     : midstream=$(grep -cE '^  midstream: true' "$CFG") async-oneside=$(grep -cE '^  async-oneside: true' "$CFG") bypass=$(grep -cE '^  bypass: true' "$CFG") tls-bypass=$(grep -cE '^\s*encryption-handling: bypass' "$CFG") (1 = activo); memcaps segun RAM (${RAM_MB} MB)
     Vigila     : grep -E 'reassembly_memuse|kernel_drops' /var/log/suricata/stats.log | tail -2   (memuse debe quedar bajo el memcap)
 
     En el MikroTik (todo el trafico de una interfaz):

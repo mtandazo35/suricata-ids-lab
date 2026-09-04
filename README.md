@@ -215,13 +215,19 @@ Con `-t` el instalador aplica lo que hizo falta al conectar un MikroTik real
 - **`stream.midstream: true` y `async-oneside: true`** (el espejo llega con perdidas y
   sesiones ya empezadas). Se insertan bajo `stream:`; en el yaml de Debian vienen
   comentadas.
-- **Reglas de ruido fuera** via `/etc/suricata/disable.conf`: `stream-events.rules` y
-  `app-layer-events.rules` (el 95 % de las alertas eran `SURICATA STREAM ... invalid
-  ack`, `QUIC error on data`, `Applayer Mismatch`).
-- **eve.json sin `flow`, `quic`, `anomaly`, `ike`, `bittorrent-dht`**: con espejo real
-  `flow` era el 76 % del volumen y `quic` el 6 % (15 MB/s = 1,3 TB/dia). Quedan
-  alert, dns, http, tls, ssh, files y stats, que es lo que sirve para cazar CPEs.
-  Para volver a activar alguno, descomenta su linea en `outputs: eve-log: types:`.
+- **Reglas de diagnostico interno fuera** via `/etc/suricata/disable.conf`: todas las
+  `SURICATA *` (stream, decoder, quic, tls, http...; viven en 22 archivos
+  `*-events.rules`). Con espejo asimetrico eran el 95 % de las alertas
+  (`STREAM invalid ack`, `QUIC error on data`, `TLS handshake invalid length`).
+- **Bypass de flujos cifrados**: `stream.bypass: true` + `tls.encryption-handling:
+  bypass`, TCP establecido 600 -> 300 s y `reassembly.depth` 1 MB -> 512 kB. Sin esto
+  el reensamblado crecia ~100 MB/min sin meseta reteniendo segmentos de flujos que
+  nunca se iban a inspeccionar.
+- **eve.json solo con `alert`, `http`, `tls`, `ssh`, `files` y `stats`**, que es lo que
+  EveBox necesita, y el **DNS aparte en `dns.json`** (solo consultas). Con espejo real
+  `flow` era el 76 % del volumen y `dns` el 15 % (15 MB/s = 1,3 TB/dia); EveBox
+  (SQLite) ingiere ~600 eventos/s y se quedaba 30 min atrasado purgando en bucle.
+  Para volver a activar un tipo, descomenta su linea en `outputs: eve-log: types:`.
 - **Logrotate instalado y forzado**: cada hora (drop-in del timer), `maxsize 2G`,
   7 copias. Debian trae rotacion semanal sin tope y en una Debian minima ni siquiera
   viene el paquete `logrotate`. EveBox guarda sus datos aparte en SQLite (7 dias /

@@ -83,9 +83,13 @@ PY
 
 info "Esperando a Suricata (5s)..."
 sleep 5
-if [ -r "$EVE" ] && grep -q "$TAG" "$EVE"; then
-  ok "Suricata vio la trama en eve.json:"
-  python3 - "$EVE" "$TAG" <<'PY'
+# solo la cola: con espejo real eve.json/dns.json pueden ser enormes. La consulta DNS
+# de prueba cae en dns.json si existe (modo espejo) y la alerta en eve.json.
+SAMPLE=/tmp/test-tzsp-sample.json
+{ tail -n 300000 "$EVE" 2>/dev/null; [ -r /var/log/suricata/dns.json ] && tail -n 300000 /var/log/suricata/dns.json; } | grep -F "$TAG" > "$SAMPLE" || true
+if [ -s "$SAMPLE" ]; then
+  ok "Suricata vio la trama (eve.json / dns.json):"
+  python3 - "$SAMPLE" "$TAG" <<'PY'
 import sys, json
 eve, tag = sys.argv[1], sys.argv[2]
 for l in open(eve, encoding="utf-8", errors="replace"):
@@ -95,7 +99,7 @@ for l in open(eve, encoding="utf-8", errors="replace"):
     extra = e["alert"]["signature"] if e["event_type"] == "alert" else e.get("dns", {}).get("rrname", "")
     print("  - %-6s in_iface=%s %s -> %s  %s" % (e["event_type"], e.get("in_iface"), e["src_ip"], e["dest_ip"], extra))
 PY
-  grep "$TAG" "$EVE" | grep -q '"event_type":"alert"' && ok "Alerta generada: el pipeline TZSP funciona (mirala en EveBox)." \
+  grep -q '"event_type":"alert"' "$SAMPLE" && ok "Alerta generada: el pipeline TZSP funciona (mirala en EveBox)." \
     || warn "Se vio el DNS pero sin alerta: la IP origen debe estar en HOME_NET (sid 2023883 es \$HOME_NET -> any) y la regla limita 1 alerta/30 s por origen."
 else
   warn "Suricata no registro la trama. Revisa:"

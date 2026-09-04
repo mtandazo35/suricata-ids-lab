@@ -1,26 +1,45 @@
 # suricata-ids-lab
 
-Laboratorio local de **Suricata en modo IDS** sobre **Debian 13 (Trixie)** para
-pruebas en Proxmox server1 (`10.0.0.2`), aislado de produccion.
+Instalador de **Suricata en modo IDS** con **interfaz web (EveBox)** para
+**Debian 13 (Trixie)** o Debian 12. Un solo comando en cualquier VPS o VM y en
+minutos tienes alertas, flujos, DNS, TLS y HTTP visibles en el navegador.
 
-Objetivo: aprender a detectar **clientes/CPEs infectados que escanean o atacan
-hacia afuera** (el caso real que motiva esto), antes de llevarlo a un MikroTik
-de produccion. Alertas en logs locales (`fast.log` / `eve.json`), sin Elastic ni
-dependencias externas.
+Objetivo: detectar **clientes/CPEs infectados que escanean o atacan hacia
+afuera** (el caso real que motiva esto), antes de llevarlo a un MikroTik de
+produccion. Sin Elastic ni dependencias externas: EveBox lee `eve.json` y guarda
+en SQLite local.
 
 ## ⚡ Quick install (one-liner)
 
-En una VM Debian 13/12 limpia, como root:
+En una VM/VPS Debian 13/12 limpia, como root:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash
 ```
 
-Auto-detecta la interfaz por la ruta default y fija `HOME_NET` a su red. Para
-forzar interfaz y red:
+Al terminar imprime la **URL de la web, el usuario `admin` y la clave generada**.
+Entra con el navegador a `https://<IP>:5636` (certificado autofirmado: acepta la
+advertencia).
+
+Opciones (se pasan tras `bash -s --`):
+
+| Opcion | Que hace | Default |
+|---|---|---|
+| `-i IFACE` | interfaz a escuchar | la de la ruta default |
+| `-n CIDR` | `HOME_NET` | red de la interfaz |
+| `-p PUERTO` | puerto de la web | `5636` |
+| `-P CLAVE` | clave del usuario web `admin` | aleatoria (se muestra al final) |
+| `-W` | **sin web**, solo Suricata + logs | web activada |
 
 ```bash
+# forzar interfaz y red
 curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -i ens18 -n 10.0.0.0/24
+
+# web en otro puerto y con clave propia
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -p 8443 -P 'MiClaveSegura'
+
+# solo IDS, sin web
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -W
 ```
 
 Script de prueba de deteccion (se guarda en `/root`, segun convencion):
@@ -30,6 +49,34 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/te
 ```
 
 > La imagen `genericcloud` de Debian no trae `curl`: antes `apt-get update && apt-get install -y curl`.
+
+## Interfaz web (EveBox)
+
+Suricata no trae web propia; el instalador integra [EveBox](https://evebox.org):
+
+- Se instala el **`.deb` oficial** (verificado por SHA256) descargado del pool de
+  evebox.org. No se usa su repo apt porque su llave lleva firma SHA1 y Debian 13
+  la rechaza. Se toma la version vigente del indice; si no responde, se usa la
+  fijada en el script (0.28.0).
+- **SQLite local** en `/var/lib/evebox`, retencion 7 dias y tope 5 GB.
+- **HTTPS** con certificado autofirmado generado por EveBox y **login obligatorio**
+  (usuario `admin`). La clave se crea antes del primer arranque; re-ejecutar el
+  instalador **no** la cambia salvo que pases `-P`.
+- Escucha en `0.0.0.0:5636`. Si UFW esta activo abre el puerto; si hay un firewall
+  externo (nube, Proxmox, MikroTik) abrelo tu.
+- El servicio corre como usuario `evebox`; el instalador le da acceso de lectura a
+  `/var/log/suricata` via grupo + setgid.
+
+```bash
+# cambiar la clave de admin
+evebox --data-directory /var/lib/evebox --config-directory /var/lib/evebox config users passwd admin
+
+# estado / logs
+systemctl status evebox
+journalctl -u evebox -f
+```
+
+Config: `/etc/evebox/evebox.yaml` (backup con fecha en cada ejecucion).
 
 ## Montaje del lab
 
@@ -59,6 +106,7 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/te
 ## Que instala
 
 - `suricata` + `suricata-update` (reglas **ET Open**) desde repos de Debian 13.
+- **EveBox** (web) leyendo `eve.json` a SQLite, con auth y TLS. Ver seccion arriba.
 - Modo **IDS pasivo AF_PACKET** sobre la interfaz elegida.
 - `HOME_NET` = red de la interfaz (para que marque bien lo "saliente").
 - `memcap` conservador (512mb) — subir si aparecen `kernel_drops`.
@@ -108,5 +156,5 @@ la red MikroTik hay que **espejarlo** hacia la interfaz que Suricata escucha:
   switch mirror`), copia un puerto fisico hacia el NIC de Suricata. Cero carga de
   CPU en el router; requiere puerto y cable dedicados.
 
-> Este repo cubre el **lab local (IDS pasivo, logs locales)**. El envio a
-> Loki/Grafana y el receptor TZSP se agregan como modulos cuando se necesiten.
+> Este repo cubre **IDS pasivo + web local**. El envio a Loki/Grafana y el
+> receptor TZSP se agregan como modulos cuando se necesiten.

@@ -219,6 +219,8 @@ Con `-t` el instalador aplica lo que hizo falta al conectar un MikroTik real
   `SURICATA *` (stream, decoder, quic, tls, http...; viven en 22 archivos
   `*-events.rules`). Con espejo asimetrico eran el 95 % de las alertas
   (`STREAM invalid ack`, `QUIC error on data`, `TLS handshake invalid length`).
+  Tambien las 4 firmas `ET INFO STUN Binding ...` (WebRTC/videollamadas): en un ISP
+  eran el 68 % de las alertas restantes y no indican nada malo.
 - **Bypass de flujos cifrados**: `stream.bypass: true` + `tls.encryption-handling:
   bypass`, TCP establecido 600 -> 300 s y `reassembly.depth` 1 MB -> 512 kB. Sin esto
   el reensamblado crecia ~100 MB/min sin meseta reteniendo segmentos de flujos que
@@ -228,6 +230,8 @@ Con `-t` el instalador aplica lo que hizo falta al conectar un MikroTik real
   `flow` era el 76 % del volumen y `dns` el 15 % (15 MB/s = 1,3 TB/dia); EveBox
   (SQLite) ingiere ~600 eventos/s y se quedaba 30 min atrasado purgando en bucle.
   Para volver a activar un tipo, descomenta su linea en `outputs: eve-log: types:`.
+  Referencia medida: eve.json ~2 MiB/min y dns.json ~40 MiB/min con ~32k pps; el
+  logrotate horario con `maxsize 2G` rota dns.json cada hora (7 copias comprimidas).
 - **Logrotate instalado y forzado**: cada hora (drop-in del timer), `maxsize 2G`,
   7 copias. Debian trae rotacion semanal sin tope y en una Debian minima ni siquiera
   viene el paquete `logrotate`. EveBox guarda sus datos aparte en SQLite (7 dias /

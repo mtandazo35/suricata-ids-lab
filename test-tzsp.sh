@@ -23,6 +23,8 @@ if systemctl is-active --quiet tzsp-decap 2>/dev/null; then ok "tzsp-decap activ
 ip link show ids-mon >/dev/null 2>&1 && ok "interfaz ids-mon presente" || warn "no existe ids-mon"
 
 # Suricata tarda ~30-60 s en cargar reglas tras un (re)inicio: esperar al motor
+systemctl is-active --quiet suricata || warn "suricata no esta activo"
+info "Esperando al motor de Suricata (hasta 90 s)..."
 if command -v suricatasc >/dev/null 2>&1; then
   for _ in $(seq 1 45); do suricatasc -c uptime >/dev/null 2>&1 && break; sleep 2; done
   if IFACES="$(suricatasc -c iface-list 2>/dev/null)"; then
@@ -34,8 +36,30 @@ fi
 
 info "Enviando trama TZSP sintetica (DNS ${TAG}.example.top) a ${DST}:${PORT}..."
 python3 - "$DST" "$PORT" "$TAG" <<'PY'
-import socket, struct, sys, random
+import socket, struct, sys, random, re, ipaddress
 dst, port, tag = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+
+# La IP origen debe caer dentro de HOME_NET: sid 2023883 es "$HOME_NET any -> any any".
+# Se toma el primer prefijo de HOME_NET en suricata.yaml (fallback 10.0.0.0/8).
+home = "10.0.0.0/8"
+try:
+    for l in open("/etc/suricata/suricata.yaml", encoding="utf-8", errors="replace"):
+        m = re.match(r'^\s*HOME_NET:\s*"?\[?([^,\]"]+)', l)
+        if m:
+            home = m.group(1).strip()
+            break
+except OSError:
+    pass
+try:
+    net = ipaddress.ip_network(home, strict=False)
+    if net.version != 4:
+        raise ValueError("HOME_NET no es IPv4")
+except ValueError:
+    net = ipaddress.ip_network("10.0.0.0/8")
+if net.num_addresses <= 2:      # /32 (o /31): usar esa misma IP
+    src = net.network_address
+else:
+    src = net.network_address + random.randint(2, min(net.num_addresses - 2, 250))
 
 def csum(b):
     if len(b) % 2: b += b"\0"
@@ -46,7 +70,7 @@ def csum(b):
 qname = b"".join(bytes([len(l)]) + l.encode() for l in f"{tag}.example.top".split(".")) + b"\0"
 dns = struct.pack("!HHHHHH", random.randint(1, 65535), 0x0100, 1, 0, 0, 0) + qname + struct.pack("!HH", 1, 1)
 udp = struct.pack("!HHHH", 40000 + random.randint(0, 20000), 53, 8 + len(dns), 0) + dns
-src_ip, dst_ip = bytes([10, 200, 200, 10]), bytes([8, 8, 8, 8])
+src_ip, dst_ip = src.packed, bytes([8, 8, 8, 8])
 ip_hdr = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), random.randint(1, 65535), 0x4000, 64, 17, 0, src_ip, dst_ip)
 ip_hdr = ip_hdr[:10] + struct.pack("!H", csum(ip_hdr)) + ip_hdr[12:]
 eth = bytes.fromhex("bc2411aaaaaa") + bytes.fromhex("bc2411bbbbbb") + b"\x08\x00"
@@ -54,7 +78,7 @@ frame = eth + ip_hdr + udp
 tzsp = bytes([1, 0]) + struct.pack("!H", 1) + bytes([0x01]) + frame   # ver1, tipo 0, encap Ethernet, tag END
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.sendto(tzsp, (dst, port))
-print(f"  trama de {len(frame)} bytes (TZSP {len(tzsp)} bytes) enviada; origen simulado 10.200.200.10 -> 8.8.8.8:53")
+print(f"  trama de {len(frame)} bytes (TZSP {len(tzsp)} bytes) enviada; origen simulado {src} (HOME_NET {net}) -> 8.8.8.8:53")
 PY
 
 info "Esperando a Suricata (5s)..."
@@ -72,7 +96,7 @@ for l in open(eve, encoding="utf-8", errors="replace"):
     print("  - %-6s in_iface=%s %s -> %s  %s" % (e["event_type"], e.get("in_iface"), e["src_ip"], e["dest_ip"], extra))
 PY
   grep "$TAG" "$EVE" | grep -q '"event_type":"alert"' && ok "Alerta generada: el pipeline TZSP funciona (mirala en EveBox)." \
-    || warn "Se vio el DNS pero sin alerta: revisa que las reglas ET esten cargadas (sid 2023883)."
+    || warn "Se vio el DNS pero sin alerta: la IP origen debe estar en HOME_NET (sid 2023883 es \$HOME_NET -> any) y la regla limita 1 alerta/30 s por origen."
 else
   warn "Suricata no registro la trama. Revisa:"
   echo "    journalctl -u tzsp-decap -n 20     (debe haber tx>0; si rx=0 la trama no llego al puerto ${PORT})"

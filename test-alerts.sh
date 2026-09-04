@@ -32,9 +32,11 @@ echo
 # ---------------------------------------------------------------- 1) DNS .top
 info "1/3  Consulta DNS a un dominio .top (ET DNS Query to a *.top domain)"
 if command -v dig >/dev/null 2>&1; then
-  dig +short +tries=1 +time=3 "test-suricata-$RANDOM.example.top" >/dev/null 2>&1; ok "consulta enviada"
+  dig +short +tries=1 +time=3 "test-suricata-$RANDOM.example.top" >/dev/null 2>&1 \
+    && ok "consulta enviada" || warn "dig fallo (¿sin resolver en /etc/resolv.conf?)"
 elif command -v getent >/dev/null 2>&1; then
-  getent hosts "test-suricata-$RANDOM.example.top" >/dev/null 2>&1; ok "consulta enviada (getent)"
+  getent hosts "test-suricata-$RANDOM.example.top" >/dev/null 2>&1 \
+    && ok "consulta enviada (getent)" || warn "getent fallo (¿sin resolver en /etc/resolv.conf?)"
 else
   warn "ni dig ni getent disponibles — omitiendo"
 fi
@@ -74,6 +76,12 @@ if [ "$NEW" -gt 0 ]; then
   echo "---------------------------------------------------------------"
   tail -n "$NEW" "$FAST" | cut -c1-160
   echo "---------------------------------------------------------------"
+  HITS=$(tail -n "$NEW" "$FAST" | grep -cE '2023883|2007961|2013178' || true)
+  if [ "${HITS:-0}" -gt 0 ]; then
+    ok "de ellas ${HITS} son las firmas de prueba (sid 2023883 / 2007961 / 2013178)"
+  else
+    warn "ninguna es de las firmas de prueba: fueron otras alertas de fondo (el trafico de test no se detecto)"
+  fi
   echo "  Deberian verse tambien en la web EveBox (Alerts)."
 else
   warn "Sin alertas nuevas todavia. Posibles causas:"

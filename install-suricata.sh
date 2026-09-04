@@ -69,7 +69,10 @@ while getopts "i:n:p:P:tWh" opt; do
     *) usage; exit 1 ;;
   esac
 done
+# por si el usuario pasa -n "[a,b]": el yaml ya pone los corchetes
+HOME_NET="${HOME_NET#[}"; HOME_NET="${HOME_NET%]}"
 { [[ "$WEB_PORT" =~ ^[0-9]+$ ]] && [ "$WEB_PORT" -ge 1 ] && [ "$WEB_PORT" -le 65535 ]; } || die "Puerto invalido: $WEB_PORT"
+export DEBIAN_FRONTEND=noninteractive
 
 # EveBox: se baja el .deb suelto del pool oficial (el repo apt usa firma SHA1 que
 # Debian 13 rechaza). Se lee el indice para tomar la version vigente y su SHA256;
@@ -95,6 +98,9 @@ if [ "$WEB" -eq 1 ] && [ "$ARCH" != "amd64" ]; then
   WEB=0
 fi
 
+# python3 se usa ya para calcular HOME_NET, antes del apt-get install principal
+command -v python3 >/dev/null 2>&1 || { apt-get update -qq </dev/null; apt-get install -y -qq python3 </dev/null >/dev/null; }
+
 # ----------------------------------------------------------------------------- iface
 if [ -z "$IFACE" ]; then
   IFACE="$(ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}')"
@@ -114,15 +120,15 @@ print(str(ipaddress.ip_network(sys.argv[1], strict=False)))
 PY
 )"
   fi
-  [ -n "$HOME_NET" ] || HOME_NET="10.0.0.0/8"
+  [ -n "$HOME_NET" ] || { HOME_NET="10.0.0.0/8"; warn "La interfaz ${IFACE} no tiene IPv4: HOME_NET por defecto 10.0.0.0/8; pasa -n con tus redes."; }
 fi
 ok "HOME_NET: $HOME_NET"
 
 # ----------------------------------------------------------------------------- install
-export DEBIAN_FRONTEND=noninteractive
 info "Instalando suricata y utilidades..."
-apt-get update -qq
-apt-get install -y -qq suricata suricata-update jq python3 curl ca-certificates ethtool >/dev/null
+# </dev/null: bajo 'curl | bash' el stdin es el propio script; un prompt de dpkg se lo comeria
+apt-get update -qq </dev/null
+apt-get install -y -qq -o Dpkg::Options::=--force-confold suricata suricata-update jq python3 curl ca-certificates ethtool </dev/null >/dev/null
 ok "Suricata instalado: $(suricata -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 
 # comprobar capacidades compiladas
@@ -136,7 +142,7 @@ fi
 info "Descargando reglas ET Open..."
 suricata-update update-sources >/dev/null 2>&1 || true
 suricata-update --no-test >/dev/null 2>&1 || suricata-update --no-test || warn "suricata-update reporto avisos (normal la 1a vez)."
-RULES_COUNT="$(grep -c '^alert' /var/lib/suricata/rules/suricata.rules 2>/dev/null || echo '?')"
+RULES_COUNT="$(grep -c '^alert' /var/lib/suricata/rules/suricata.rules 2>/dev/null || true)"; RULES_COUNT="${RULES_COUNT:-?}"
 ok "Reglas cargadas: ${RULES_COUNT}"
 
 # ----------------------------------------------------------------------------- config
@@ -247,8 +253,11 @@ Before=suricata.service
 Environment=TZSP_PORT=${TZSP_PORT}
 Environment=TZSP_OUT_IF=${TZSP_IN}
 # crea el par veth si no existe; sin IPv6 para que no meta ruido propio
+# las tramas reinyectadas NO deben entrar a la pila IP del kernel ni reenviarse
 ExecStartPre=/bin/sh -c 'ip link show ${TZSP_MON} >/dev/null 2>&1 || ip link add ${TZSP_IN} type veth peer name ${TZSP_MON}'
-ExecStartPre=/bin/sh -c 'sysctl -qw net.ipv6.conf.${TZSP_IN}.disable_ipv6=1 net.ipv6.conf.${TZSP_MON}.disable_ipv6=1 || true'
+ExecStartPre=/bin/sh -c 'sysctl -qw net.ipv6.conf.${TZSP_IN}.disable_ipv6=1 net.ipv6.conf.${TZSP_MON}.disable_ipv6=1 net.ipv4.conf.${TZSP_MON}.rp_filter=1 net.ipv4.conf.${TZSP_MON}.forwarding=0 net.ipv4.conf.${TZSP_MON}.arp_ignore=8 || true'
+# el SO_RCVBUF de 16 MB del receptor lo topa rmem_max
+ExecStartPre=-/usr/sbin/sysctl -qw net.core.rmem_max=16777216
 ExecStartPre=/sbin/ip link set ${TZSP_IN} up mtu 1600
 ExecStartPre=/sbin/ip link set ${TZSP_MON} up mtu 1600 promisc on
 ExecStart=/usr/bin/python3 /usr/local/bin/tzsp-decap.py
@@ -338,7 +347,7 @@ ok "Offloads apagados en ${IFACE} (gro/lro/tso/gso/rx-gro-hw)."
 # ----------------------------------------------------------------------------- servicio
 info "Habilitando servicio..."
 systemctl enable suricata >/dev/null 2>&1 || true
-systemctl restart suricata
+systemctl restart suricata || true
 sleep 3
 if systemctl is-active --quiet suricata; then
   # el daemon ya existe pero el motor tarda ~30-60 s en cargar 50k reglas:
@@ -389,8 +398,8 @@ if [ "$WEB" -eq 1 ]; then
       mv -f "${DEB_LOCAL}.part" "$DEB_LOCAL"
     fi
     # el postinst del .deb corre con 'set -x': su traza va al log, no a pantalla
-    if ! dpkg -i "$DEB_LOCAL" >/root/evebox-install.log 2>&1; then
-      apt-get install -f -y -qq >>/root/evebox-install.log 2>&1 || { cat /root/evebox-install.log; die "dpkg -i fallo (ver /root/evebox-install.log)"; }
+    if ! dpkg -i --force-confold "$DEB_LOCAL" </dev/null >/root/evebox-install.log 2>&1; then
+      apt-get install -f -y -qq -o Dpkg::Options::=--force-confold </dev/null >>/root/evebox-install.log 2>&1 || { cat /root/evebox-install.log; die "dpkg -i fallo (ver /root/evebox-install.log)"; }
     fi
   fi
   ok "EveBox instalado: $(evebox version 2>/dev/null | head -1)"
@@ -460,6 +469,7 @@ out, sent = b"", 0
 while True:
     r, _, _ = select.select([fd], [], [], 20)
     if not r:
+        os.kill(pid, 9)
         break
     try:
         data = os.read(fd, 4096)
@@ -471,6 +481,10 @@ while True:
     if sent < 2 and (b"assword" in data or b"onfirm" in data):
         os.write(fd, (pw + "\n").encode())
         sent += 1
+try:
+    os.close(fd)
+except OSError:
+    pass
 _, st = os.waitpid(pid, 0)
 okay = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0 and b"updated" in out
 if not okay:
@@ -511,7 +525,7 @@ PYP
   # --- servicio ----------------------------------------------------------------
   systemctl daemon-reload
   systemctl enable evebox >/dev/null 2>&1 || true
-  systemctl restart evebox
+  systemctl restart evebox || true
   sleep 3
   if systemctl is-active --quiet evebox; then
     ok "EveBox corriendo en el puerto ${WEB_PORT}."
@@ -524,6 +538,7 @@ PYP
     auto="$(journalctl -u evebox --no-pager -n 100 2>/dev/null | grep -oE 'username=[^,]+, password=[^ ]+' | tail -1 || true)"
     if [ -n "$auto" ]; then WEB_PASS_SHOWN="${auto##*password=}"; WEB_NOTE="Clave autogenerada por EveBox (leida del journal)."; fi
   fi
+  [ -n "${WEB_PASS_SHOWN}${WEB_NOTE}" ] || WEB_NOTE="Clave desconocida: fijala con evebox-passwd ${WEB_USER} 'Clave'."
   # comprobar que el usuario evebox puede leer eve.json
   if ! runuser -u evebox -- test -r /var/log/suricata/eve.json 2>/dev/null; then
     warn "El usuario 'evebox' no puede leer /var/log/suricata/eve.json: la web quedara vacia. Revisa permisos del directorio."
@@ -537,7 +552,9 @@ PYP
   fi
 fi
 
-PUB_IP="$(ip -o -4 addr show dev "$IFACE" scope global | awk '{split($4,a,"/"); print a[1]; exit}')"
+# IP de origen hacia internet (la que ve el MikroTik); si no hay ruta, la de la interfaz
+PUB_IP="$(ip -o -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
+[ -n "$PUB_IP" ] || PUB_IP="$(ip -o -4 addr show dev "$IFACE" scope global | awk '{split($4,a,"/"); print a[1]; exit}')"
 WEB_URL="https://${PUB_IP:-<IP>}:${WEB_PORT}"
 
 if [ "$TZSP" -eq 1 ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then

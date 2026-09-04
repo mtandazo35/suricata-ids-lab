@@ -4,6 +4,9 @@ Instalador de **Suricata en modo IDS** con **interfaz web (EveBox)** para
 **Debian 13 (Trixie)** o Debian 12. Un solo comando en cualquier VPS o VM y en
 minutos tienes alertas, flujos, DNS, TLS y HTTP visibles en el navegador.
 
+> Debian 12 (bookworm) trae Suricata 6.0.x y Debian 13 (trixie) 7.0.x. El
+> instalador funciona igual en ambos, pero solo se ha verificado en Debian 13.
+
 Objetivo: detectar **clientes/CPEs infectados que escanean o atacan hacia
 afuera** (el caso real que motiva esto), antes de llevarlo a un MikroTik de
 produccion. Sin Elastic ni dependencias externas: EveBox lee `eve.json` y guarda
@@ -26,7 +29,7 @@ Opciones (se pasan tras `bash -s --`):
 | Opcion | Que hace | Default |
 |---|---|---|
 | `-i IFACE` | interfaz a escuchar | la de la ruta default |
-| `-n CIDR[,CIDR]` | `HOME_NET` (varias redes separadas por coma) | red de la interfaz |
+| `-n CIDR[,CIDR]` | `HOME_NET` (admite varias redes separadas por coma; con `-t` pasa aqui las redes de tus clientes) | red de la interfaz |
 | `-p PUERTO` | puerto de la web | `5636` |
 | `-P CLAVE` | clave del usuario web `admin` | aleatoria (se muestra al final) |
 | `-t` | **receptor TZSP** (UDP 37008) para espejo MikroTik | apagado |
@@ -115,7 +118,7 @@ anterior.
 2. Copia este repo a la VM (a `/root/`, segun convencion) y ejecuta:
 
    ```bash
-   chmod +x install-suricata.sh test-alerts.sh
+   chmod +x install-suricata.sh test-alerts.sh test-tzsp.sh
    sudo ./install-suricata.sh
    ```
 
@@ -129,7 +132,7 @@ anterior.
 3. Confirma que detecta:
 
    ```bash
-   sudo ./test-alerts.sh            # DNS .top + User-Agent Wget/3.0 + nmap al gateway
+   sudo ./test-alerts.sh            # DNS .top + User-Agent 'wget 3.0' + nmap al gateway
    tail -f /var/log/suricata/fast.log
    ```
 
@@ -230,8 +233,8 @@ Filtros utiles para no espejar todo:
 ```routeros
 # solo una red de clientes
 /tool sniffer set filter-ip-address=172.16.10.0/24
-# solo lo que sale hacia internet (reduce a la mitad)
-/tool sniffer set filter-direction=tx
+# solo lo que sale hacia internet (reduce a la mitad): rx en el bridge LAN, tx si sniffas el ether WAN
+/tool sniffer set filter-direction=rx
 # solo DNS + HTTP + HTTPS
 /tool sniffer set filter-port=53,80,443
 ```
@@ -240,10 +243,16 @@ Filtros utiles para no espejar todo:
 Solo se espeja lo que matchea la regla; ideal para una red o un cliente concreto:
 
 ```routeros
-/ip firewall mangle add chain=prerouting src-address=172.16.10.0/24 action=sniff-tzsp     sniff-target=IP_SURICATA sniff-target-port=37008 passthrough=yes comment="espejo a Suricata"
+/ip firewall mangle add chain=prerouting src-address=172.16.10.0/24 action=sniff-tzsp sniff-target=IP_SURICATA sniff-target-port=37008 passthrough=yes comment="espejo a Suricata"
 # la respuesta (trafico de vuelta al cliente)
-/ip firewall mangle add chain=forward dst-address=172.16.10.0/24 action=sniff-tzsp     sniff-target=IP_SURICATA sniff-target-port=37008 passthrough=yes comment="espejo a Suricata (vuelta)"
+/ip firewall mangle add chain=forward dst-address=172.16.10.0/24 action=sniff-tzsp sniff-target=IP_SURICATA sniff-target-port=37008 passthrough=yes comment="espejo a Suricata (vuelta)"
 ```
+
+> **Fasttrack.** Con `fasttrack-connection` activo, mangle solo ve los primeros
+> paquetes de cada conexion: se espeja el SYN y el DNS, pero no el HTTP. Excluye
+> esas redes del fasttrack
+> (`/ip firewall filter set [find action=fasttrack-connection] src-address=!172.16.10.0/24`)
+> o usa la Opcion A.
 
 Verificar en el servidor:
 
@@ -267,7 +276,7 @@ un bridge propio para esa NIC, sin IP). Suricata escucha esa NIC directamente
 # switch-chip clasico (RB, hEX, CCR con switch)
 /interface ethernet switch set switch1 mirror-source=ether2 mirror-target=ether5
 # CRS3xx / RB5009 (por puerto)
-/interface ethernet switch port set ether2 mirror-ingress=yes mirror-egress=yes     mirror-ingress-target=ether5 mirror-egress-target=ether5
+/interface ethernet switch port set ether2 mirror-ingress=yes mirror-egress=yes mirror-ingress-target=ether5 mirror-egress-target=ether5
 ```
 
 > El envio a Loki/Grafana se agrega como modulo cuando se necesite.

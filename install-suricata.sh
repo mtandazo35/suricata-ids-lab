@@ -510,9 +510,27 @@ IP:puerto con firma, protocolo, primera/ultima hora y duracion. Autocontenido
 Uso: suricata-html-report [horas]   (default 24)
 Salida: /var/log/suricata/report-AAAAMMDD-HHMM.html
 """
-import glob, gzip, io, json, os, sys, html, time
+import glob, gzip, io, json, os, re, sys, html, time
 from collections import Counter, defaultdict
 from datetime import datetime
+
+# Extraccion por regex (mucho mas rapida que json.loads por linea sobre cientos de MB).
+_RE = {k: re.compile(p) for k, p in {
+    "ts": r'"timestamp":"([^"]+)"',
+    "src_ip": r'"src_ip":"([^"]+)"',
+    "dest_ip": r'"dest_ip":"([^"]+)"',
+    "src_port": r'"src_port":(\d+)',
+    "dest_port": r'"dest_port":(\d+)',
+    "proto": r'"proto":"([^"]+)"',
+    "sig": r'"signature":"((?:[^"\\]|\\.)*)"',
+    "cat": r'"category":"((?:[^"\\]|\\.)*)"',
+}.items()}
+
+def campos(line):
+    def g(k):
+        m = _RE[k].search(line)
+        return m.group(1) if m else ""
+    return g
 
 LOGDIR = "/var/log/suricata"
 HOURS = int(sys.argv[1]) if len(sys.argv) > 1 else 24
@@ -550,23 +568,16 @@ for p in files:
                 break
             if '"event_type":"alert"' not in line:
                 continue
-            try:
-                e = json.loads(line)
-            except Exception:
-                continue
-            if e.get("event_type") != "alert":
-                continue
-            a = e.get("alert", {})
-            sig = a.get("signature", "")
-            cat = a.get("category") or ""
+            g = campos(line)
+            sig = g("sig"); cat = g("cat")
             if sig.startswith("ET INFO") or "Not Suspicious" in cat or "Misc activity" in cat:
                 continue
-            ts = parse_ts(e.get("timestamp", ""))
+            ts = parse_ts(g("ts"))
             if ts and ts < cutoff:
                 continue
-            src = e.get("src_ip", "?"); dst = e.get("dest_ip", "?")
-            sport = e.get("src_port", ""); dport = e.get("dest_port", "")
-            proto = e.get("proto", "")
+            src = g("src_ip") or "?"; dst = g("dest_ip") or "?"
+            sport = g("src_port"); dport = g("dest_port")
+            proto = g("proto")
             by_dst[dst] += 1
             by_src[src] += 1
             if dport != "":
@@ -777,8 +788,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 LOGDIR = "/var/log/suricata"
 GEN = "/usr/local/bin/suricata-html-report"
 CONF = "/etc/suricata-dashboard.conf"
-CACHE_SECS = 300
-_lock = threading.Lock()
+REFRESH_SECS = 600   # regeneracion en segundo plano (el reporte puede tardar en redes grandes)
 
 def conf():
     d = {"PORT": "5637", "USER": "admin", "PASS": ""}
@@ -797,21 +807,19 @@ def newest_report():
     fs = sorted(glob.glob(f"{LOGDIR}/report-*.html"), key=os.path.getmtime, reverse=True)
     return fs[0] if fs else None
 
-def ensure_fresh():
-    """Regenera el reporte si el mas nuevo tiene mas de CACHE_SECS (con lock)."""
-    nr = newest_report()
-    if nr and time.time() - os.path.getmtime(nr) < CACHE_SECS:
-        return nr
-    with _lock:
+def refrescador():
+    """Hilo de fondo: regenera el reporte periodicamente, NUNCA en el request.
+    Asi 'En vivo' sirve siempre el ultimo archivo al instante aunque generar tarde."""
+    while True:
         nr = newest_report()
-        if nr and time.time() - os.path.getmtime(nr) < CACHE_SECS:
-            return nr
-        try:
-            subprocess.run(["nice", "-n", "15", GEN], timeout=120,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
-        return newest_report()
+        stale = (nr is None) or (time.time() - os.path.getmtime(nr) >= REFRESH_SECS)
+        if stale:
+            try:
+                subprocess.run(["nice", "-n", "15", GEN], timeout=600,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+        time.sleep(30)
 
 NAV = """<div style="position:sticky;top:0;z-index:9;background:#0b0b0b;color:#fff;
 padding:10px 20px;font:600 14px system-ui,sans-serif;display:flex;gap:18px;align-items:center">
@@ -874,11 +882,14 @@ class H(BaseHTTPRequestHandler):
             return self._deny()
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
-            f = ensure_fresh()
+            f = newest_report()   # instantaneo: nunca regenera en el request
             if not f:
-                return self._html(wrap("<body><main style='padding:20px;font:14px system-ui'>"
-                                       "<h1>Sin datos todavia</h1><p>Aun no hay reporte. "
-                                       "Espera a que llegue trafico o corre <code>suricata-html-report</code>.</p></main></body>"))
+                return self._html(wrap("<!doctype html><html><head><meta charset=utf-8>"
+                                       "<meta http-equiv=refresh content=8></head>"
+                                       "<body><main style='padding:24px;font:15px system-ui'>"
+                                       "<h1>Preparando estadisticas...</h1><p>El primer reporte se esta "
+                                       "generando en segundo plano. Esta pagina se actualiza sola.</p></main></body></html>",
+                                       refresh=False))
             try:
                 return self._html(wrap(open(f, encoding="utf-8", errors="replace").read()))
             except OSError:
@@ -900,6 +911,7 @@ class H(BaseHTTPRequestHandler):
 
 def main():
     port = int(CFG.get("PORT", "5637"))
+    threading.Thread(target=refrescador, daemon=True).start()
     httpd = ThreadingHTTPServer(("0.0.0.0", port), H)
     httpd.serve_forever()
 

@@ -179,6 +179,24 @@ grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 En Suricata la RAM la mandan los `memcap`, no el disco. Vigila `memcap_drop` en
 `stats.log`: mientras no aparezcan, no hace falta mas RAM.
 
+## Deteccion de escaneo, informe diario y auto-update
+
+El instalador anade tres cosas utiles para operar sin entrar a la web:
+
+- **Reglas propias de escaneo saliente** (`/var/lib/suricata/rules/local.rules`, sids
+  9000000+). ET Open no detecta port-scan; estas cazan el caso que motiva el lab: un CPE
+  de HOME_NET escaneando o atacando hacia afuera. Barrido TCP/UDP por volumen de SYN, y
+  puertos tipicos de botnet IoT (Telnet 23/2323, TR-069 7547, ADB 5555, SMB 445, RDP/VNC,
+  SMTP directo 25). Ajusta los umbrales (`threshold ... count N`) a tu red editando el
+  archivo y `suricatasc -c reload-rules`.
+- **Auto-update diario de reglas ET** a las 04:30 (`suricata-rules-update.timer`), con
+  recarga en caliente (`suricatasc -c reload-rules`, sin reiniciar el motor).
+- **Informe diario de infractores** a las 07:30 (`suricata-report.timer`): top de IPs
+  origen con alertas graves (sin `ET INFO`) de las ultimas 24h. Se guarda en
+  `/var/log/suricata/report-AAAAMMDD.txt` y, si rellenas `/etc/suricata-report.conf` con
+  un token de bot de Telegram y tu chat_id, te llega al telefono. Pruebalo a mano con
+  `suricata-report`.
+
 ## Espejo desde MikroTik (TZSP)
 
 Para analizar el trafico real de tu red MikroTik hay que **espejarlo** hacia el

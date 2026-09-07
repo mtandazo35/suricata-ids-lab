@@ -162,6 +162,69 @@ suricata-update --no-test >/dev/null 2>&1 || suricata-update --no-test || warn "
 RULES_COUNT="$(grep -c '^alert' /var/lib/suricata/rules/suricata.rules 2>/dev/null || true)"; RULES_COUNT="${RULES_COUNT:-?}"
 ok "Reglas cargadas: ${RULES_COUNT}"
 
+# ----------------------------------------------------------------------------- reglas propias
+# ET Open NO trae deteccion de port-scan. Estas reglas cazan el caso que motiva el lab:
+# un CPE de HOME_NET escaneando/atacando hacia afuera. Umbrales por IP origen; sids en
+# rango local 90000xx (reservado para reglas propias). Se instalan siempre.
+LOCAL_RULES=/var/lib/suricata/rules/local.rules
+cat > "$LOCAL_RULES" <<'RULES'
+# local.rules — install-suricata.sh — deteccion de actividad saliente de CPEs infectados.
+# Rango sid 9000000+ (reglas locales). Ajusta umbrales segun tu red.
+
+# --- Barrido horizontal: muchas conexiones nuevas hacia afuera desde un mismo origen ---
+alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"LOCAL Posible barrido TCP saliente (muchos SYN)"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 120, seconds 60; classtype:attempted-recon; sid:9000001; rev:1;)
+alert udp $HOME_NET any -> $EXTERNAL_NET any (msg:"LOCAL Posible barrido UDP saliente"; threshold:type both, track by_src, count 200, seconds 60; classtype:attempted-recon; sid:9000002; rev:1;)
+
+# --- Puertos tipicos de botnets IoT / gusanos (Mirai y familia) hacia afuera ---
+alert tcp $HOME_NET any -> $EXTERNAL_NET [23,2323] (msg:"LOCAL CPE escanea Telnet saliente (botnet IoT/Mirai)"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 15, seconds 60; classtype:attempted-recon; sid:9000010; rev:1;)
+alert tcp $HOME_NET any -> $EXTERNAL_NET 7547 (msg:"LOCAL CPE escanea TR-069/CWMP saliente (Mirai)"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 10, seconds 60; classtype:attempted-recon; sid:9000011; rev:1;)
+alert tcp $HOME_NET any -> $EXTERNAL_NET [5555,7777] (msg:"LOCAL CPE escanea ADB/router saliente"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 10, seconds 60; classtype:attempted-recon; sid:9000012; rev:1;)
+alert tcp $HOME_NET any -> $EXTERNAL_NET 445 (msg:"LOCAL Escaneo SMB saliente (gusano/ransomware)"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 10, seconds 60; classtype:attempted-recon; sid:9000013; rev:1;)
+alert tcp $HOME_NET any -> $EXTERNAL_NET [3389,5900] (msg:"LOCAL Escaneo RDP/VNC saliente"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 10, seconds 60; classtype:attempted-recon; sid:9000014; rev:1;)
+
+# --- SMTP directo desde clientes (spambot): un CPE no deberia hablar 25/tcp a internet ---
+alert tcp $HOME_NET any -> $EXTERNAL_NET 25 (msg:"LOCAL SMTP directo saliente desde cliente (posible spambot)"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 5, seconds 120; classtype:bad-unknown; sid:9000020; rev:1;)
+RULES
+LOCAL_COUNT="$(grep -c '^alert' "$LOCAL_RULES")"
+# registrar local.rules en rule-files (idempotente)
+if ! grep -qE '^\s*- local\.rules\s*$' "$CFG" 2>/dev/null; then
+  sed -i '/^rule-files:/a\  - local.rules' /etc/suricata/suricata.yaml 2>/dev/null || true
+fi
+ok "Reglas propias de escaneo saliente: ${LOCAL_COUNT} (local.rules)."
+
+# actualizacion diaria de reglas ET + recarga en caliente (sin reiniciar el motor)
+cat > /usr/local/bin/suricata-rules-update <<'UPD'
+#!/bin/sh
+# Actualiza reglas ET Open y recarga Suricata sin reiniciar (rule-reload).
+set -e
+suricata-update --no-test >/tmp/suricata-update.log 2>&1 || { echo "suricata-update fallo:"; cat /tmp/suricata-update.log; exit 1; }
+if command -v suricatasc >/dev/null 2>&1 && systemctl is-active --quiet suricata; then
+  suricatasc -c reload-rules >/dev/null 2>&1 || systemctl reload suricata || systemctl restart suricata
+fi
+UPD
+chmod 755 /usr/local/bin/suricata-rules-update
+cat > /etc/systemd/system/suricata-rules-update.service <<'UNIT'
+[Unit]
+Description=Actualiza reglas ET Open de Suricata y recarga
+After=suricata.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/suricata-rules-update
+UNIT
+cat > /etc/systemd/system/suricata-rules-update.timer <<'UNIT'
+[Unit]
+Description=Actualizacion diaria de reglas de Suricata
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=30m
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now suricata-rules-update.timer >/dev/null 2>&1 || true
+ok "Auto-update de reglas: diario 04:30 (suricata-rules-update.timer), recarga en caliente."
+
 # ----------------------------------------------------------------------------- config
 CFG=/etc/suricata/suricata.yaml
 STAMP="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo backup)"
@@ -276,6 +339,133 @@ if [ -f "$LOGROTATE_CFG" ]; then
   systemctl enable --now logrotate.timer >/dev/null 2>&1 || true
   ok "logrotate: cada hora, maxsize 2G, 7 copias (eve.json crece rapido con espejo)."
 fi
+
+# ----------------------------------------------------------------------------- informe diario
+# EveBox sirve para investigar, no para vigilar. Este informe saca cada manana el top de
+# IPs origen con alertas graves (sin ET INFO) de las ultimas 24h y, si hay un token de
+# Telegram en /etc/suricata-report.conf, lo envia; si no, lo deja en /var/log/suricata/.
+cat > /usr/local/bin/suricata-report <<'REP'
+#!/usr/bin/env python3
+"""Informe de infractores de las ultimas 24h desde eve.json (+ rotados)."""
+import glob, gzip, io, json, os, socket, time, urllib.request, urllib.parse
+from collections import Counter, defaultdict
+
+CONF = "/etc/suricata-report.conf"
+LOGDIR = "/var/log/suricata"
+HOURS = 24
+cutoff = time.time() - HOURS * 3600
+
+def conf():
+    d = {}
+    try:
+        for l in open(CONF, encoding="utf-8"):
+            l = l.strip()
+            if l and not l.startswith("#") and "=" in l:
+                k, v = l.split("=", 1); d[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return d
+
+def opener(p):
+    return io.TextIOWrapper(gzip.open(p, "rb")) if p.endswith(".gz") else open(p, encoding="utf-8", errors="replace")
+
+by_src = Counter()
+by_sig = Counter()
+pair = defaultdict(Counter)
+total = 0
+files = sorted(glob.glob(f"{LOGDIR}/eve.json*"), key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
+for p in files:
+    try:
+        if os.path.getmtime(p) < cutoff - 3600:
+            continue
+    except OSError:
+        continue
+    try:
+        for line in opener(p):
+            if '"event_type":"alert"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            if e.get("event_type") != "alert":
+                continue
+            a = e.get("alert", {})
+            # solo lo relevante: fuera ET INFO y las categorias meramente informativas
+            cat = (a.get("category") or "")
+            sig = a.get("signature", "")
+            if sig.startswith("ET INFO") or "Not Suspicious" in cat or "Misc activity" in cat:
+                continue
+            src = e.get("src_ip", "?")
+            by_src[src] += 1
+            by_sig[sig] += 1
+            pair[src][sig] += 1
+            total += 1
+    except OSError:
+        continue
+
+host = socket.gethostname()
+lines = [f"IDS {host}: {total} alertas graves en {HOURS}h"]
+if total:
+    lines.append("")
+    lines.append("Top IPs origen (posibles CPEs infectados):")
+    for ip, n in by_src.most_common(10):
+        top_sig = pair[ip].most_common(1)[0][0]
+        lines.append(f"  {ip:16s} {n:5d}  {top_sig[:60]}")
+    lines.append("")
+    lines.append("Top firmas:")
+    for sig, n in by_sig.most_common(10):
+        lines.append(f"  {n:5d}  {sig[:70]}")
+else:
+    lines.append("Sin alertas graves. (Revisa que llegue trafico.)")
+report = "\n".join(lines)
+
+out = os.path.join(LOGDIR, "report-" + time.strftime("%Y%m%d") + ".txt")
+try:
+    open(out, "w", encoding="utf-8").write(report + "\n")
+except OSError:
+    pass
+
+c = conf()
+tok, chat = c.get("TELEGRAM_TOKEN"), c.get("TELEGRAM_CHAT_ID")
+if tok and chat:
+    try:
+        data = urllib.parse.urlencode({"chat_id": chat, "text": report[:4000]}).encode()
+        urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage", data=data, timeout=20)
+    except Exception as ex:
+        print("Telegram fallo:", ex)
+print(report)
+REP
+chmod 755 /usr/local/bin/suricata-report
+if [ ! -f /etc/suricata-report.conf ]; then
+  cat > /etc/suricata-report.conf <<'CONF'
+# Informe diario de Suricata. Para enviarlo por Telegram, rellena estas dos lineas
+# (crea un bot con @BotFather y saca tu chat_id con @userinfobot). Sin ellas, el
+# informe solo se guarda en /var/log/suricata/report-AAAAMMDD.txt.
+#TELEGRAM_TOKEN=123456:ABC...
+#TELEGRAM_CHAT_ID=123456789
+CONF
+  chmod 600 /etc/suricata-report.conf
+fi
+cat > /etc/systemd/system/suricata-report.service <<'UNIT'
+[Unit]
+Description=Informe diario de infractores de Suricata
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/suricata-report
+UNIT
+cat > /etc/systemd/system/suricata-report.timer <<'UNIT'
+[Unit]
+Description=Informe diario de Suricata (top IPs origen)
+[Timer]
+OnCalendar=*-*-* 07:30:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now suricata-report.timer >/dev/null 2>&1 || true
+ok "Informe diario 07:30 (suricata-report.timer). Telegram opcional en /etc/suricata-report.conf."
 
 # ============================================================================= TZSP (espejo MikroTik)
 # MikroTik manda el espejo por TZSP (UDP 37008). Suricata no entiende TZSP: si lo

@@ -759,6 +759,193 @@ systemctl enable --now suricata-report.timer >/dev/null 2>&1 || true
 ok "Informe diario 07:30 (suricata-report.timer): texto por Telegram + reporte HTML grafico."
 ok "  Reporte HTML a mano: suricata-html-report  ->  /var/log/suricata/report-AAAAMMDD-HHMM.html"
 
+# ----------------------------------------------------------------------------- panel de estadisticas
+# Apartado web "Estadisticas": sirve el reporte grafico en vivo (se regenera si esta
+# viejo) + historico, con login basico. Puerto propio, junto a EveBox.
+cat > /usr/local/bin/suricata-dashboard <<'DASH'
+#!/usr/bin/env python3
+"""suricata-dashboard: panel web de estadisticas de Suricata (apartado "Estadisticas").
+
+Sirve el reporte HTML grafico en vivo (lo regenera si esta viejo) y el historico de
+reportes diarios, con login basico. Solo biblioteca estandar. Corre como servicio.
+
+Config: /etc/suricata-dashboard.conf  (PORT, USER, PASS)
+"""
+import base64, glob, os, re, subprocess, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+LOGDIR = "/var/log/suricata"
+GEN = "/usr/local/bin/suricata-html-report"
+CONF = "/etc/suricata-dashboard.conf"
+CACHE_SECS = 300
+_lock = threading.Lock()
+
+def conf():
+    d = {"PORT": "5637", "USER": "admin", "PASS": ""}
+    try:
+        for l in open(CONF, encoding="utf-8"):
+            l = l.strip()
+            if l and not l.startswith("#") and "=" in l:
+                k, v = l.split("=", 1); d[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return d
+
+CFG = conf()
+
+def newest_report():
+    fs = sorted(glob.glob(f"{LOGDIR}/report-*.html"), key=os.path.getmtime, reverse=True)
+    return fs[0] if fs else None
+
+def ensure_fresh():
+    """Regenera el reporte si el mas nuevo tiene mas de CACHE_SECS (con lock)."""
+    nr = newest_report()
+    if nr and time.time() - os.path.getmtime(nr) < CACHE_SECS:
+        return nr
+    with _lock:
+        nr = newest_report()
+        if nr and time.time() - os.path.getmtime(nr) < CACHE_SECS:
+            return nr
+        try:
+            subprocess.run(["nice", "-n", "15", GEN], timeout=120,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        return newest_report()
+
+NAV = """<div style="position:sticky;top:0;z-index:9;background:#0b0b0b;color:#fff;
+padding:10px 20px;font:600 14px system-ui,sans-serif;display:flex;gap:18px;align-items:center">
+<span style="font-size:15px">Estadisticas Suricata</span>
+<a href="/" style="color:#8fc0ff;text-decoration:none">En vivo</a>
+<a href="/historico" style="color:#8fc0ff;text-decoration:none">Historico</a>
+<a href="/" style="color:#8fc0ff;text-decoration:none;margin-left:auto">&#8635; Actualizar</a>
+</div>"""
+
+def wrap(body_html, refresh=True):
+    meta = '<meta http-equiv="refresh" content="300">' if refresh else ""
+    # inserta la barra de navegacion justo despues de <body ...>
+    def ins(m):
+        return m.group(0) + NAV
+    out = re.sub(r"<body[^>]*>", ins, body_html, count=1)
+    if meta:
+        out = re.sub(r"</head>", meta + "</head>", out, count=1)
+    return out
+
+def historico_page():
+    fs = sorted(glob.glob(f"{LOGDIR}/report-*.html"), key=os.path.getmtime, reverse=True)
+    rows = []
+    for f in fs:
+        b = os.path.basename(f)
+        t = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(f)))
+        kb = os.path.getsize(f) // 1024
+        rows.append(f'<tr><td><a href="/r/{b}">{b}</a></td><td>{t}</td><td>{kb} KB</td></tr>')
+    body = ("<!doctype html><html lang=es><head><meta charset=utf-8>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<title>Historico</title><style>body{margin:0;background:#fcfcfb;"
+            "font:14px system-ui,sans-serif;color:#0b0b0b}main{max-width:800px;margin:0 auto;padding:20px}"
+            "table{width:100%;border-collapse:collapse}td{padding:8px;border-bottom:1px solid #e7e6e2}"
+            "a{color:#2a78d6}</style></head><body>"
+            "<main><h1>Reportes guardados</h1><table><tbody>"
+            + ("".join(rows) or "<tr><td>Sin reportes todavia.</td></tr>")
+            + "</tbody></table></main></body></html>")
+    return wrap(body, refresh=False)
+
+class H(BaseHTTPRequestHandler):
+    server_version = "suricata-dashboard"
+    def _auth_ok(self):
+        pw = CFG.get("PASS", "")
+        if not pw:
+            return True  # sin PASS configurada, sin auth (solo detras de VPN/proxy)
+        want = "Basic " + base64.b64encode(f"{CFG['USER']}:{pw}".encode()).decode()
+        return self.headers.get("Authorization") == want
+    def _deny(self):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Estadisticas Suricata"')
+        self.end_headers()
+    def _html(self, s, code=200):
+        b = s.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def do_GET(self):
+        if not self._auth_ok():
+            return self._deny()
+        path = self.path.split("?", 1)[0]
+        if path in ("/", "/index.html"):
+            f = ensure_fresh()
+            if not f:
+                return self._html(wrap("<body><main style='padding:20px;font:14px system-ui'>"
+                                       "<h1>Sin datos todavia</h1><p>Aun no hay reporte. "
+                                       "Espera a que llegue trafico o corre <code>suricata-html-report</code>.</p></main></body>"))
+            try:
+                return self._html(wrap(open(f, encoding="utf-8", errors="replace").read()))
+            except OSError:
+                return self._html("<h1>Error leyendo el reporte</h1>", 500)
+        if path == "/historico":
+            return self._html(historico_page())
+        m = re.match(r"^/r/(report-[0-9A-Za-z_-]+\.html)$", path)
+        if m:
+            f = os.path.join(LOGDIR, m.group(1))
+            if os.path.isfile(f):
+                try:
+                    return self._html(wrap(open(f, encoding="utf-8", errors="replace").read(), refresh=False))
+                except OSError:
+                    pass
+            return self._html("<h1>No encontrado</h1>", 404)
+        return self._html("<h1>No encontrado</h1>", 404)
+    def log_message(self, *a):
+        pass
+
+def main():
+    port = int(CFG.get("PORT", "5637"))
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), H)
+    httpd.serve_forever()
+
+if __name__ == "__main__":
+    main()
+DASH
+chmod 755 /usr/local/bin/suricata-dashboard
+if [ ! -f /etc/suricata-dashboard.conf ]; then
+  DASH_PASS="$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(16)))')"
+  cat > /etc/suricata-dashboard.conf <<CONF
+# Panel de estadisticas de Suricata. Cambia PASS y reinicia: systemctl restart suricata-dashboard
+PORT=5637
+USER=admin
+PASS=${DASH_PASS}
+CONF
+  chmod 600 /etc/suricata-dashboard.conf
+fi
+DASH_PORT="$(awk -F= '/^PORT=/{print $2}' /etc/suricata-dashboard.conf 2>/dev/null)"; DASH_PORT="${DASH_PORT:-5637}"
+DASH_PASS_SHOWN="$(awk -F= '/^PASS=/{print $2}' /etc/suricata-dashboard.conf 2>/dev/null)"
+cat > /etc/systemd/system/suricata-dashboard.service <<UNIT
+[Unit]
+Description=Panel de estadisticas de Suricata (apartado web)
+After=suricata.service
+[Service]
+Nice=15
+ExecStart=/usr/bin/python3 /usr/local/bin/suricata-dashboard
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now suricata-dashboard >/dev/null 2>&1 || systemctl restart suricata-dashboard
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw status | grep -qE "^${DASH_PORT}/tcp\s+ALLOW" || ufw allow "${DASH_PORT}/tcp" comment 'Suricata dashboard' >/dev/null 2>&1 || true
+fi
+sleep 1
+# IP para mostrar (PUB_IP aun no esta definido en este punto del script)
+DASH_IP="$(ip -o -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
+[ -n "$DASH_IP" ] || DASH_IP="$(ip -o -4 addr show dev "$IFACE" scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')"
+if systemctl is-active --quiet suricata-dashboard; then
+  ok "Panel de estadisticas: http://${DASH_IP:-<IP>}:${DASH_PORT}  (usuario admin, clave ${DASH_PASS_SHOWN})"
+else
+  warn "El panel de estadisticas no arranco; revisa: journalctl -u suricata-dashboard"
+fi
+
 # ============================================================================= TZSP (espejo MikroTik)
 # MikroTik manda el espejo por TZSP (UDP 37008). Suricata no entiende TZSP: si lo
 # escucha directo solo produce "truncated packet". Se instala un desencapsulador

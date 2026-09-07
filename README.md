@@ -54,6 +54,25 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/te
 
 > La imagen `genericcloud` de Debian no trae `curl`: antes `apt-get update && apt-get install -y curl`.
 
+## Apartado de estadisticas (panel web)
+
+Ademas de EveBox, el instalador levanta un **panel de estadisticas** propio en su puerto
+(5637 por defecto), pensado para ver de un vistazo y entregar reportes:
+
+- **En vivo**: el reporte grafico (puertos atacados, IPs origen/destino, linea de tiempo,
+  tabla de detalle) siempre al dia; se regenera solo si el ultimo tiene mas de 5 min.
+- **Historico**: lista de los reportes diarios guardados (14 dias), cada uno abrible.
+- **Login basico** (usuario `admin`, clave aleatoria que imprime el instalador y guarda en
+  `/etc/suricata-dashboard.conf`). Se sirve por HTTP plano: exponlo solo por VPN o detras
+  de tu proxy, o abre el puerto solo a tu IP.
+
+```
+http://<IP>:5637      (usuario admin, la clave la imprime el instalador)
+```
+
+Servicio `suricata-dashboard`; cambiar puerto o clave en `/etc/suricata-dashboard.conf` y
+`systemctl restart suricata-dashboard`.
+
 ## Interfaz web (EveBox)
 
 Suricata no trae web propia; el instalador integra [EveBox](https://evebox.org):

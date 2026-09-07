@@ -185,9 +185,10 @@ El instalador anade tres cosas utiles para operar sin entrar a la web:
 
 - **Reglas propias de escaneo saliente** (`/var/lib/suricata/rules/local.rules`, sids
   9000000+). ET Open no detecta port-scan; estas cazan el caso que motiva el lab: un CPE
-  de HOME_NET escaneando o atacando hacia afuera. Barrido TCP/UDP por volumen de SYN, y
-  puertos tipicos de botnet IoT (Telnet 23/2323, TR-069 7547, ADB 5555, SMB 445, RDP/VNC,
-  SMTP directo 25). Ajusta los umbrales (`threshold ... count N`) a tu red editando el
+  de HOME_NET escaneando o atacando hacia afuera. Puertos
+  tipicos de botnet IoT (Telnet 23/2323, TR-069 7547, ADB 5555, SMB 445, RDP/VNC,
+  SMTP directo 25). No hay regla generica de "todo el trafico": sobre un espejo de ISP
+  eso agota la RAM del sensor. Ajusta los umbrales (`threshold ... count N`) a tu red editando el
   archivo y `suricatasc -c reload-rules`.
 - **Auto-update diario de reglas ET** a las 04:30 (`suricata-rules-update.timer`), con
   recarga en caliente (`suricatasc -c reload-rules`, sin reiniciar el motor).

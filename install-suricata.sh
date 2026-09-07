@@ -170,10 +170,14 @@ LOCAL_RULES=/var/lib/suricata/rules/local.rules
 cat > "$LOCAL_RULES" <<'RULES'
 # local.rules — install-suricata.sh — deteccion de actividad saliente de CPEs infectados.
 # Rango sid 9000000+ (reglas locales). Ajusta umbrales segun tu red.
-
-# --- Barrido horizontal: muchas conexiones nuevas hacia afuera desde un mismo origen ---
-alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"LOCAL Posible barrido TCP saliente (muchos SYN)"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 120, seconds 60; classtype:attempted-recon; sid:9000001; rev:1;)
-alert udp $HOME_NET any -> $EXTERNAL_NET any (msg:"LOCAL Posible barrido UDP saliente"; threshold:type both, track by_src, count 200, seconds 60; classtype:attempted-recon; sid:9000002; rev:1;)
+#
+# IMPORTANTE: aqui NO hay una regla generica "todo SYN/UDP saliente". Sobre un espejo de
+# ISP (miles de clientes) una regla que casa cada paquete y hace 'track by_src' mantiene
+# un contador por cada IP de la red -> agota la RAM y tumba el sensor. Se cazan solo
+# PUERTOS concretos y raros (botnets IoT, gusanos): bajo volumen, tabla de estado pequena.
+# Si tu red es pequena (una LAN, no un espejo de ISP) y quieres barrido horizontal
+# generico, descomenta con cuidado y vigila la RAM:
+#alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"LOCAL Posible barrido TCP saliente"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 120, seconds 60; classtype:attempted-recon; sid:9000001; rev:1;)
 
 # --- Puertos tipicos de botnets IoT / gusanos (Mirai y familia) hacia afuera ---
 alert tcp $HOME_NET any -> $EXTERNAL_NET [23,2323] (msg:"LOCAL CPE escanea Telnet saliente (botnet IoT/Mirai)"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 15, seconds 60; classtype:attempted-recon; sid:9000010; rev:1;)
@@ -374,6 +378,8 @@ by_src = Counter()
 by_sig = Counter()
 pair = defaultdict(Counter)
 total = 0
+seen = 0
+MAX_LINES = 20_000_000   # tope de seguridad: no leer sin limite
 files = sorted(glob.glob(f"{LOGDIR}/eve.json*"), key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
 for p in files:
     try:
@@ -383,6 +389,9 @@ for p in files:
         continue
     try:
         for line in opener(p):
+            seen += 1
+            if seen > MAX_LINES:
+                break
             if '"event_type":"alert"' not in line:
                 continue
             try:

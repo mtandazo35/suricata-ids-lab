@@ -186,8 +186,9 @@ alert tcp $HOME_NET any -> $EXTERNAL_NET [3389,5900] (msg:"LOCAL Escaneo RDP/VNC
 alert tcp $HOME_NET any -> $EXTERNAL_NET 25 (msg:"LOCAL SMTP directo saliente desde cliente (posible spambot)"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 5, seconds 120; classtype:bad-unknown; sid:9000020; rev:1;)
 RULES
 LOCAL_COUNT="$(grep -c '^alert' "$LOCAL_RULES")"
-# registrar local.rules en rule-files (idempotente)
-if ! grep -qE '^\s*- local\.rules\s*$' "$CFG" 2>/dev/null; then
+# registrar local.rules en rule-files (idempotente). Nota: $CFG aun no esta definido
+# aqui (se fija en la seccion 'config'), por eso se usa la ruta literal.
+if ! grep -qE '^\s*- local\.rules\s*$' /etc/suricata/suricata.yaml 2>/dev/null; then
   sed -i '/^rule-files:/a\  - local.rules' /etc/suricata/suricata.yaml 2>/dev/null || true
 fi
 ok "Reglas propias de escaneo saliente: ${LOCAL_COUNT} (local.rules)."

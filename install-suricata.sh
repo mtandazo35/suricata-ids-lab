@@ -706,6 +706,13 @@ th{{color:{INK2};font-weight:600;position:sticky;top:0;background:#fff}}
 td.num,td.mono{{white-space:nowrap}} .mono{{font-family:ui-monospace,Consolas,monospace}}
 td.num{{text-align:right;font-variant-numeric:tabular-nums}}
 .tablewrap{{overflow-x:auto}}
+.pager{{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}}
+.pager button{{font:13px system-ui;padding:6px 12px;border:1px solid {GRID};background:#fff;border-radius:8px;cursor:pointer;color:{INK}}}
+.pager button:hover:not(:disabled){{background:#eef4fd;border-color:{BLUE}}}
+.pager button:disabled{{opacity:.4;cursor:default}}
+.pager #pgi{{font-weight:600;font-size:13px}}
+.pgnote{{margin-left:auto}}
+@media print{{.pager{{display:none!important}} #detalle tbody tr{{display:table-row!important}}}}
 @media(max-width:820px){{.tiles{{grid-template-columns:repeat(2,1fr)}}.grid{{grid-template-columns:1fr}}}}
 @media print{{.card,.tile{{break-inside:avoid}}header{{position:static}}}}
 </style></head><body>
@@ -729,11 +736,37 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
   </div>
   <section class="card">
     <h2>Detalle: quien ataca, a donde, por que puerto, cuando y por cuanto tiempo</h2>
-    <div class="tablewrap"><table>
+    <div class="tablewrap"><table id="detalle">
       <thead><tr><th>Origen IP:puerto</th><th>Destino IP:puerto</th><th>Puerto/proto</th>
       <th>Firma (tipo de ataque)</th><th class="num">Veces</th><th>Primera &rarr; ultima</th><th>Duracion</th></tr></thead>
       <tbody>{"".join(filas) if filas else '<tr><td colspan="7" class="muted">Sin ataques en la ventana.</td></tr>'}</tbody>
     </table></div>
+    <div class="pager" id="pager">
+      <button id="prev" type="button">&larr; Anterior</button>
+      <span id="pgi">Pagina 1</span>
+      <button id="next" type="button">Siguiente &rarr;</button>
+      <span class="pgnote muted">{len(filas)} flujos, 20 por pagina &middot; al imprimir salen todos</span>
+    </div>
+    <script>
+    (function(){{
+      var rows=[].slice.call(document.querySelectorAll('#detalle tbody tr'));
+      if(rows.length<=20){{var pg=document.getElementById('pager'); if(pg) pg.style.display='none'; return;}}
+      var per=20, n=Math.max(1,Math.ceil(rows.length/per)), p=1;
+      function rd(){{var m=(location.hash||'').match(/p=(\\d+)/); return m?Math.min(n,Math.max(1,+m[1])):1;}}
+      function draw(){{
+        for(var i=0;i<rows.length;i++) rows[i].style.display=(i>=(p-1)*per&&i<p*per)?'':'none';
+        document.getElementById('pgi').textContent='Pagina '+p+' de '+n;
+        document.getElementById('prev').disabled=(p<=1);
+        document.getElementById('next').disabled=(p>=n);
+      }}
+      function go(x){{p=Math.min(n,Math.max(1,x)); try{{location.hash='p='+p;}}catch(e){{}} draw();}}
+      p=rd();
+      document.getElementById('prev').onclick=function(){{go(p-1);}};
+      document.getElementById('next').onclick=function(){{go(p+1);}};
+      window.addEventListener('hashchange',function(){{p=rd();draw();}});
+      draw();
+    }})();
+    </script>
     <p class="muted">Top {len(filas)} flujos por numero de alertas. Se excluye ruido informativo (ET INFO).</p>
   </section>
 </main></body></html>"""

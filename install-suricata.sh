@@ -782,8 +782,70 @@ reportes diarios, con login basico. Solo biblioteca estandar. Corre como servici
 
 Config: /etc/suricata-dashboard.conf  (PORT, USER, PASS)
 """
-import base64, glob, os, re, subprocess, threading, time
+import base64, glob, html, os, re, subprocess, threading, time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+EVE = "/var/log/suricata/eve.json"
+_RE = {k: re.compile(p) for k, p in {
+    "ts": r'"timestamp":"([^"]+)"', "src_ip": r'"src_ip":"([^"]+)"',
+    "dest_ip": r'"dest_ip":"([^"]+)"', "src_port": r'"src_port":(\d+)',
+    "dest_port": r'"dest_port":(\d+)', "proto": r'"proto":"([^"]+)"',
+    "sig": r'"signature":"((?:[^"\\]|\\.)*)"',
+}.items()}
+
+def tail_alertas(path=EVE, want=40, maxbytes=4_000_000):
+    """Lee solo la cola del eve.json y devuelve los ultimos ataques (mas reciente primero)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2); size = f.tell(); start = max(0, size - maxbytes)
+            f.seek(start); data = f.read()
+    except OSError:
+        return []
+    lines = data.decode("utf-8", "replace").split("\n")
+    if start > 0 and lines:
+        lines = lines[1:]
+    out = []
+    for line in reversed(lines):
+        if '"event_type":"alert"' not in line:
+            continue
+        g = lambda k: (_RE[k].search(line).group(1) if _RE[k].search(line) else "")
+        sig = g("sig")
+        if sig.startswith("ET INFO"):
+            continue
+        ts = g("ts")
+        hh = ts[11:19] if len(ts) >= 19 else ""
+        src = g("src_ip"); dst = g("dest_ip"); sp = g("src_port"); dp = g("dest_port"); pr = g("proto")
+        origen = f"{src}:{sp}" if sp else src
+        destino = f"{dst}:{dp}" if dp else dst
+        out.append((hh, origen, destino, f"{dp}/{pr}" if dp else pr, sig))
+        if len(out) >= want:
+            break
+    return out
+
+def live_feed_html():
+    filas = tail_alertas()
+    if not filas:
+        cuerpo = '<tr><td colspan="5" style="color:#52514e;padding:12px">Sin ataques recientes o esperando trafico...</td></tr>'
+    else:
+        cuerpo = "".join(
+            f'<tr><td class="mono">{html.escape(h)}</td><td class="mono">{html.escape(o)}</td>'
+            f'<td class="mono">{html.escape(d)}</td><td>{html.escape(pp)}</td><td>{html.escape(s)}</td></tr>'
+            for h, o, d, pp, s in filas)
+    ahora = datetime.now().strftime("%H:%M:%S")
+    return (f'<section class="card" style="margin:16px 28px">'
+            f'<h2 style="margin:0 0 6px">Ultimos ataques en vivo <span style="font-weight:400;color:#52514e;font-size:12px">'
+            f'(se actualiza solo &middot; {ahora})</span></h2>'
+            f'<div style="max-height:340px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px">'
+            f'<thead><tr style="position:sticky;top:0;background:#fff">'
+            f'<th style="text-align:left;padding:5px 8px;color:#52514e">Hora</th>'
+            f'<th style="text-align:left;padding:5px 8px;color:#52514e">Origen</th>'
+            f'<th style="text-align:left;padding:5px 8px;color:#52514e">Destino</th>'
+            f'<th style="text-align:left;padding:5px 8px;color:#52514e">Puerto</th>'
+            f'<th style="text-align:left;padding:5px 8px;color:#52514e">Ataque</th></tr></thead>'
+            f'<tbody>{cuerpo}</tbody></table></div></section>'
+            f'<style>.mono{{font-family:ui-monospace,Consolas,monospace}}'
+            f'tbody td{{padding:4px 8px;border-bottom:1px solid #eee}}</style>')
 
 LOGDIR = "/var/log/suricata"
 GEN = "/usr/local/bin/suricata-html-report"
@@ -883,17 +945,28 @@ class H(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             f = newest_report()   # instantaneo: nunca regenera en el request
-            if not f:
-                return self._html(wrap("<!doctype html><html><head><meta charset=utf-8>"
-                                       "<meta http-equiv=refresh content=8></head>"
-                                       "<body><main style='padding:24px;font:15px system-ui'>"
-                                       "<h1>Preparando estadisticas...</h1><p>El primer reporte se esta "
-                                       "generando en segundo plano. Esta pagina se actualiza sola.</p></main></body></html>",
-                                       refresh=False))
-            try:
-                return self._html(wrap(open(f, encoding="utf-8", errors="replace").read()))
-            except OSError:
-                return self._html("<h1>Error leyendo el reporte</h1>", 500)
+            feed = live_feed_html()
+            # cabeza/estilos y <main> (resumen 24h) del ultimo reporte, si existe
+            head_css = ""; resumen = ""
+            if f:
+                try:
+                    doc = open(f, encoding="utf-8", errors="replace").read()
+                    mh = re.search(r"<style>(.*?)</style>", doc, re.S)
+                    head_css = f"<style>{mh.group(1)}</style>" if mh else ""
+                    mm = re.search(r"<main[^>]*>(.*?)</main>", doc, re.S)
+                    resumen = ("<h2 style='margin:16px 28px 0'>Resumen de las ultimas 24h</h2>"
+                               f"<main>{mm.group(1)}</main>") if mm else ""
+                except OSError:
+                    pass
+            if not resumen:
+                resumen = ("<main style='padding:24px'><p style='color:#52514e'>El resumen de 24h se "
+                           "esta generando en segundo plano; aparecera aqui en unos minutos. "
+                           "El feed de arriba ya esta en vivo.</p></main>")
+            page = (f"<!doctype html><html lang=es><head><meta charset=utf-8>"
+                    f"<meta name=viewport content='width=device-width,initial-scale=1'>"
+                    f"<meta http-equiv=refresh content=20><title>Estadisticas Suricata</title>"
+                    f"{head_css}</head><body>{NAV}{feed}{resumen}</body></html>")
+            return self._html(page)
         if path == "/historico":
             return self._html(historico_page())
         m = re.match(r"^/r/(report-[0-9A-Za-z_-]+\.html)$", path)

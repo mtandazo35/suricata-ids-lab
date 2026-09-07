@@ -351,7 +351,7 @@ fi
 # Telegram en /etc/suricata-report.conf, lo envia; si no, lo deja en /var/log/suricata/.
 cat > /usr/local/bin/suricata-report <<'REP'
 #!/usr/bin/env python3
-"""Informe de infractores de las ultimas 24h desde eve.json (+ rotados)."""
+"""Informe diario de Suricata en lenguaje claro: quien esta infectado y que hacer."""
 import glob, gzip, io, json, os, socket, time, urllib.request, urllib.parse
 from collections import Counter, defaultdict
 
@@ -359,6 +359,7 @@ CONF = "/etc/suricata-report.conf"
 LOGDIR = "/var/log/suricata"
 HOURS = 24
 cutoff = time.time() - HOURS * 3600
+MAX_LINES = 20_000_000
 
 def conf():
     d = {}
@@ -374,12 +375,38 @@ def conf():
 def opener(p):
     return io.TextIOWrapper(gzip.open(p, "rb")) if p.endswith(".gz") else open(p, encoding="utf-8", errors="replace")
 
-by_src = Counter()
-by_sig = Counter()
+# Clasificacion: (claves, nivel, explicacion, accion). nivel 1=infectado, 2=atacando, 3=sospechoso.
+# Gana la primera regla cuya palabra clave aparece en la firma.
+REGLAS = [
+    (("cnc", "c2 ", "botnet", "mirai", "katana", "trojan", "ransom", " rat ", "coinmin", "cryptomin"),
+     1, "equipo infectado hablando con su centro de mando", "aislar/cuarentena y avisar al cliente"),
+    (("malware", "compromised"),
+     1, "trafico de malware confirmado", "aislar/cuarentena y avisar al cliente"),
+    (("ssh scan", "brute", "password"),
+     2, "atacando contrasenas (SSH/servicios) hacia afuera", "bloquear salida y revisar el equipo"),
+    (("scan", "recon", "sweep", "escanea", "barrido", "portscan"),
+     2, "escaneando puertos hacia internet (tipico de infeccion)", "revisar el equipo, muy probable infeccion"),
+    (("exploit", "attack", "cve-", "shellcode", "attempted-admin"),
+     2, "intentando explotar/atacar hacia afuera", "revisar el equipo"),
+    (("dyn_dns", "dynamic_dns", "duckdns", "dyndns", "no-ip", ".cc tld", "suspicious", "likely hostile", "adware", "pup"),
+     3, "consultas a dominios sospechosos (dyndns/.cc/adware)", "vigilar; comun en equipos comprometidos"),
+]
+
+def clasifica(sig):
+    s = sig.lower()
+    for claves, nivel, expl, accion in REGLAS:
+        if any(k in s for k in claves):
+            return nivel, expl, accion
+    return 3, "actividad sospechosa", "vigilar"
+
+by_src_nivel = {}
+by_src_expl = {}
+by_src_accion = {}
+by_src_total = Counter()
 pair = defaultdict(Counter)
 total = 0
 seen = 0
-MAX_LINES = 20_000_000   # tope de seguridad: no leer sin limite
+
 files = sorted(glob.glob(f"{LOGDIR}/eve.json*"), key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
 for p in files:
     try:
@@ -401,34 +428,47 @@ for p in files:
             if e.get("event_type") != "alert":
                 continue
             a = e.get("alert", {})
-            # solo lo relevante: fuera ET INFO y las categorias meramente informativas
-            cat = (a.get("category") or "")
             sig = a.get("signature", "")
+            cat = a.get("category") or ""
             if sig.startswith("ET INFO") or "Not Suspicious" in cat or "Misc activity" in cat:
                 continue
             src = e.get("src_ip", "?")
-            by_src[src] += 1
-            by_sig[sig] += 1
+            nivel, expl, accion = clasifica(sig)
+            by_src_total[src] += 1
             pair[src][sig] += 1
+            if src not in by_src_nivel or nivel < by_src_nivel[src]:
+                by_src_nivel[src] = nivel; by_src_expl[src] = expl; by_src_accion[src] = accion
             total += 1
     except OSError:
         continue
 
 host = socket.gethostname()
-lines = [f"IDS {host}: {total} alertas graves en {HOURS}h"]
-if total:
-    lines.append("")
-    lines.append("Top IPs origen (posibles CPEs infectados):")
-    for ip, n in by_src.most_common(10):
-        top_sig = pair[ip].most_common(1)[0][0]
-        lines.append(f"  {ip:16s} {n:5d}  {top_sig[:60]}")
-    lines.append("")
-    lines.append("Top firmas:")
-    for sig, n in by_sig.most_common(10):
-        lines.append(f"  {n:5d}  {sig[:70]}")
-else:
-    lines.append("Sin alertas graves. (Revisa que llegue trafico.)")
-report = "\n".join(lines)
+NOMBRE = {1: "INFECTADOS (actuar ya)", 2: "ATACANDO / ESCANEANDO (revisar)", 3: "SOSPECHOSOS (vigilar)"}
+grupos = defaultdict(list)
+for ip in by_src_total:
+    grupos[by_src_nivel[ip]].append(ip)
+
+L = []
+L.append(f"IDS {host} - resumen de {HOURS}h")
+n1 = len(grupos.get(1, [])); n2 = len(grupos.get(2, [])); n3 = len(grupos.get(3, []))
+L.append(f"Infectados: {n1}   Atacando: {n2}   Sospechosos: {n3}   (alertas graves: {total})")
+if not total:
+    L.append("")
+    L.append("Sin alertas graves. Revisa que este llegando trafico del espejo.")
+for nivel in (1, 2, 3):
+    ips = grupos.get(nivel, [])
+    if not ips:
+        continue
+    ips.sort(key=lambda ip: by_src_total[ip], reverse=True)
+    L.append("")
+    L.append(f"== {NOMBRE[nivel]} ==")
+    for ip in ips[:15]:
+        veces = by_src_total[ip]
+        L.append(f"  {ip:16s}  {by_src_expl[ip]}")
+        L.append(f"  {'':16s}  -> {by_src_accion[ip]}  ({veces} alertas)")
+    if len(ips) > 15:
+        L.append(f"  ... y {len(ips)-15} equipos mas en este grupo")
+report = "\n".join(L)
 
 out = os.path.join(LOGDIR, "report-" + time.strftime("%Y%m%d") + ".txt")
 try:

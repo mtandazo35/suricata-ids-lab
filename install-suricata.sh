@@ -497,12 +497,253 @@ if [ ! -f /etc/suricata-report.conf ]; then
 CONF
   chmod 600 /etc/suricata-report.conf
 fi
+# --- reporte HTML grafico (puertos, IPs origen/destino, linea de tiempo, tabla) ---
+cat > /usr/local/bin/suricata-html-report <<'HREP'
+#!/usr/bin/env python3
+"""Genera un reporte HTML grafico de ataques desde eve.json de Suricata.
+
+Muestra: puertos de destino atacados, IPs origen (atacantes), IPs destino
+(objetivos), linea de tiempo por hora, y una tabla origen IP:puerto -> destino
+IP:puerto con firma, protocolo, primera/ultima hora y duracion. Autocontenido
+(sin dependencias externas): se abre en el navegador o se imprime a PDF.
+
+Uso: suricata-html-report [horas]   (default 24)
+Salida: /var/log/suricata/report-AAAAMMDD-HHMM.html
+"""
+import glob, gzip, io, json, os, sys, html, time
+from collections import Counter, defaultdict
+from datetime import datetime
+
+LOGDIR = "/var/log/suricata"
+HOURS = int(sys.argv[1]) if len(sys.argv) > 1 else 24
+cutoff = time.time() - HOURS * 3600
+MAX_LINES = 20_000_000
+
+def opener(p):
+    return io.TextIOWrapper(gzip.open(p, "rb")) if p.endswith(".gz") else open(p, encoding="utf-8", errors="replace")
+
+def parse_ts(s):
+    try:
+        return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
+    except Exception:
+        return None
+
+by_dport = Counter()
+by_src = Counter()
+by_dst = Counter()
+by_hour = Counter()
+flujos = {}            # (src,sport,dst,dport,proto,sig) -> [count, first, last]
+total = 0
+seen = 0
+
+files = sorted(glob.glob(f"{LOGDIR}/eve.json*"), key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
+for p in files:
+    try:
+        if os.path.getmtime(p) < cutoff - 3600:
+            continue
+    except OSError:
+        continue
+    try:
+        for line in opener(p):
+            seen += 1
+            if seen > MAX_LINES:
+                break
+            if '"event_type":"alert"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            if e.get("event_type") != "alert":
+                continue
+            a = e.get("alert", {})
+            sig = a.get("signature", "")
+            cat = a.get("category") or ""
+            if sig.startswith("ET INFO") or "Not Suspicious" in cat or "Misc activity" in cat:
+                continue
+            ts = parse_ts(e.get("timestamp", ""))
+            if ts and ts < cutoff:
+                continue
+            src = e.get("src_ip", "?"); dst = e.get("dest_ip", "?")
+            sport = e.get("src_port", ""); dport = e.get("dest_port", "")
+            proto = e.get("proto", "")
+            by_dst[dst] += 1
+            by_src[src] += 1
+            if dport != "":
+                by_dport[f"{dport}/{proto}"] += 1
+            if ts:
+                by_hour[int(ts // 3600)] += 1
+            k = (src, sport, dst, dport, proto, sig)
+            f = flujos.get(k)
+            if f is None:
+                flujos[k] = [1, ts or 0, ts or 0]
+            else:
+                f[0] += 1
+                if ts:
+                    if not f[1] or ts < f[1]: f[1] = ts
+                    if ts > f[2]: f[2] = ts
+            total += 1
+    except OSError:
+        continue
+
+# --- helpers de render (SVG inline, sin JS) ---
+BLUE = "#2a78d6"; GRID = "#e7e6e2"; INK = "#0b0b0b"; INK2 = "#52514e"; SURF = "#fcfcfb"
+
+def esc(x): return html.escape(str(x))
+
+def hbar(titulo, pares, unidad="alertas", fmt=str):
+    """Barras horizontales rankeadas, un solo tono, etiqueta de valor directa."""
+    if not pares:
+        return f'<section class="card"><h2>{esc(titulo)}</h2><p class="muted">Sin datos.</p></section>'
+    mx = max(v for _, v in pares) or 1
+    rowh, gap, lblw, barw = 26, 8, 150, 460
+    h = len(pares) * (rowh + gap) + 8
+    W = lblw + barw + 70
+    rows = []
+    for i, (name, v) in enumerate(pares):
+        y = i * (rowh + gap) + 4
+        w = max(2, int(barw * v / mx))
+        rows.append(
+            f'<text x="{lblw-8}" y="{y+rowh*0.68:.0f}" text-anchor="end" class="lbl">{esc(name)}</text>'
+            f'<rect x="{lblw}" y="{y}" width="{w}" height="{rowh}" rx="4" fill="{BLUE}"/>'
+            f'<text x="{lblw+w+6}" y="{y+rowh*0.68:.0f}" class="val">{esc(fmt(v))}</text>'
+        )
+    return (f'<section class="card"><h2>{esc(titulo)}</h2>'
+            f'<svg viewBox="0 0 {W} {h}" width="100%" role="img" aria-label="{esc(titulo)}">'
+            f'{"".join(rows)}</svg><p class="muted">en {unidad}</p></section>')
+
+def timeline(by_hour):
+    if not by_hour:
+        return ""
+    hrs = sorted(by_hour)
+    lo = hrs[0]
+    n = hrs[-1] - lo + 1
+    vals = [by_hour.get(lo + i, 0) for i in range(n)]
+    mx = max(vals) or 1
+    W, H, pad = 900, 180, 30
+    bw = (W - 2 * pad) / max(1, n)
+    bars, ticks = [], []
+    for i, v in enumerate(vals):
+        x = pad + i * bw
+        bh = (H - 2 * pad) * v / mx
+        bars.append(f'<rect x="{x:.1f}" y="{H-pad-bh:.1f}" width="{max(1,bw-2):.1f}" height="{bh:.1f}" rx="2" fill="{BLUE}"/>')
+        if i % max(1, n // 12) == 0:
+            hh = datetime.fromtimestamp((lo + i) * 3600).strftime("%Hh")
+            ticks.append(f'<text x="{x+bw/2:.1f}" y="{H-pad+14:.0f}" text-anchor="middle" class="tick">{hh}</text>')
+    return (f'<section class="card wide"><h2>Ataques por hora (ultimas {HOURS}h)</h2>'
+            f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" aria-label="alertas por hora">'
+            f'<line x1="{pad}" y1="{H-pad}" x2="{W-pad}" y2="{H-pad}" stroke="{GRID}"/>'
+            f'{"".join(bars)}{"".join(ticks)}</svg>'
+            f'<p class="muted">pico: {mx} alertas/hora</p></section>')
+
+def dur(a, b):
+    if not a or not b or b < a:
+        return "-"
+    s = int(b - a)
+    if s < 60: return f"{s}s"
+    if s < 3600: return f"{s//60}m"
+    return f"{s//3600}h{(s%3600)//60:02d}m"
+
+host = os.uname().nodename if hasattr(os, "uname") else "suricata"
+gen = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+top_flujos = sorted(flujos.items(), key=lambda kv: kv[1][0], reverse=True)[:150]
+filas = []
+for (src, sport, dst, dport, proto, sig), (cnt, first, last) in top_flujos:
+    origen = f"{src}:{sport}" if sport != "" else src
+    destino = f"{dst}:{dport}" if dport != "" else dst
+    hp = datetime.fromtimestamp(first).strftime("%d/%m %H:%M") if first else "-"
+    hu = datetime.fromtimestamp(last).strftime("%H:%M") if last else "-"
+    filas.append(
+        f"<tr><td class='mono'>{esc(origen)}</td><td class='mono'>{esc(destino)}</td>"
+        f"<td>{esc(dport)}/{esc(proto)}</td><td>{esc(sig)}</td>"
+        f"<td class='num'>{cnt}</td><td class='mono'>{hp} &rarr; {hu}</td><td>{dur(first,last)}</td></tr>")
+
+def top(counter, n=12, fmt=str):
+    return [(fmt(k), v) for k, v in counter.most_common(n)]
+
+by_sig = Counter()
+for _k, _v in flujos.items():
+    by_sig[_k[5]] += _v[0]
+firmas_top = [(s[:40], n) for s, n in by_sig.most_common(12)]
+
+doc = f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reporte de ataques - {esc(host)}</title>
+<style>
+:root{{color-scheme:light}}
+*{{box-sizing:border-box}}
+body{{margin:0;background:{SURF};color:{INK};font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}}
+header{{padding:22px 28px;border-bottom:2px solid {INK};display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px}}
+h1{{margin:0;font-size:20px}} h2{{margin:0 0 10px;font-size:15px}}
+.sub{{color:{INK2};font-size:13px}}
+main{{padding:20px 28px;max-width:1200px;margin:0 auto}}
+.tiles{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}}
+.tile{{border:1px solid {GRID};border-radius:10px;padding:14px 16px;background:#fff}}
+.tile .big{{font-size:30px;font-weight:700;line-height:1}}
+.tile .lab{{font-size:12px;color:{INK2};margin-top:6px;display:flex;align-items:center;gap:6px}}
+.dot{{width:11px;height:11px;border-radius:3px;display:inline-block}}
+.grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
+.card{{border:1px solid {GRID};border-radius:10px;padding:16px;background:#fff;margin-bottom:16px}}
+.card.wide{{grid-column:1/-1}}
+.lbl{{font-size:12px;fill:{INK2}}} .val{{font-size:12px;fill:{INK};font-weight:600}}
+.tick{{font-size:11px;fill:{INK2}}}
+.muted{{color:{INK2};font-size:12px;margin:8px 0 0}}
+table{{width:100%;border-collapse:collapse;font-size:12.5px}}
+th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid {GRID};vertical-align:top}}
+th{{color:{INK2};font-weight:600;position:sticky;top:0;background:#fff}}
+td.num,td.mono{{white-space:nowrap}} .mono{{font-family:ui-monospace,Consolas,monospace}}
+td.num{{text-align:right;font-variant-numeric:tabular-nums}}
+.tablewrap{{overflow-x:auto}}
+@media(max-width:820px){{.tiles{{grid-template-columns:repeat(2,1fr)}}.grid{{grid-template-columns:1fr}}}}
+@media print{{.card,.tile{{break-inside:avoid}}header{{position:static}}}}
+</style></head><body>
+<header>
+  <div><h1>Reporte de ataques - IDS {esc(host)}</h1>
+  <div class="sub">Ultimas {HOURS} horas &middot; {total:,} alertas graves &middot; generado {gen}</div></div>
+</header>
+<main>
+  <div class="tiles">
+    <div class="tile"><div class="big">{total:,}</div><div class="lab">alertas graves</div></div>
+    <div class="tile"><div class="big">{len(by_src):,}</div><div class="lab"><span class="dot" style="background:#e34948"></span>IPs origen (atacantes)</div></div>
+    <div class="tile"><div class="big">{len(by_dst):,}</div><div class="lab"><span class="dot" style="background:#eb6834"></span>IPs destino (objetivos)</div></div>
+    <div class="tile"><div class="big">{len(by_dport):,}</div><div class="lab"><span class="dot" style="background:#eda100"></span>puertos destino distintos</div></div>
+  </div>
+  {timeline(by_hour)}
+  <div class="grid">
+    {hbar("Puertos de destino mas atacados", top(by_dport), "alertas")}
+    {hbar("IPs origen (atacantes)", top(by_src), "alertas")}
+    {hbar("IPs destino (objetivos)", top(by_dst), "alertas")}
+    {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas")}
+  </div>
+  <section class="card">
+    <h2>Detalle: quien ataca, a donde, por que puerto, cuando y por cuanto tiempo</h2>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Origen IP:puerto</th><th>Destino IP:puerto</th><th>Puerto/proto</th>
+      <th>Firma (tipo de ataque)</th><th class="num">Veces</th><th>Primera &rarr; ultima</th><th>Duracion</th></tr></thead>
+      <tbody>{"".join(filas) if filas else '<tr><td colspan="7" class="muted">Sin ataques en la ventana.</td></tr>'}</tbody>
+    </table></div>
+    <p class="muted">Top {len(filas)} flujos por numero de alertas. Se excluye ruido informativo (ET INFO).</p>
+  </section>
+</main></body></html>"""
+
+out = os.path.join(LOGDIR, "report-" + datetime.now().strftime("%Y%m%d-%H%M") + ".html")
+open(out, "w", encoding="utf-8").write(doc)
+print(out)
+HREP
+chmod 755 /usr/local/bin/suricata-html-report
+
 cat > /etc/systemd/system/suricata-report.service <<'UNIT'
 [Unit]
 Description=Informe diario de infractores de Suricata
 [Service]
 Type=oneshot
+Nice=15
+IOSchedulingClass=idle
 ExecStart=/usr/local/bin/suricata-report
+ExecStart=/usr/local/bin/suricata-html-report
+# conservar 14 dias de reportes (texto y html)
+ExecStartPost=/bin/sh -c 'find /var/log/suricata -maxdepth 1 -name "report-*.txt" -o -name "report-*.html" | sort | head -n -28 | xargs -r rm -f --'
 UNIT
 cat > /etc/systemd/system/suricata-report.timer <<'UNIT'
 [Unit]
@@ -515,7 +756,8 @@ WantedBy=timers.target
 UNIT
 systemctl daemon-reload
 systemctl enable --now suricata-report.timer >/dev/null 2>&1 || true
-ok "Informe diario 07:30 (suricata-report.timer). Telegram opcional en /etc/suricata-report.conf."
+ok "Informe diario 07:30 (suricata-report.timer): texto por Telegram + reporte HTML grafico."
+ok "  Reporte HTML a mano: suricata-html-report  ->  /var/log/suricata/report-AAAAMMDD-HHMM.html"
 
 # ============================================================================= TZSP (espejo MikroTik)
 # MikroTik manda el espejo por TZSP (UDP 37008). Suricata no entiende TZSP: si lo

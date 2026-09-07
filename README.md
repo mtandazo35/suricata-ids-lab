@@ -192,11 +192,16 @@ El instalador anade tres cosas utiles para operar sin entrar a la web:
   archivo y `suricatasc -c reload-rules`.
 - **Auto-update diario de reglas ET** a las 04:30 (`suricata-rules-update.timer`), con
   recarga en caliente (`suricatasc -c reload-rules`, sin reiniciar el motor).
-- **Informe diario de infractores** a las 07:30 (`suricata-report.timer`): top de IPs
-  origen con alertas graves (sin `ET INFO`) de las ultimas 24h. Se guarda en
-  `/var/log/suricata/report-AAAAMMDD.txt` y, si rellenas `/etc/suricata-report.conf` con
-  un token de bot de Telegram y tu chat_id, te llega al telefono. Pruebalo a mano con
-  `suricata-report`.
+- **Informe diario a las 07:30** (`suricata-report.timer`), en dos formatos:
+  - **Texto claro por Telegram**: agrupa por gravedad (INFECTADOS / ATACANDO /
+    SOSPECHOSOS), una linea por equipo con que le pasa y que hacer. Rellena el token de
+    bot y tu chat_id en `/etc/suricata-report.conf`; sin eso se guarda en
+    `/var/log/suricata/report-AAAAMMDD.txt`. A mano: `suricata-report`.
+  - **Reporte HTML grafico** (`suricata-html-report` -> `report-AAAAMMDD-HHMM.html`):
+    puertos de destino mas atacados, top de IPs origen (atacantes) y destino (objetivos),
+    linea de tiempo por hora, y una tabla de detalle con origen IP:puerto -> destino
+    IP:puerto, firma, veces y duracion (primera -> ultima vez). Autocontenido, se abre en
+    el navegador o se imprime a PDF para entregar. Los reportes se guardan 14 dias.
 
 ## Espejo desde MikroTik (TZSP)
 

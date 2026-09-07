@@ -794,8 +794,21 @@ _RE = {k: re.compile(p) for k, p in {
     "sig": r'"signature":"((?:[^"\\]|\\.)*)"',
 }.items()}
 
-def tail_alertas(path=EVE, want=40, maxbytes=4_000_000):
-    """Lee solo la cola del eve.json y devuelve los ultimos ataques (mas reciente primero)."""
+SEV = [  # (claves en la firma, color, etiqueta)
+    (("cnc", "c2 ", "botnet", "mirai", "katana", "trojan", "ransom", "coinmin"), "#e34948", "INFECTADO"),
+    (("malware", "compromised"), "#e34948", "MALWARE"),
+    (("scan", "brute", "exploit", "attack", "recon", "sweep", "portscan"), "#eb6834", "ATAQUE"),
+    (("dyn_dns", "dynamic_dns", "duckdns", "dyndns", "no-ip", "tld", "adware", "pup", "suspicious", "hostile"), "#eda100", "SOSPECHOSO"),
+]
+def sev(sig):
+    s = sig.lower()
+    for claves, color, etq in SEV:
+        if any(k in s for k in claves):
+            return color, etq
+    return "#8a8a86", "OTRO"
+
+def tail_grupos(path=EVE, want=200, maxbytes=6_000_000, top=25):
+    """Cola del eve.json agrupada por (origen, destino, puerto, firma) con contador."""
     try:
         with open(path, "rb") as f:
             f.seek(0, 2); size = f.tell(); start = max(0, size - maxbytes)
@@ -805,47 +818,78 @@ def tail_alertas(path=EVE, want=40, maxbytes=4_000_000):
     lines = data.decode("utf-8", "replace").split("\n")
     if start > 0 and lines:
         lines = lines[1:]
-    out = []
+    g = {}
+    vistos = 0
     for line in reversed(lines):
         if '"event_type":"alert"' not in line:
             continue
-        g = lambda k: (_RE[k].search(line).group(1) if _RE[k].search(line) else "")
-        sig = g("sig")
+        get = lambda k: (_RE[k].search(line).group(1) if _RE[k].search(line) else "")
+        sig = get("sig")
         if sig.startswith("ET INFO"):
             continue
-        ts = g("ts")
-        hh = ts[11:19] if len(ts) >= 19 else ""
-        src = g("src_ip"); dst = g("dest_ip"); sp = g("src_port"); dp = g("dest_port"); pr = g("proto")
-        origen = f"{src}:{sp}" if sp else src
-        destino = f"{dst}:{dp}" if dp else dst
-        out.append((hh, origen, destino, f"{dp}/{pr}" if dp else pr, sig))
-        if len(out) >= want:
+        vistos += 1
+        src = get("src_ip"); dst = get("dest_ip"); dp = get("dest_port"); pr = get("proto")
+        ts = get("ts"); hh = ts[11:19] if len(ts) >= 19 else ""
+        key = (src, dst, f"{dp}/{pr}" if dp else pr, sig)
+        r = g.get(key)
+        if r is None:
+            g[key] = [1, hh]      # primera vez que lo vemos (= mas reciente, vamos al reves)
+        else:
+            r[0] += 1
+        if vistos >= want:
             break
-    return out
+    filas = [(hh, k[0], k[1], k[2], k[3], c) for k, (c, hh) in g.items()]
+    filas.sort(key=lambda x: x[0], reverse=True)   # mas reciente primero
+    return filas[:top]
 
 def live_feed_html():
-    filas = tail_alertas()
+    filas = tail_grupos()
     if not filas:
-        cuerpo = '<tr><td colspan="5" style="color:#52514e;padding:12px">Sin ataques recientes o esperando trafico...</td></tr>'
+        cuerpo = '<tr><td colspan="6" class="muted" style="padding:14px">Sin ataques recientes o esperando trafico...</td></tr>'
     else:
-        cuerpo = "".join(
-            f'<tr><td class="mono">{html.escape(h)}</td><td class="mono">{html.escape(o)}</td>'
-            f'<td class="mono">{html.escape(d)}</td><td>{html.escape(pp)}</td><td>{html.escape(s)}</td></tr>'
-            for h, o, d, pp, s in filas)
+        tr = []
+        for hh, src, dst, puerto, sig, cnt in filas:
+            color, etq = sev(sig)
+            veces = f'<span class="veces">&times;{cnt}</span>' if cnt > 1 else ""
+            tr.append(
+                f'<tr style="border-left:4px solid {color}">'
+                f'<td class="mono t">{html.escape(hh)}</td>'
+                f'<td><span class="badge" style="background:{color}">{etq}</span></td>'
+                f'<td class="mono">{html.escape(src)}</td>'
+                f'<td class="mono dst">{html.escape(dst)}</td>'
+                f'<td class="mono">{html.escape(puerto)}</td>'
+                f'<td>{html.escape(sig)} {veces}</td></tr>')
+        cuerpo = "".join(tr)
     ahora = datetime.now().strftime("%H:%M:%S")
-    return (f'<section class="card" style="margin:16px 28px">'
-            f'<h2 style="margin:0 0 6px">Ultimos ataques en vivo <span style="font-weight:400;color:#52514e;font-size:12px">'
-            f'(se actualiza solo &middot; {ahora})</span></h2>'
-            f'<div style="max-height:340px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px">'
-            f'<thead><tr style="position:sticky;top:0;background:#fff">'
-            f'<th style="text-align:left;padding:5px 8px;color:#52514e">Hora</th>'
-            f'<th style="text-align:left;padding:5px 8px;color:#52514e">Origen</th>'
-            f'<th style="text-align:left;padding:5px 8px;color:#52514e">Destino</th>'
-            f'<th style="text-align:left;padding:5px 8px;color:#52514e">Puerto</th>'
-            f'<th style="text-align:left;padding:5px 8px;color:#52514e">Ataque</th></tr></thead>'
-            f'<tbody>{cuerpo}</tbody></table></div></section>'
-            f'<style>.mono{{font-family:ui-monospace,Consolas,monospace}}'
-            f'tbody td{{padding:4px 8px;border-bottom:1px solid #eee}}</style>')
+    return (
+        '<style>'
+        '.feed{margin:20px 28px}'
+        '.feed h2{display:flex;align-items:center;gap:10px;margin:0 0 12px}'
+        '.pulse{width:9px;height:9px;border-radius:50%;background:#e34948;display:inline-block;'
+        'box-shadow:0 0 0 0 rgba(227,73,72,.6);animation:pulse 1.6s infinite}'
+        '@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(227,73,72,.5)}70%{box-shadow:0 0 0 8px rgba(227,73,72,0)}100%{box-shadow:0 0 0 0 rgba(227,73,72,0)}}'
+        '.feedwrap{max-height:420px;overflow:auto;border:1px solid #e7e6e2;border-radius:10px}'
+        '.feed table{width:100%;border-collapse:collapse;font-size:12.5px}'
+        '.feed thead th{position:sticky;top:0;background:#f4f4f2;color:#52514e;text-align:left;'
+        'padding:9px 10px;font-weight:600;border-bottom:1px solid #e7e6e2;z-index:1}'
+        '.feed tbody td{padding:7px 10px;border-bottom:1px solid #f0efec;vertical-align:middle}'
+        '.feed tbody tr:nth-child(even){background:#fbfbfa}'
+        '.feed tbody tr:hover{background:#eef4fd}'
+        '.feed .mono{font-family:ui-monospace,Consolas,monospace}'
+        '.feed .t{color:#52514e;white-space:nowrap}'
+        '.feed .dst{color:#184f95}'
+        '.badge{color:#fff;font-size:10px;font-weight:700;letter-spacing:.3px;'
+        'padding:2px 7px;border-radius:20px;white-space:nowrap}'
+        '.veces{background:#ecebe7;color:#52514e;font-size:11px;padding:1px 6px;border-radius:10px;margin-left:4px}'
+        '</style>'
+        f'<section class="feed">'
+        f'<h2><span class="pulse"></span>Ultimos ataques en vivo'
+        f'<span style="font-weight:400;color:#52514e;font-size:12px">se actualiza solo &middot; {ahora}</span></h2>'
+        f'<div class="feedwrap"><table>'
+        f'<thead><tr><th>Hora</th><th>Tipo</th><th>Origen (equipo)</th><th>Destino</th><th>Puerto</th><th>Ataque</th></tr></thead>'
+        f'<tbody>{cuerpo}</tbody></table></div>'
+        f'<p class="muted" style="margin:8px 2px">Agrupado por equipo y tipo &middot; &times;N = veces repetido</p>'
+        f'</section>')
 
 LOGDIR = "/var/log/suricata"
 GEN = "/usr/local/bin/suricata-html-report"
@@ -883,13 +927,21 @@ def refrescador():
                 pass
         time.sleep(30)
 
-NAV = """<div style="position:sticky;top:0;z-index:9;background:#0b0b0b;color:#fff;
-padding:10px 20px;font:600 14px system-ui,sans-serif;display:flex;gap:18px;align-items:center">
-<span style="font-size:15px">Estadisticas Suricata</span>
-<a href="/" style="color:#8fc0ff;text-decoration:none">En vivo</a>
-<a href="/historico" style="color:#8fc0ff;text-decoration:none">Historico</a>
-<a href="/" style="color:#8fc0ff;text-decoration:none;margin-left:auto">&#8635; Actualizar</a>
-</div>"""
+NAV = """<style>
+.nav{position:sticky;top:0;z-index:20;background:#0b0b0b;color:#fff;padding:0 22px;
+font:14px system-ui,-apple-system,Segoe UI,sans-serif;display:flex;align-items:center;gap:6px;
+box-shadow:0 1px 6px rgba(0,0,0,.15)}
+.nav .brand{font-weight:700;font-size:15px;margin-right:18px;display:flex;align-items:center;gap:8px}
+.nav .brand .sh{width:10px;height:10px;border-radius:3px;background:#2a78d6}
+.nav a{color:#cfd8e3;text-decoration:none;padding:14px 12px;border-bottom:2px solid transparent}
+.nav a:hover{color:#fff}
+.nav a.on{color:#fff;border-bottom-color:#2a78d6}
+.nav .sp{margin-left:auto}
+</style>
+<div class="nav"><span class="brand"><span class="sh"></span>Estadisticas Suricata</span>
+<a href="/" class="on">En vivo</a>
+<a href="/historico">Historico</a>
+<a href="/" class="sp">&#8635; Actualizar</a></div>"""
 
 def wrap(body_html, refresh=True):
     meta = '<meta http-equiv="refresh" content="300">' if refresh else ""
@@ -961,11 +1013,11 @@ class H(BaseHTTPRequestHandler):
             if not resumen:
                 resumen = ("<main style='padding:24px'><p style='color:#52514e'>El resumen de 24h se "
                            "esta generando en segundo plano; aparecera aqui en unos minutos. "
-                           "El feed de arriba ya esta en vivo.</p></main>")
+                           "El feed de abajo ya esta en vivo.</p></main>")
             page = (f"<!doctype html><html lang=es><head><meta charset=utf-8>"
                     f"<meta name=viewport content='width=device-width,initial-scale=1'>"
                     f"<meta http-equiv=refresh content=20><title>Estadisticas Suricata</title>"
-                    f"{head_css}</head><body>{NAV}{feed}{resumen}</body></html>")
+                    f"{head_css}</head><body>{NAV}{resumen}{feed}</body></html>")
             return self._html(page)
         if path == "/historico":
             return self._html(historico_page())

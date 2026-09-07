@@ -661,13 +661,12 @@ gen = datetime.now().strftime("%Y-%m-%d %H:%M")
 top_flujos = sorted(flujos.items(), key=lambda kv: kv[1][0], reverse=True)[:150]
 filas = []
 for (src, sport, dst, dport, proto, sig), (cnt, first, last) in top_flujos:
-    origen = f"{src}:{sport}" if sport != "" else src
-    destino = f"{dst}:{dport}" if dport != "" else dst
     hp = datetime.fromtimestamp(first).strftime("%d/%m %H:%M") if first else "-"
     hu = datetime.fromtimestamp(last).strftime("%H:%M") if last else "-"
     filas.append(
-        f"<tr><td class='mono'>{esc(origen)}</td><td class='mono'>{esc(destino)}</td>"
-        f"<td>{esc(dport)}/{esc(proto)}</td><td>{esc(sig)}</td>"
+        f"<tr><td class='mono'>{esc(src)}</td><td class='mono num'>{esc(sport)}</td>"
+        f"<td class='mono dst'>{esc(dst)}</td><td class='mono num'>{esc(dport)}</td>"
+        f"<td>{esc(proto)}</td><td>{esc(sig)}</td>"
         f"<td class='num'>{cnt}</td><td class='mono'>{hp} &rarr; {hu}</td><td>{dur(first,last)}</td></tr>")
 
 def top(counter, n=12, fmt=str):
@@ -737,9 +736,9 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
   <section class="card">
     <h2>Detalle: quien ataca, a donde, por que puerto, cuando y por cuanto tiempo</h2>
     <div class="tablewrap"><table id="detalle">
-      <thead><tr><th>Origen IP:puerto</th><th>Destino IP:puerto</th><th>Puerto/proto</th>
-      <th>Firma (tipo de ataque)</th><th class="num">Veces</th><th>Primera &rarr; ultima</th><th>Duracion</th></tr></thead>
-      <tbody>{"".join(filas) if filas else '<tr><td colspan="7" class="muted">Sin ataques en la ventana.</td></tr>'}</tbody>
+      <thead><tr><th>IP origen</th><th class="num">Puerto</th><th>IP destino (atacada)</th><th class="num">Puerto</th>
+      <th>Protocolo</th><th>Firma (tipo de ataque)</th><th class="num">Veces</th><th>Primera &rarr; ultima</th><th>Duracion</th></tr></thead>
+      <tbody>{"".join(filas) if filas else '<tr><td colspan="9" class="muted">Sin ataques en la ventana.</td></tr>'}</tbody>
     </table></div>
     <div class="pager" id="pager">
       <button id="prev" type="button">&larr; Anterior</button>

@@ -408,6 +408,11 @@ def clasifica(sig):
             return nivel, expl, accion
     return 3, "actividad sospechosa", "vigilar"
 
+# IPs de infraestructura propia (DNS, etc.) a excluir (conf: IGNORAR_DESTINOS/ORIGENES)
+_c = conf()
+IGN_DST = {x.strip() for x in _c.get("IGNORAR_DESTINOS", "").split(",") if x.strip()}
+IGN_SRC = {x.strip() for x in _c.get("IGNORAR_ORIGENES", "").split(",") if x.strip()}
+
 by_src_nivel = {}
 by_src_expl = {}
 by_src_accion = {}
@@ -441,7 +446,9 @@ for p in files:
             cat = a.get("category") or ""
             if sig.startswith("ET INFO") or "Not Suspicious" in cat or "Misc activity" in cat:
                 continue
-            src = e.get("src_ip", "?")
+            src = e.get("src_ip", "?"); dst = e.get("dest_ip", "?")
+            if dst in IGN_DST or src in IGN_SRC:   # excluir infraestructura propia (DNS, etc.)
+                continue
             nivel, expl, accion = clasifica(sig)
             by_src_total[src] += 1
             pair[src][sig] += 1
@@ -514,6 +521,12 @@ if [ ! -f /etc/suricata-report.conf ]; then
 # informe solo se guarda en /var/log/suricata/report-AAAAMMDD.txt.
 #TELEGRAM_TOKEN=123456:ABC...
 #TELEGRAM_CHAT_ID=123456789
+
+# IPs de infraestructura propia a EXCLUIR de reportes/feed (separadas por coma). Util
+# para tus DNS: las consultas de clientes a dominios de mala fama van dirigidas a tu DNS
+# y ensucian el panel. Pon aqui las IP de tus resolvers y reinicia: systemctl restart suricata-dashboard
+#IGNORAR_DESTINOS=10.66.66.2,205.235.3.8
+#IGNORAR_ORIGENES=
 CONF
   chmod 600 /etc/suricata-report.conf
 fi
@@ -567,8 +580,35 @@ try:
 except Exception:
     pass
 
+# Candado: si ya hay una generacion en curso, salir (evita dos generadores a la vez).
+try:
+    import fcntl
+    _lock = open("/run/suricata-html-report.lock", "w")
+    fcntl.flock(_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    sys.exit(0)
+except Exception:
+    pass
+
 def opener(p):
     return io.TextIOWrapper(gzip.open(p, "rb")) if p.endswith(".gz") else open(p, encoding="utf-8", errors="replace")
+
+def leer_ignorar():
+    """IPs de infraestructura (DNS propios, etc.) a excluir; desde /etc/suricata-report.conf
+    linea IGNORAR_DESTINOS=ip1,ip2 (y/o IGNORAR_ORIGENES=...)."""
+    dst, src = set(), set()
+    try:
+        for l in open("/etc/suricata-report.conf", encoding="utf-8"):
+            l = l.strip()
+            if l.startswith("IGNORAR_DESTINOS="):
+                dst = {x.strip() for x in l.split("=", 1)[1].split(",") if x.strip()}
+            elif l.startswith("IGNORAR_ORIGENES="):
+                src = {x.strip() for x in l.split("=", 1)[1].split(",") if x.strip()}
+    except OSError:
+        pass
+    return dst, src
+
+IGN_DST, IGN_SRC = leer_ignorar()
 
 def parse_ts(s):
     try:
@@ -606,6 +646,8 @@ for p in files:
             if ts and ts < cutoff:
                 continue
             src = g("src_ip") or "?"; dst = g("dest_ip") or "?"
+            if dst in IGN_DST or src in IGN_SRC:   # excluir infraestructura propia (DNS, etc.)
+                continue
             sport = g("src_port"); dport = g("dest_port")
             proto = g("proto")
             by_dst[dst] += 1
@@ -883,6 +925,19 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 EVE = "/var/log/suricata/eve.json"
+
+def _leer_ignorar():
+    dst, src = set(), set()
+    try:
+        for l in open("/etc/suricata-report.conf", encoding="utf-8"):
+            l = l.strip()
+            if l.startswith("IGNORAR_DESTINOS="):
+                dst = {x.strip() for x in l.split("=", 1)[1].split(",") if x.strip()}
+            elif l.startswith("IGNORAR_ORIGENES="):
+                src = {x.strip() for x in l.split("=", 1)[1].split(",") if x.strip()}
+    except OSError:
+        pass
+    return dst, src
 _RE = {k: re.compile(p) for k, p in {
     "ts": r'"timestamp":"([^"]+)"', "src_ip": r'"src_ip":"([^"]+)"',
     "dest_ip": r'"dest_ip":"([^"]+)"', "src_port": r'"src_port":(\d+)',
@@ -917,6 +972,7 @@ def tail_grupos(path=EVE, want=200, maxbytes=6_000_000, top=25):
     lines = data.decode("utf-8", "replace").split("\n")
     if start > 0 and lines:
         lines = lines[1:]
+    ign_dst, ign_src = _leer_ignorar()
     g = {}
     vistos = 0
     for line in reversed(lines):
@@ -926,8 +982,10 @@ def tail_grupos(path=EVE, want=200, maxbytes=6_000_000, top=25):
         sig = get("sig")
         if sig.startswith("ET INFO"):
             continue
-        vistos += 1
         src = get("src_ip"); dst = get("dest_ip"); dp = get("dest_port"); pr = get("proto")
+        if dst in ign_dst or src in ign_src:   # excluir infraestructura propia (DNS, etc.)
+            continue
+        vistos += 1
         ts = get("ts"); hh = ts[11:19] if len(ts) >= 19 else ""
         key = (src, dst, f"{dp}/{pr}" if dp else pr, sig)
         r = g.get(key)

@@ -1099,6 +1099,7 @@ box-shadow:0 1px 6px rgba(0,0,0,.15)}
 <a href="/" class="on">En vivo</a>
 <a href="/historico">Historico</a>
 <a href="/perfil">Perfil</a>
+<a href="/documentacion">Documentacion</a>
 <a href="/" class="sp">&#8635; Actualizar</a></div>"""
 
 def wrap(body_html, refresh=True):
@@ -1155,6 +1156,88 @@ def perfil_page(msg="", ok=False):
             "<button type=submit>Guardar cambios</button></form></div>"
             "<p class=sub style='margin-top:16px'>Al guardar, el navegador te pedira entrar de nuevo con las credenciales nuevas.</p>"
             "</main></body></html>")
+    return body
+
+def documentacion_page():
+    port = CFG.get("PORT", "5637")
+    css = ("body{margin:0;background:#fcfcfb;font:15px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
+           "main{max-width:820px;margin:0 auto;padding:24px 22px}h1{font-size:22px;margin:0 0 4px}"
+           "h2{font-size:16px;margin:26px 0 8px;border-bottom:1px solid #e7e6e2;padding-bottom:6px}"
+           "p,li{color:#33322f}code{background:#f0efec;padding:1px 6px;border-radius:5px;"
+           "font-family:ui-monospace,Consolas,monospace;font-size:13px}"
+           "pre{background:#0b0b0b;color:#e8e8e3;padding:12px 14px;border-radius:8px;overflow-x:auto;font-size:13px}"
+           "pre code{background:none;color:inherit;padding:0}"
+           ".b{display:inline-block;color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px}"
+           "table{border-collapse:collapse;width:100%;margin:8px 0}td,th{border:1px solid #e7e6e2;padding:7px 10px;text-align:left;font-size:14px}"
+           "th{background:#f4f4f2}")
+    body = f"""<!doctype html><html lang=es><head><meta charset=utf-8>
+<meta name=viewport content='width=device-width,initial-scale=1'><title>Documentacion</title>
+<style>{css}</style></head><body>{NAV}<main>
+<h1>Documentacion</h1>
+<p>Guia rapida del panel de estadisticas de Suricata y como ajustarlo.</p>
+
+<h2>Que muestra el panel</h2>
+<ul>
+<li><b>En vivo</b>: resumen de las ultimas 24h (puertos atacados, IPs origen y destino,
+linea de tiempo, tabla de detalle) y, abajo, el feed de los ultimos ataques que se
+actualiza solo cada 20 segundos.</li>
+<li><b>Historico</b>: los ultimos 20 reportes guardados; el resto se borra solo.</li>
+<li><b>Perfil</b>: cambiar el usuario y la clave de acceso a este panel.</li>
+</ul>
+
+<h2>Colores de gravedad</h2>
+<table><tr><th>Etiqueta</th><th>Que significa</th><th>Que hacer</th></tr>
+<tr><td><span class="b" style="background:#e34948">INFECTADO</span></td>
+<td>El equipo habla con un centro de mando (CnC/botnet/troyano). Infeccion confirmada.</td>
+<td>Aislar el equipo y avisar al cliente.</td></tr>
+<tr><td><span class="b" style="background:#eb6834">ATAQUE</span></td>
+<td>Escaneo o ataque saliente (SSH, puertos, exploits).</td><td>Revisar el equipo.</td></tr>
+<tr><td><span class="b" style="background:#eda100">SOSPECHOSO</span></td>
+<td>Consulta a dominios de mala fama (.su, .cc, .top, dyndns). El destino suele ser tu
+propio DNS; el sospechoso es el equipo de origen.</td><td>Vigilar.</td></tr>
+</table>
+
+<h2>Excluir tus DNS y otra infraestructura</h2>
+<p>Las consultas de clientes a dominios sospechosos van dirigidas a tu servidor DNS y
+ensucian el panel. Para que tus DNS (u otras IPs propias) no aparezcan, edita en la VM:</p>
+<pre><code>nano /etc/suricata-report.conf</code></pre>
+<p>Agrega tus IPs separadas por coma:</p>
+<pre><code>IGNORAR_DESTINOS=10.66.66.2,205.235.3.8
+IGNORAR_ORIGENES=</code></pre>
+<p>Y aplica:</p>
+<pre><code>systemctl restart suricata-dashboard</code></pre>
+<p><code>IGNORAR_DESTINOS</code> excluye trafico hacia esas IPs (tus DNS); <code>IGNORAR_ORIGENES</code>
+excluye un equipo concreto como origen. Nota: al excluir tus DNS dejas de ver que un
+cliente consulto un dominio malicioso; esa senal sigue en EveBox filtrando por origen.</p>
+
+<h2>Cambiar la clave del panel</h2>
+<p>Lo mas facil es el apartado <b>Perfil</b> de este mismo panel. Tambien se puede en la VM
+editando <code>USER</code> y <code>PASS</code>:</p>
+<pre><code>nano /etc/suricata-dashboard.conf
+systemctl restart suricata-dashboard</code></pre>
+
+<h2>Reportes e informe diario</h2>
+<ul>
+<li>Reporte grafico a mano: <code>suricata-html-report</code> (queda en <code>/var/log/suricata/</code>).</li>
+<li>Informe de texto por Telegram: rellena <code>TELEGRAM_TOKEN</code> y <code>TELEGRAM_CHAT_ID</code>
+en <code>/etc/suricata-report.conf</code>. Se envia cada dia a las 07:30.</li>
+<li>Las reglas ET se actualizan solas cada dia a las 04:30.</li>
+</ul>
+
+<h2>Archivos y comandos utiles</h2>
+<table><tr><th>Que</th><th>Donde / como</th></tr>
+<tr><td>Config del panel</td><td><code>/etc/suricata-dashboard.conf</code> (puerto {port}, usuario, clave)</td></tr>
+<tr><td>Config de reportes / exclusiones</td><td><code>/etc/suricata-report.conf</code></td></tr>
+<tr><td>Reglas propias de escaneo</td><td><code>/var/lib/suricata/rules/local.rules</code></td></tr>
+<tr><td>Alertas / logs</td><td><code>/var/log/suricata/fast.log</code>, <code>eve.json</code></td></tr>
+<tr><td>Estado de servicios</td><td><code>systemctl status suricata evebox tzsp-decap suricata-dashboard</code></td></tr>
+<tr><td>Ver logs en vivo</td><td><code>journalctl -u suricata-dashboard -f</code></td></tr>
+</table>
+
+<h2>Reinstalar o actualizar</h2>
+<p>Todo esta en un instalador idempotente. Para actualizar a la ultima version:</p>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -n 172.19.1.0/24,10.0.0.0/8</code></pre>
+</main></body></html>"""
     return body
 
 def historico_page():
@@ -1227,6 +1310,8 @@ class H(BaseHTTPRequestHandler):
             return self._html(historico_page())
         if path == "/perfil":
             return self._html(perfil_page())
+        if path == "/documentacion":
+            return self._html(documentacion_page())
         m = re.match(r"^/r/(report-[0-9A-Za-z_-]+\.html)$", path)
         if m:
             f = os.path.join(LOGDIR, m.group(1))

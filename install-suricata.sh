@@ -384,18 +384,21 @@ def opener(p):
 # Clasificacion: (claves, nivel, explicacion, accion). nivel 1=infectado, 2=atacando, 3=sospechoso.
 # Gana la primera regla cuya palabra clave aparece en la firma.
 REGLAS = [
-    (("cnc", "c2 ", "botnet", "mirai", "katana", "trojan", "ransom", " rat ", "coinmin", "cryptomin"),
+    # Nivel 1 (rojo) = comunicacion real con el atacante = infeccion confirmada. Una
+    # simple consulta DNS a un dominio de mala fama NO es nivel 1 (por eso "malware" a
+    # secas cae en nivel 3): el destino suele ser tu propio DNS, no el atacante.
+    (("cnc", "c2 ", "command and control", "checkin", "check-in", "botnet", "mirai", "katana",
+      "trojan", "ransom", " rat ", "coinmin", "cryptomin", "compromised"),
      1, "equipo infectado hablando con su centro de mando", "aislar/cuarentena y avisar al cliente"),
-    (("malware", "compromised"),
-     1, "trafico de malware confirmado", "aislar/cuarentena y avisar al cliente"),
     (("ssh scan", "brute", "password"),
      2, "atacando contrasenas (SSH/servicios) hacia afuera", "bloquear salida y revisar el equipo"),
     (("scan", "recon", "sweep", "escanea", "barrido", "portscan"),
      2, "escaneando puertos hacia internet (tipico de infeccion)", "revisar el equipo, muy probable infeccion"),
     (("exploit", "attack", "cve-", "shellcode", "attempted-admin"),
      2, "intentando explotar/atacar hacia afuera", "revisar el equipo"),
-    (("dyn_dns", "dynamic_dns", "duckdns", "dyndns", "no-ip", ".cc tld", "suspicious", "likely hostile", "adware", "pup"),
-     3, "consultas a dominios sospechosos (dyndns/.cc/adware)", "vigilar; comun en equipos comprometidos"),
+    (("malware", "dns query", "tld", "dyn_dns", "dynamic_dns", "duckdns", "dyndns", "no-ip",
+      "suspicious", "likely hostile", "adware", "pup", "observed dns"),
+     3, "consultas a dominios sospechosos (dyndns/.cc/.su/.top/reputacion malware)", "vigilar; comun en equipos comprometidos"),
 ]
 
 def clasifica(sig):
@@ -848,11 +851,14 @@ _RE = {k: re.compile(p) for k, p in {
     "sig": r'"signature":"((?:[^"\\]|\\.)*)"',
 }.items()}
 
-SEV = [  # (claves en la firma, color, etiqueta)
-    (("cnc", "c2 ", "botnet", "mirai", "katana", "trojan", "ransom", "coinmin"), "#e34948", "INFECTADO"),
-    (("malware", "compromised"), "#e34948", "MALWARE"),
+SEV = [  # (claves en la firma, color, etiqueta). Se evalua en orden; gana la primera.
+    # ROJO = comunicacion real con el atacante (infeccion confirmada), no una simple
+    # consulta a un dominio de mala fama. Por eso "malware" a secas NO es rojo aqui.
+    (("cnc", "c2 ", "command and control", "checkin", "check-in", "botnet", "mirai",
+      "katana", "trojan", "ransom", "coinmin", "cryptomin", "compromised"), "#e34948", "INFECTADO"),
     (("scan", "brute", "exploit", "attack", "recon", "sweep", "portscan"), "#eb6834", "ATAQUE"),
-    (("dyn_dns", "dynamic_dns", "duckdns", "dyndns", "no-ip", "tld", "adware", "pup", "suspicious", "hostile"), "#eda100", "SOSPECHOSO"),
+    (("malware", "dns query", "tld", "dyn_dns", "dynamic_dns", "duckdns", "dyndns", "no-ip",
+      "adware", "pup", "suspicious", "hostile", "observed dns"), "#eda100", "SOSPECHOSO"),
 ]
 def sev(sig):
     s = sig.lower()

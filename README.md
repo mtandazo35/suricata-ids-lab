@@ -61,7 +61,7 @@ Ademas de EveBox, el instalador levanta un **panel de estadisticas** propio en s
 
 - **En vivo**: el reporte grafico (puertos atacados, IPs origen/destino, linea de tiempo,
   tabla de detalle) siempre al dia; se regenera solo si el ultimo tiene mas de 5 min.
-- **Historico**: lista de los reportes diarios guardados (14 dias), cada uno abrible.
+- **Historico**: los 20 reportes mas recientes, cada uno abrible; el resto se borra solo.
 - **Login basico** (usuario `admin`, clave aleatoria que imprime el instalador y guarda en
   `/etc/suricata-dashboard.conf`). Se sirve por HTTP plano: exponlo solo por VPN o detras
   de tu proxy, o abre el puerto solo a tu IP.
@@ -220,7 +220,7 @@ El instalador anade tres cosas utiles para operar sin entrar a la web:
     puertos de destino mas atacados, top de IPs origen (atacantes) y destino (objetivos),
     linea de tiempo por hora, y una tabla de detalle con origen IP:puerto -> destino
     IP:puerto, firma, veces y duracion (primera -> ultima vez). Autocontenido, se abre en
-    el navegador o se imprime a PDF para entregar. Los reportes se guardan 14 dias.
+    el navegador o se imprime a PDF para entregar. El historico guarda los 20 reportes mas recientes (auto-borrado en cada generacion).
 
 ## Espejo desde MikroTik (TZSP)
 

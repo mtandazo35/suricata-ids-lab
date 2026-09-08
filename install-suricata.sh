@@ -484,6 +484,17 @@ try:
     open(out, "w", encoding="utf-8").write(report + "\n")
 except OSError:
     pass
+# conservar solo los 20 informes de texto mas recientes
+try:
+    import glob as _g
+    ts = sorted(_g.glob(os.path.join(LOGDIR, "report-*.txt")), key=os.path.getmtime, reverse=True)
+    for _v in ts[20:]:
+        try:
+            os.remove(_v)
+        except OSError:
+            pass
+except OSError:
+    pass
 
 c = conf()
 tok, chat = c.get("TELEGRAM_TOKEN"), c.get("TELEGRAM_CHAT_ID")
@@ -797,6 +808,19 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
 
 out = os.path.join(LOGDIR, "report-" + datetime.now().strftime("%Y%m%d-%H%M") + ".html")
 open(out, "w", encoding="utf-8").write(doc)
+
+# Historico acotado: conservar solo los 20 reportes HTML mas recientes (el panel genera
+# uno cada 10 min, asi que sin esto se acumulan). Se corre en cada generacion.
+try:
+    hs = sorted(glob.glob(f"{LOGDIR}/report-*.html"), key=os.path.getmtime, reverse=True)
+    for viejo in hs[20:]:
+        try:
+            os.remove(viejo)
+        except OSError:
+            pass
+except OSError:
+    pass
+
 print(out)
 HREP
 chmod 755 /usr/local/bin/suricata-html-report
@@ -810,8 +834,7 @@ Nice=15
 IOSchedulingClass=idle
 ExecStart=/usr/local/bin/suricata-report
 ExecStart=/usr/local/bin/suricata-html-report
-# conservar 14 dias de reportes (texto y html)
-ExecStartPost=/bin/sh -c 'find /var/log/suricata -maxdepth 1 -name "report-*.txt" -o -name "report-*.html" | sort | head -n -28 | xargs -r rm -f --'
+# el auto-borrado (conservar 20) lo hace cada generador al terminar; aqui no hace falta
 UNIT
 cat > /etc/systemd/system/suricata-report.timer <<'UNIT'
 [Unit]

@@ -602,24 +602,27 @@ BLUE = "#2a78d6"; GRID = "#e7e6e2"; INK = "#0b0b0b"; INK2 = "#52514e"; SURF = "#
 
 def esc(x): return html.escape(str(x))
 
-def hbar(titulo, pares, unidad="alertas", fmt=str):
-    """Barras horizontales rankeadas, un solo tono, etiqueta de valor directa."""
+def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=150, barw=460, card_class="card"):
+    """Barras horizontales rankeadas, un solo tono, etiqueta de valor directa.
+    lblw = ancho reservado a la etiqueta; el texto se recorta a lo que quepa."""
     if not pares:
-        return f'<section class="card"><h2>{esc(titulo)}</h2><p class="muted">Sin datos.</p></section>'
+        return f'<section class="{card_class}"><h2>{esc(titulo)}</h2><p class="muted">Sin datos.</p></section>'
     mx = max(v for _, v in pares) or 1
-    rowh, gap, lblw, barw = 26, 8, 150, 460
+    rowh, gap = 26, 8
+    maxch = max(8, int(lblw / 6.3))   # caracteres que caben en la etiqueta
     h = len(pares) * (rowh + gap) + 8
-    W = lblw + barw + 70
+    W = lblw + barw + 80
     rows = []
     for i, (name, v) in enumerate(pares):
         y = i * (rowh + gap) + 4
         w = max(2, int(barw * v / mx))
+        etq = name if len(name) <= maxch else name[:maxch - 1] + "…"
         rows.append(
-            f'<text x="{lblw-8}" y="{y+rowh*0.68:.0f}" text-anchor="end" class="lbl">{esc(name)}</text>'
+            f'<text x="{lblw-8}" y="{y+rowh*0.68:.0f}" text-anchor="end" class="lbl">{esc(etq)}</text>'
             f'<rect x="{lblw}" y="{y}" width="{w}" height="{rowh}" rx="4" fill="{BLUE}"/>'
             f'<text x="{lblw+w+6}" y="{y+rowh*0.68:.0f}" class="val">{esc(fmt(v))}</text>'
         )
-    return (f'<section class="card"><h2>{esc(titulo)}</h2>'
+    return (f'<section class="{card_class}"><h2>{esc(titulo)}</h2>'
             f'<svg viewBox="0 0 {W} {h}" width="100%" role="img" aria-label="{esc(titulo)}">'
             f'{"".join(rows)}</svg><p class="muted">en {unidad}</p></section>')
 
@@ -675,7 +678,7 @@ def top(counter, n=12, fmt=str):
 by_sig = Counter()
 for _k, _v in flujos.items():
     by_sig[_k[5]] += _v[0]
-firmas_top = [(s[:40], n) for s, n in by_sig.most_common(12)]
+firmas_top = [(s[:64], n) for s, n in by_sig.most_common(12)]
 
 doc = f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -731,8 +734,8 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
     {hbar("Puertos de destino mas atacados", top(by_dport), "alertas")}
     {hbar("IPs origen (atacantes)", top(by_src), "alertas")}
     {hbar("IPs destino (objetivos)", top(by_dst), "alertas")}
-    {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas")}
   </div>
+  {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas", lblw=430, barw=560, card_class="card wide")}
   <section class="card">
     <h2>Detalle: quien ataca, a donde, por que puerto, cuando y por cuanto tiempo</h2>
     <div class="tablewrap"><table id="detalle">
@@ -973,6 +976,7 @@ box-shadow:0 1px 6px rgba(0,0,0,.15)}
 <div class="nav"><span class="brand"><span class="sh"></span>Estadisticas Suricata</span>
 <a href="/" class="on">En vivo</a>
 <a href="/historico">Historico</a>
+<a href="/perfil">Perfil</a>
 <a href="/" class="sp">&#8635; Actualizar</a></div>"""
 
 def wrap(body_html, refresh=True):
@@ -984,6 +988,52 @@ def wrap(body_html, refresh=True):
     if meta:
         out = re.sub(r"</head>", meta + "</head>", out, count=1)
     return out
+
+def save_conf(user, pw):
+    """Reescribe /etc/suricata-dashboard.conf con el usuario/clave nuevos (conserva PORT)."""
+    port = CFG.get("PORT", "5637")
+    txt = ("# Panel de estadisticas de Suricata. Editado desde el apartado Perfil.\n"
+           "# Reiniciar tras cambios manuales: systemctl restart suricata-dashboard\n"
+           f"PORT={port}\nUSER={user}\nPASS={pw}\n")
+    tmp = CONF + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(txt)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONF)
+    CFG["USER"], CFG["PASS"], CFG["PORT"] = user, pw, port
+
+def perfil_page(msg="", ok=False):
+    u = html.escape(CFG.get("USER", "admin"))
+    banner = ""
+    if msg:
+        col = "#1baf7a" if ok else "#e34948"
+        banner = (f'<div style="background:{col};color:#fff;padding:10px 14px;border-radius:8px;'
+                  f'margin-bottom:16px;font-size:13px">{html.escape(msg)}</div>')
+    body = ("<!doctype html><html lang=es><head><meta charset=utf-8>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Perfil</title>"
+            "<style>body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
+            "main{max-width:460px;margin:0 auto;padding:26px 20px}h1{font-size:20px;margin:0 0 4px}"
+            ".sub{color:#52514e;font-size:13px;margin:0 0 20px}"
+            ".card{border:1px solid #e7e6e2;border-radius:12px;padding:22px;background:#fff}"
+            "label{display:block;font-size:13px;color:#52514e;margin:14px 0 5px;font-weight:600}"
+            "input{width:100%;padding:9px 11px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui;box-sizing:border-box}"
+            "input:focus{outline:none;border-color:#2a78d6;box-shadow:0 0 0 3px rgba(42,120,214,.15)}"
+            "button{margin-top:20px;width:100%;padding:11px;background:#2a78d6;color:#fff;border:0;"
+            "border-radius:8px;font:600 14px system-ui;cursor:pointer}button:hover{background:#1c5cab}"
+            ".hint{color:#8a8a86;font-size:12px;margin-top:6px}</style></head><body>"
+            + NAV +
+            "<main><h1>Perfil</h1><p class=sub>Cambia el usuario y la clave de acceso al panel.</p>"
+            + banner +
+            "<div class=card><form method=post action='/perfil'>"
+            "<label>Clave actual</label><input type=password name=actual autocomplete=current-password required>"
+            f"<label>Usuario</label><input type=text name=usuario value='{u}' autocomplete=username required>"
+            "<label>Clave nueva</label><input type=password name=nueva autocomplete=new-password required>"
+            "<div class=hint>Minimo 6 caracteres.</div>"
+            "<label>Repetir clave nueva</label><input type=password name=nueva2 autocomplete=new-password required>"
+            "<button type=submit>Guardar cambios</button></form></div>"
+            "<p class=sub style='margin-top:16px'>Al guardar, el navegador te pedira entrar de nuevo con las credenciales nuevas.</p>"
+            "</main></body></html>")
+    return body
 
 def historico_page():
     fs = sorted(glob.glob(f"{LOGDIR}/report-*.html"), key=os.path.getmtime, reverse=True)
@@ -1053,6 +1103,8 @@ class H(BaseHTTPRequestHandler):
             return self._html(page)
         if path == "/historico":
             return self._html(historico_page())
+        if path == "/perfil":
+            return self._html(perfil_page())
         m = re.match(r"^/r/(report-[0-9A-Za-z_-]+\.html)$", path)
         if m:
             f = os.path.join(LOGDIR, m.group(1))
@@ -1063,6 +1115,38 @@ class H(BaseHTTPRequestHandler):
                     pass
             return self._html("<h1>No encontrado</h1>", 404)
         return self._html("<h1>No encontrado</h1>", 404)
+    def do_POST(self):
+        if not self._auth_ok():
+            return self._deny()
+        if self.path.split("?", 1)[0] != "/perfil":
+            return self._html("<h1>No encontrado</h1>", 404)
+        import urllib.parse
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        except Exception:
+            body = ""
+        q = urllib.parse.parse_qs(body)
+        actual = (q.get("actual", [""])[0])
+        usuario = (q.get("usuario", [""])[0]).strip()
+        nueva = (q.get("nueva", [""])[0])
+        nueva2 = (q.get("nueva2", [""])[0])
+        cur = CFG.get("PASS", "")
+        if cur and actual != cur:
+            return self._html(perfil_page("La clave actual no es correcta.", ok=False))
+        if not usuario or " " in usuario or len(usuario) > 40:
+            return self._html(perfil_page("Usuario invalido (sin espacios, max 40).", ok=False))
+        if len(nueva) < 6:
+            return self._html(perfil_page("La clave nueva debe tener al menos 6 caracteres.", ok=False))
+        if nueva != nueva2:
+            return self._html(perfil_page("Las dos claves nuevas no coinciden.", ok=False))
+        try:
+            save_conf(usuario, nueva)
+        except OSError as ex:
+            return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+        # las credenciales nuevas ya rigen; el navegador reintentara con las viejas -> 401 y re-login
+        return self._html(perfil_page("Credenciales actualizadas. Vuelve a entrar con el usuario y clave nuevos.", ok=True))
+
     def log_message(self, *a):
         pass
 

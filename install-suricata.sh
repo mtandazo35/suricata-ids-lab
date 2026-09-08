@@ -1323,17 +1323,41 @@ actualiza solo cada 20 segundos.</li>
 propio DNS; el sospechoso es el equipo de origen.</td><td>Vigilar.</td></tr>
 </table>
 
-<h2>Excluir tus DNS y otra infraestructura</h2>
-<p>Las consultas de clientes a dominios sospechosos van dirigidas a tu servidor DNS y
-ensucian el panel. Usa el apartado <b>Exclusiones</b> del menu (arriba) para agregar una IP
-sin tocar archivos:</p>
+<h2>Modulo de Exclusiones</h2>
+<p>El apartado <b>Exclusiones</b> (en el menu de arriba) sirve para que ciertas IPs propias
+no aparezcan en el panel ni en los reportes. Tipico: tu servidor DNS y tu servidor de
+monitoreo, que generan mucho trafico normal (consultas DNS, sondeos SNMP) y ensucian las
+estadisticas sin ser un ataque.</p>
+<p><b>Como funciona:</b> por cada alerta, si coincide con una regla de exclusion, se descarta
+antes de contarla. Se aplica en los tres lados a la vez (resumen de 24h, feed en vivo e
+informe de texto) y surte efecto al instante, sin reiniciar nada.</p>
+<p><b>Campos al agregar una exclusion:</b></p>
+<table><tr><th>Campo</th><th>Que es</th></tr>
+<tr><td>Tipo</td><td><b>Destino</b>: ignora el trafico que va HACIA esa IP (p. ej. tu DNS).
+<b>Origen</b>: ignora el que SALE de esa IP (p. ej. tu monitor).</td></tr>
+<tr><td>IP</td><td>La direccion a excluir. Se valida que sea una IP correcta.</td></tr>
+<tr><td>Puertos</td><td>Los puertos a ignorar, separados por coma (p. ej. <code>53</code> o
+<code>161</code>). <b>Vacio = todos los puertos</b> de esa IP.</td></tr>
+<tr><td>Motivo</td><td>Una nota para acordarte por que (p. ej. "DNS interno").</td></tr>
+</table>
+<p><b>Ejemplos utiles:</b></p>
 <ul>
-<li><b>Tu DNS</b>: agrega su IP como <b>Destino</b>, puerto <b>53</b>, motivo "DNS interno".</li>
-<li><b>Tu monitoreo SNMP</b>: agrega su IP como <b>Origen</b>, puerto <b>161</b>.</li>
-<li>Deja los puertos vacios para ignorar todo el trafico de esa IP.</li>
+<li><b>Tu DNS</b>: Tipo <b>Destino</b>, puerto <b>53</b>. Asi las consultas de clientes a
+dominios de mala fama (que van a tu DNS) dejan de marcarse.</li>
+<li><b>Tu monitoreo SNMP</b>: Tipo <b>Origen</b>, puerto <b>161</b>. Quita el ruido del
+servidor que sondea tus equipos.</li>
+<li><b>Ignorar una IP entera</b>: deja Puertos vacio.</li>
 </ul>
-<p>Se aplica al instante. Nota: al excluir tus DNS dejas de ver que un cliente consulto un
-dominio malicioso; esa senal sigue en EveBox filtrando por origen.</p>
+<p><b>Por que filtrar por puerto y no la IP entera:</b> si excluyes tu DNS solo en el puerto
+53, sigues viendo si ese mismo equipo hace algo raro en otro puerto (un escaneo, una conexion
+a un CnC). Silenciar la IP completa te dejaria ciego a eso.</p>
+<p><b>Para eliminar</b> una exclusion, usa el boton Eliminar en la lista del apartado.</p>
+<p>Se guardan en <code>/etc/suricata-exclusiones.json</code>. Tambien se respetan lineas
+antiguas <code>IGNORAR_DESTINOS=</code>/<code>IGNORAR_ORIGENES=</code> del
+<code>/etc/suricata-report.conf</code>, pero lo recomendado es usar el apartado.</p>
+<p><b>Ojo con el criterio:</b> al excluir tu DNS dejas de ver en el panel que un cliente
+consulto un dominio malicioso. Esa senal sigue disponible en EveBox filtrando por IP de
+origen, si quieres cazar clientes infectados por sus consultas.</p>
 
 <h2>Cambiar la clave del panel</h2>
 <p>Lo mas facil es el apartado <b>Perfil</b> de este mismo panel. Tambien se puede en la VM

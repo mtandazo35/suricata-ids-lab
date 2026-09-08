@@ -635,26 +635,42 @@ BLUE = "#2a78d6"; GRID = "#e7e6e2"; INK = "#0b0b0b"; INK2 = "#52514e"; SURF = "#
 
 def esc(x): return html.escape(str(x))
 
-def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=150, barw=460, card_class="card"):
+def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=150, barw=460, card_class="card", label_above=False):
     """Barras horizontales rankeadas, un solo tono, etiqueta de valor directa.
-    lblw = ancho reservado a la etiqueta; el texto se recorta a lo que quepa."""
+    label_above=True: el nombre va ENCIMA de la barra (a todo el ancho), no en una
+    columna a la izquierda; asi los nombres largos (firmas) no se recortan nunca."""
     if not pares:
         return f'<section class="{card_class}"><h2>{esc(titulo)}</h2><p class="muted">Sin datos.</p></section>'
     mx = max(v for _, v in pares) or 1
-    rowh, gap = 26, 8
-    maxch = max(8, int(lblw / 6.3))   # caracteres que caben en la etiqueta
-    h = len(pares) * (rowh + gap) + 8
-    W = lblw + barw + 80
     rows = []
-    for i, (name, v) in enumerate(pares):
-        y = i * (rowh + gap) + 4
-        w = max(2, int(barw * v / mx))
-        etq = name if len(name) <= maxch else name[:maxch - 1] + "…"
-        rows.append(
-            f'<text x="{lblw-8}" y="{y+rowh*0.68:.0f}" text-anchor="end" class="lbl">{esc(etq)}</text>'
-            f'<rect x="{lblw}" y="{y}" width="{w}" height="{rowh}" rx="4" fill="{BLUE}"/>'
-            f'<text x="{lblw+w+6}" y="{y+rowh*0.68:.0f}" class="val">{esc(fmt(v))}</text>'
-        )
+    if label_above:
+        W = 900
+        barh, labh, gap = 20, 18, 12
+        rowh = labh + barh + gap
+        h = len(pares) * rowh + 6
+        barmax = W - 90
+        maxch = 120
+        for i, (name, v) in enumerate(pares):
+            top = i * rowh + 4
+            w = max(2, int(barmax * v / mx))
+            etq = name if len(name) <= maxch else name[:maxch - 1] + "…"
+            rows.append(
+                f'<text x="2" y="{top+13}" class="lbl">{esc(etq)}</text>'
+                f'<rect x="2" y="{top+labh}" width="{w}" height="{barh}" rx="4" fill="{BLUE}"/>'
+                f'<text x="{w+8}" y="{top+labh+barh*0.7:.0f}" class="val">{esc(fmt(v))}</text>')
+    else:
+        rowh, gap = 26, 8
+        maxch = max(8, int(lblw / 6.3))
+        h = len(pares) * (rowh + gap) + 8
+        W = lblw + barw + 80
+        for i, (name, v) in enumerate(pares):
+            y = i * (rowh + gap) + 4
+            w = max(2, int(barw * v / mx))
+            etq = name if len(name) <= maxch else name[:maxch - 1] + "…"
+            rows.append(
+                f'<text x="{lblw-8}" y="{y+rowh*0.68:.0f}" text-anchor="end" class="lbl">{esc(etq)}</text>'
+                f'<rect x="{lblw}" y="{y}" width="{w}" height="{rowh}" rx="4" fill="{BLUE}"/>'
+                f'<text x="{lblw+w+6}" y="{y+rowh*0.68:.0f}" class="val">{esc(fmt(v))}</text>')
     return (f'<section class="{card_class}"><h2>{esc(titulo)}</h2>'
             f'<svg viewBox="0 0 {W} {h}" width="100%" role="img" aria-label="{esc(titulo)}">'
             f'{"".join(rows)}</svg><p class="muted">en {unidad}</p></section>')
@@ -711,7 +727,7 @@ def top(counter, n=12, fmt=str):
 by_sig = Counter()
 for _k, _v in flujos.items():
     by_sig[_k[5]] += _v[0]
-firmas_top = [(s[:64], n) for s, n in by_sig.most_common(12)]
+firmas_top = [(s[:110], n) for s, n in by_sig.most_common(12)]
 
 doc = f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -768,7 +784,7 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
     {hbar("IPs origen (atacantes)", top(by_src), "alertas")}
     {hbar("IPs destino (objetivos)", top(by_dst), "alertas")}
   </div>
-  {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas", lblw=430, barw=560, card_class="card wide")}
+  {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas", card_class="card wide", label_above=True)}
   <section class="card">
     <h2>Detalle: quien ataca, a donde, por que puerto, cuando y por cuanto tiempo</h2>
     <div class="tablewrap"><table id="detalle">

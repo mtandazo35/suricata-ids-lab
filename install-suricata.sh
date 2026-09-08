@@ -408,10 +408,29 @@ def clasifica(sig):
             return nivel, expl, accion
     return 3, "actividad sospechosa", "vigilar"
 
-# IPs de infraestructura propia (DNS, etc.) a excluir (conf: IGNORAR_DESTINOS/ORIGENES)
-_c = conf()
-IGN_DST = {x.strip() for x in _c.get("IGNORAR_DESTINOS", "").split(",") if x.strip()}
-IGN_SRC = {x.strip() for x in _c.get("IGNORAR_ORIGENES", "").split(",") if x.strip()}
+# Exclusiones (apartado Exclusiones del panel + lineas IGNORAR_* legacy)
+def cargar_exclusiones():
+    reglas = []
+    try:
+        data = json.load(open("/etc/suricata-exclusiones.json", encoding="utf-8"))
+        if isinstance(data, list):
+            for r in data:
+                if r.get("ip"):
+                    reglas.append((r.get("tipo", "dst"), r["ip"],
+                                   [int(p) for p in (r.get("puertos") or []) if str(p).isdigit()]))
+    except Exception:
+        pass
+    _c = conf()
+    reglas += [("dst", x.strip(), []) for x in _c.get("IGNORAR_DESTINOS", "").split(",") if x.strip()]
+    reglas += [("src", x.strip(), []) for x in _c.get("IGNORAR_ORIGENES", "").split(",") if x.strip()]
+    return reglas
+EXCL = cargar_exclusiones()
+def excluido(src, dst, dport):
+    for tipo, ip, pts in EXCL:
+        quien = dst if tipo == "dst" else src
+        if quien == ip and (not pts or (dport is not None and dport in pts)):
+            return True
+    return False
 
 by_src_nivel = {}
 by_src_expl = {}
@@ -447,7 +466,7 @@ for p in files:
             if sig.startswith("ET INFO") or "Not Suspicious" in cat or "Misc activity" in cat:
                 continue
             src = e.get("src_ip", "?"); dst = e.get("dest_ip", "?")
-            if dst in IGN_DST or src in IGN_SRC:   # excluir infraestructura propia (DNS, etc.)
+            if excluido(src, dst, e.get("dest_port")):   # exclusiones configuradas
                 continue
             nivel, expl, accion = clasifica(sig)
             by_src_total[src] += 1
@@ -530,6 +549,9 @@ if [ ! -f /etc/suricata-report.conf ]; then
 CONF
   chmod 600 /etc/suricata-report.conf
 fi
+# archivo de exclusiones (lo gestiona el apartado Exclusiones del panel)
+[ -f /etc/suricata-exclusiones.json ] || echo '[]' > /etc/suricata-exclusiones.json
+chmod 644 /etc/suricata-exclusiones.json
 # --- reporte HTML grafico (puertos, IPs origen/destino, linea de tiempo, tabla) ---
 cat > /usr/local/bin/suricata-html-report <<'HREP'
 #!/usr/bin/env python3
@@ -593,22 +615,38 @@ except Exception:
 def opener(p):
     return io.TextIOWrapper(gzip.open(p, "rb")) if p.endswith(".gz") else open(p, encoding="utf-8", errors="replace")
 
-def leer_ignorar():
-    """IPs de infraestructura (DNS propios, etc.) a excluir; desde /etc/suricata-report.conf
-    linea IGNORAR_DESTINOS=ip1,ip2 (y/o IGNORAR_ORIGENES=...)."""
-    dst, src = set(), set()
+def cargar_exclusiones():
+    """Reglas de exclusion: {tipo:'dst'|'src', ip, puertos:[int]}. Desde
+    /etc/suricata-exclusiones.json (apartado Exclusiones) + lineas IGNORAR_* legacy."""
+    reglas = []
+    try:
+        data = json.load(open("/etc/suricata-exclusiones.json", encoding="utf-8"))
+        if isinstance(data, list):
+            for r in data:
+                if r.get("ip"):
+                    reglas.append((r.get("tipo", "dst"), r["ip"],
+                                   [int(p) for p in (r.get("puertos") or []) if str(p).isdigit()]))
+    except Exception:
+        pass
     try:
         for l in open("/etc/suricata-report.conf", encoding="utf-8"):
             l = l.strip()
             if l.startswith("IGNORAR_DESTINOS="):
-                dst = {x.strip() for x in l.split("=", 1)[1].split(",") if x.strip()}
+                reglas += [("dst", x.strip(), []) for x in l.split("=", 1)[1].split(",") if x.strip()]
             elif l.startswith("IGNORAR_ORIGENES="):
-                src = {x.strip() for x in l.split("=", 1)[1].split(",") if x.strip()}
+                reglas += [("src", x.strip(), []) for x in l.split("=", 1)[1].split(",") if x.strip()]
     except OSError:
         pass
-    return dst, src
+    return reglas
 
-IGN_DST, IGN_SRC = leer_ignorar()
+EXCL = cargar_exclusiones()
+
+def excluido(src, dst, dport):
+    for tipo, ip, pts in EXCL:
+        quien = dst if tipo == "dst" else src
+        if quien == ip and (not pts or (dport is not None and dport in pts)):
+            return True
+    return False
 
 def parse_ts(s):
     try:
@@ -646,10 +684,10 @@ for p in files:
             if ts and ts < cutoff:
                 continue
             src = g("src_ip") or "?"; dst = g("dest_ip") or "?"
-            if dst in IGN_DST or src in IGN_SRC:   # excluir infraestructura propia (DNS, etc.)
-                continue
             sport = g("src_port"); dport = g("dest_port")
             proto = g("proto")
+            if excluido(src, dst, int(dport) if dport else None):   # exclusiones configuradas
+                continue
             by_dst[dst] += 1
             by_src[src] += 1
             if dport != "":
@@ -920,24 +958,55 @@ reportes diarios, con login basico. Solo biblioteca estandar. Corre como servici
 
 Config: /etc/suricata-dashboard.conf  (PORT, USER, PASS)
 """
-import base64, glob, html, os, re, subprocess, threading, time
+import base64, glob, html, json, os, re, subprocess, threading, time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 EVE = "/var/log/suricata/eve.json"
 
-def _leer_ignorar():
-    dst, src = set(), set()
+EXCL_FILE = "/etc/suricata-exclusiones.json"
+
+def cargar_exclusiones():
+    """Lista de reglas de exclusion. Cada una: {tipo:'dst'|'src', ip, motivo, puertos:[int]}.
+    puertos vacio = todos los puertos. Tambien lee las lineas IGNORAR_* legacy del .conf."""
+    reglas = []
+    try:
+        data = json.load(open(EXCL_FILE, encoding="utf-8"))
+        if isinstance(data, list):
+            for r in data:
+                if r.get("ip"):
+                    reglas.append({"tipo": r.get("tipo", "dst"), "ip": r["ip"],
+                                   "motivo": r.get("motivo", ""),
+                                   "puertos": [int(p) for p in (r.get("puertos") or []) if str(p).isdigit()]})
+    except Exception:
+        pass
     try:
         for l in open("/etc/suricata-report.conf", encoding="utf-8"):
             l = l.strip()
             if l.startswith("IGNORAR_DESTINOS="):
-                dst = {x.strip() for x in l.split("=", 1)[1].split(",") if x.strip()}
+                for ip in l.split("=", 1)[1].split(","):
+                    if ip.strip():
+                        reglas.append({"tipo": "dst", "ip": ip.strip(), "motivo": "(conf)", "puertos": []})
             elif l.startswith("IGNORAR_ORIGENES="):
-                src = {x.strip() for x in l.split("=", 1)[1].split(",") if x.strip()}
+                for ip in l.split("=", 1)[1].split(","):
+                    if ip.strip():
+                        reglas.append({"tipo": "src", "ip": ip.strip(), "motivo": "(conf)", "puertos": []})
     except OSError:
         pass
-    return dst, src
+    return reglas
+
+def guardar_exclusiones(reglas):
+    tmp = EXCL_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump([r for r in reglas if r.get("motivo") != "(conf)"], f, ensure_ascii=False, indent=1)
+    os.replace(tmp, EXCL_FILE)
+
+def _excluido(reglas, src, dst, dport):
+    for r in reglas:
+        quien = dst if r["tipo"] == "dst" else src
+        if quien == r["ip"] and (not r["puertos"] or (dport is not None and int(dport) in r["puertos"])):
+            return True
+    return False
 _RE = {k: re.compile(p) for k, p in {
     "ts": r'"timestamp":"([^"]+)"', "src_ip": r'"src_ip":"([^"]+)"',
     "dest_ip": r'"dest_ip":"([^"]+)"', "src_port": r'"src_port":(\d+)',
@@ -972,7 +1041,7 @@ def tail_grupos(path=EVE, want=200, maxbytes=6_000_000, top=25):
     lines = data.decode("utf-8", "replace").split("\n")
     if start > 0 and lines:
         lines = lines[1:]
-    ign_dst, ign_src = _leer_ignorar()
+    reglas = cargar_exclusiones()
     g = {}
     vistos = 0
     for line in reversed(lines):
@@ -983,7 +1052,7 @@ def tail_grupos(path=EVE, want=200, maxbytes=6_000_000, top=25):
         if sig.startswith("ET INFO"):
             continue
         src = get("src_ip"); dst = get("dest_ip"); dp = get("dest_port"); pr = get("proto")
-        if dst in ign_dst or src in ign_src:   # excluir infraestructura propia (DNS, etc.)
+        if _excluido(reglas, src, dst, int(dp) if dp else None):   # exclusiones configuradas
             continue
         vistos += 1
         ts = get("ts"); hh = ts[11:19] if len(ts) >= 19 else ""
@@ -1098,6 +1167,7 @@ box-shadow:0 1px 6px rgba(0,0,0,.15)}
 <div class="nav"><span class="brand"><span class="sh"></span>Estadisticas Suricata</span>
 <a href="/" class="on">En vivo</a>
 <a href="/historico">Historico</a>
+<a href="/exclusiones">Exclusiones</a>
 <a href="/perfil">Perfil</a>
 <a href="/documentacion">Documentacion</a>
 <a href="/" class="sp">&#8635; Actualizar</a></div>"""
@@ -1158,6 +1228,62 @@ def perfil_page(msg="", ok=False):
             "</main></body></html>")
     return body
 
+def exclusiones_page(msg="", ok=False):
+    reglas = cargar_exclusiones()
+    banner = ""
+    if msg:
+        col = "#1baf7a" if ok else "#e34948"
+        banner = f'<div style="background:{col};color:#fff;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:13px">{html.escape(msg)}</div>'
+    filas = []
+    for i, r in enumerate(reglas):
+        pts = ", ".join(str(p) for p in r["puertos"]) if r["puertos"] else "todos"
+        tipo = "Destino" if r["tipo"] == "dst" else "Origen"
+        legacy = r.get("motivo") == "(conf)"
+        accion = ('<span class="muted">en .conf</span>' if legacy else
+                  f'<form method=post action="/exclusiones" style="margin:0">'
+                  f'<input type=hidden name=accion value=del><input type=hidden name=idx value="{i}">'
+                  f'<button class="del" type=submit>Eliminar</button></form>')
+        filas.append(f'<tr><td>{tipo}</td><td class="mono">{html.escape(r["ip"])}</td>'
+                     f'<td>{html.escape(pts)}</td><td>{html.escape(r.get("motivo",""))}</td><td>{accion}</td></tr>')
+    tabla = ("".join(filas) if filas else
+             '<tr><td colspan=5 class="muted">No hay exclusiones. Todo el trafico se analiza.</td></tr>')
+    body = f"""<!doctype html><html lang=es><head><meta charset=utf-8>
+<meta name=viewport content='width=device-width,initial-scale=1'><title>Exclusiones</title>
+<style>body{{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}}
+main{{max-width:820px;margin:0 auto;padding:24px 20px}}h1{{font-size:21px;margin:0 0 4px}}
+.sub{{color:#52514e;font-size:13px;margin:0 0 18px}}h2{{font-size:15px;margin:24px 0 10px}}
+.card{{border:1px solid #e7e6e2;border-radius:12px;padding:18px;background:#fff}}
+table{{width:100%;border-collapse:collapse;font-size:13.5px}}th,td{{padding:8px 10px;border-bottom:1px solid #eee;text-align:left}}
+th{{color:#52514e;font-weight:600}}.mono{{font-family:ui-monospace,Consolas,monospace}}
+.muted{{color:#8a8a86;font-size:12px}}
+form.add{{display:grid;grid-template-columns:130px 1fr;gap:10px 12px;align-items:center}}
+label{{font-size:13px;color:#52514e;font-weight:600}}
+input,select{{padding:9px 11px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui;width:100%;box-sizing:border-box}}
+.hint{{grid-column:2;color:#8a8a86;font-size:12px;margin-top:-4px}}
+button{{padding:9px 16px;border:0;border-radius:8px;font:600 13px system-ui;cursor:pointer}}
+button[type=submit].primary{{background:#2a78d6;color:#fff;grid-column:2;justify-self:start;margin-top:4px}}
+button.del{{background:#fbeaea;color:#c0392b;border:1px solid #f0c9c9;padding:5px 10px}}
+button.del:hover{{background:#f5d5d5}}</style></head><body>{NAV}<main>
+<h1>Exclusiones</h1><p class=sub>IPs que no quieres que aparezcan en el panel ni en los reportes
+(tus DNS, tu monitoreo SNMP, etc.). Se aplica al instante.</p>
+{banner}
+<div class=card><table><thead><tr><th>Tipo</th><th>IP</th><th>Puertos</th><th>Motivo</th><th></th></tr></thead>
+<tbody>{tabla}</tbody></table></div>
+<h2>Agregar exclusion</h2>
+<div class=card><form class=add method=post action="/exclusiones">
+<input type=hidden name=accion value=add>
+<label>Tipo</label><select name=tipo><option value=dst>Destino (a donde va)</option><option value=src>Origen (de donde sale)</option></select>
+<label>IP</label><input name=ip placeholder="10.66.66.2" required>
+<label>Puertos</label><input name=puertos placeholder="53, 161  (vacio = todos)">
+<div class=hint>Para un DNS suele ser 53; para monitoreo SNMP, 161. Deja vacio para ignorar toda la IP.</div>
+<label>Motivo</label><input name=motivo placeholder="DNS interno / monitoreo SNMP">
+<button type=submit class=primary>Agregar</button>
+</form></div>
+<p class=sub style="margin-top:16px">Ejemplos: tu DNS interno como <b>Destino</b> puerto <b>53</b>; tu servidor de
+monitoreo como <b>Origen</b> puerto <b>161</b>. Asi quitas el ruido sin perder de vista lo demas que hagan esas IPs.</p>
+</main></body></html>"""
+    return body
+
 def documentacion_page():
     port = CFG.get("PORT", "5637")
     css = ("body{margin:0;background:#fcfcfb;font:15px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
@@ -1199,16 +1325,15 @@ propio DNS; el sospechoso es el equipo de origen.</td><td>Vigilar.</td></tr>
 
 <h2>Excluir tus DNS y otra infraestructura</h2>
 <p>Las consultas de clientes a dominios sospechosos van dirigidas a tu servidor DNS y
-ensucian el panel. Para que tus DNS (u otras IPs propias) no aparezcan, edita en la VM:</p>
-<pre><code>nano /etc/suricata-report.conf</code></pre>
-<p>Agrega tus IPs separadas por coma:</p>
-<pre><code>IGNORAR_DESTINOS=10.66.66.2,205.235.3.8
-IGNORAR_ORIGENES=</code></pre>
-<p>Y aplica:</p>
-<pre><code>systemctl restart suricata-dashboard</code></pre>
-<p><code>IGNORAR_DESTINOS</code> excluye trafico hacia esas IPs (tus DNS); <code>IGNORAR_ORIGENES</code>
-excluye un equipo concreto como origen. Nota: al excluir tus DNS dejas de ver que un
-cliente consulto un dominio malicioso; esa senal sigue en EveBox filtrando por origen.</p>
+ensucian el panel. Usa el apartado <b>Exclusiones</b> del menu (arriba) para agregar una IP
+sin tocar archivos:</p>
+<ul>
+<li><b>Tu DNS</b>: agrega su IP como <b>Destino</b>, puerto <b>53</b>, motivo "DNS interno".</li>
+<li><b>Tu monitoreo SNMP</b>: agrega su IP como <b>Origen</b>, puerto <b>161</b>.</li>
+<li>Deja los puertos vacios para ignorar todo el trafico de esa IP.</li>
+</ul>
+<p>Se aplica al instante. Nota: al excluir tus DNS dejas de ver que un cliente consulto un
+dominio malicioso; esa senal sigue en EveBox filtrando por origen.</p>
 
 <h2>Cambiar la clave del panel</h2>
 <p>Lo mas facil es el apartado <b>Perfil</b> de este mismo panel. Tambien se puede en la VM
@@ -1310,6 +1435,8 @@ class H(BaseHTTPRequestHandler):
             return self._html(historico_page())
         if path == "/perfil":
             return self._html(perfil_page())
+        if path == "/exclusiones":
+            return self._html(exclusiones_page())
         if path == "/documentacion":
             return self._html(documentacion_page())
         m = re.match(r"^/r/(report-[0-9A-Za-z_-]+\.html)$", path)
@@ -1325,7 +1452,8 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._auth_ok():
             return self._deny()
-        if self.path.split("?", 1)[0] != "/perfil":
+        ruta = self.path.split("?", 1)[0]
+        if ruta not in ("/perfil", "/exclusiones"):
             return self._html("<h1>No encontrado</h1>", 404)
         import urllib.parse
         try:
@@ -1334,6 +1462,8 @@ class H(BaseHTTPRequestHandler):
         except Exception:
             body = ""
         q = urllib.parse.parse_qs(body)
+        if ruta == "/exclusiones":
+            return self._post_exclusiones(q)
         actual = (q.get("actual", [""])[0])
         usuario = (q.get("usuario", [""])[0]).strip()
         nueva = (q.get("nueva", [""])[0])
@@ -1353,6 +1483,48 @@ class H(BaseHTTPRequestHandler):
             return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
         # las credenciales nuevas ya rigen; el navegador reintentara con las viejas -> 401 y re-login
         return self._html(perfil_page("Credenciales actualizadas. Vuelve a entrar con el usuario y clave nuevos.", ok=True))
+
+    def _post_exclusiones(self, q):
+        import ipaddress
+        accion = q.get("accion", [""])[0]
+        # trabajar solo con las reglas propias (no las legacy del .conf)
+        propias = [r for r in cargar_exclusiones() if r.get("motivo") != "(conf)"]
+        if accion == "del":
+            try:
+                idx = int(q.get("idx", ["-1"])[0])
+                todas = cargar_exclusiones()
+                objetivo = todas[idx]
+                if objetivo.get("motivo") == "(conf)":
+                    return self._html(exclusiones_page("Esa exclusion esta en el archivo .conf; quitala alli.", ok=False))
+                propias = [r for r in propias if not (r["ip"] == objetivo["ip"] and r["tipo"] == objetivo["tipo"] and r["puertos"] == objetivo["puertos"])]
+                guardar_exclusiones(propias)
+                return self._html(exclusiones_page("Exclusion eliminada.", ok=True))
+            except Exception:
+                return self._html(exclusiones_page("No se pudo eliminar.", ok=False))
+        # agregar
+        tipo = q.get("tipo", ["dst"])[0]
+        ip = (q.get("ip", [""])[0]).strip()
+        motivo = (q.get("motivo", [""])[0]).strip()[:80]
+        pts_raw = (q.get("puertos", [""])[0]).strip()
+        if tipo not in ("dst", "src"):
+            tipo = "dst"
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            return self._html(exclusiones_page("IP invalida.", ok=False))
+        puertos = []
+        for p in pts_raw.replace(";", ",").split(","):
+            p = p.strip()
+            if p:
+                if not p.isdigit() or not (0 < int(p) < 65536):
+                    return self._html(exclusiones_page(f"Puerto invalido: {p}", ok=False))
+                puertos.append(int(p))
+        propias.append({"tipo": tipo, "ip": ip, "motivo": motivo, "puertos": puertos})
+        try:
+            guardar_exclusiones(propias)
+        except OSError as ex:
+            return self._html(exclusiones_page(f"No se pudo guardar: {ex}", ok=False))
+        return self._html(exclusiones_page(f"Exclusion agregada: {ip}.", ok=True))
 
     def log_message(self, *a):
         pass

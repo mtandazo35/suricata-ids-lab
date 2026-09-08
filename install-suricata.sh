@@ -360,6 +360,12 @@ LOGDIR = "/var/log/suricata"
 HOURS = 24
 cutoff = time.time() - HOURS * 3600
 MAX_LINES = 20_000_000
+try:
+    import resource
+    _cap = 1024 * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (_cap, _cap))
+except Exception:
+    pass
 
 def conf():
     d = {}
@@ -536,6 +542,16 @@ LOGDIR = "/var/log/suricata"
 HOURS = int(sys.argv[1]) if len(sys.argv) > 1 else 24
 cutoff = time.time() - HOURS * 3600
 MAX_LINES = 20_000_000
+MAX_FLUJOS = 200_000     # tope de flujos unicos guardados (evita agotar la RAM en espejos de ISP)
+
+# Red de seguridad: limitar la memoria del proceso. Si se pasa, muere con MemoryError
+# en vez de tumbar el servidor (paso en un espejo real: millones de flujos unicos).
+try:
+    import resource
+    _cap = 1536 * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (_cap, _cap))
+except Exception:
+    pass
 
 def opener(p):
     return io.TextIOWrapper(gzip.open(p, "rb")) if p.endswith(".gz") else open(p, encoding="utf-8", errors="replace")
@@ -587,7 +603,10 @@ for p in files:
             k = (src, sport, dst, dport, proto, sig)
             f = flujos.get(k)
             if f is None:
-                flujos[k] = [1, ts or 0, ts or 0]
+                # tope de cardinalidad: si ya hay demasiados flujos unicos, no crear mas
+                # (los pesados ya estan dentro); asi la RAM no crece sin limite.
+                if len(flujos) < MAX_FLUJOS:
+                    flujos[k] = [1, ts or 0, ts or 0]
             else:
                 f[0] += 1
                 if ts:

@@ -648,6 +648,47 @@ def excluido(src, dst, dport):
             return True
     return False
 
+_TRAD = [
+    (("poor reputation", "cins", "compromised ip", "dshield", "spamhaus", "abuse.ch", "known attacker", "cinsscore"),
+     "Conexion a IP de mala reputacion"),
+    (("tor exit", "tor node", "tor "), "Conexion a red Tor"),
+    (("katana",), "Botnet Katana (centro de mando)"),
+    (("mirai",), "Botnet Mirai (IoT)"),
+    (("cnc", "c2 ", "command and control", "checkin", "check-in"), "Botnet: contacto con su centro de mando"),
+    (("botnet",), "Trafico de botnet"),
+    (("ransom",), "Ransomware"),
+    (("trojan",), "Troyano"),
+    (("coinmin", "cryptomin", "miner"), "Mineria de criptomonedas"),
+    (("ssh scan",), "Escaneo SSH saliente"),
+    (("brute", "password"), "Ataque de contrasenas (fuerza bruta)"),
+    (("rdp", "vnc"), "Acceso remoto (RDP/VNC)"),
+    (("telnet",), "Escaneo Telnet (IoT)"),
+    (("tr-069", "cwmp", "7547"), "Escaneo TR-069 (routers)"),
+    (("port scan", "portscan", "sweep", "recon", "barrido"), "Escaneo de puertos"),
+    (("scan",), "Escaneo saliente"),
+    (("exploit", "cve-", "shellcode", "attempted-admin"), "Intento de exploit"),
+    (("go http client",), "Cliente HTTP Go (bot/escaner)"),
+    (("fake wget", "wget 3.0"), "User-Agent falso (wget)"),
+    (("user_agent", "user agent"), "User-Agent sospechoso"),
+    (("bittorrent", "p2p", "dht"), "BitTorrent / P2P"),
+    (("stun ",), "STUN (videollamada/WebRTC)"),
+    (("snmp",), "Acceso SNMP"),
+    (("dyn_dns", "dynamic_dns", "dyndns", "duckdns", "no-ip"), "DNS dinamico (dyndns/duckdns)"),
+    (("dns query", ".cc tld", ".su tld", ".top domain", " tld", "dns lookup"), "Consulta DNS a dominio sospechoso"),
+    (("adware", "pup"), "Adware / programa no deseado"),
+    (("malware", "compromised"), "Trafico de malware"),
+    (("quic",), "Anomalia QUIC"),
+    (("tls", "ssl"), "Anomalia TLS/SSL"),
+    (("http",), "Anomalia HTTP"),
+    (("stream", "tcp "), "Anomalia de conexion TCP"),
+]
+def traducir(sig):
+    s = sig.lower()
+    for claves, txt in _TRAD:
+        if any(k in s for k in claves):
+            return txt
+    return sig
+
 def parse_ts(s):
     try:
         return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
@@ -800,7 +841,7 @@ for (src, sport, dst, dport, proto, sig), (cnt, first, last) in top_flujos:
     filas.append(
         f"<tr><td class='mono'>{esc(src)}</td><td class='mono num'>{esc(sport)}</td>"
         f"<td class='mono dst'>{esc(dst)}</td><td class='mono num'>{esc(dport)}</td>"
-        f"<td>{esc(proto)}</td><td>{esc(sig)}</td>"
+        f"<td>{esc(proto)}</td><td title='{esc(sig)}'>{esc(traducir(sig))}</td>"
         f"<td class='num'>{cnt}</td><td class='mono'>{hp} &rarr; {hu}</td><td>{dur(first,last)}</td></tr>")
 
 def top(counter, n=12, fmt=str):
@@ -809,7 +850,7 @@ def top(counter, n=12, fmt=str):
 by_sig = Counter()
 for _k, _v in flujos.items():
     by_sig[_k[5]] += _v[0]
-firmas_top = [(s[:110], n) for s, n in by_sig.most_common(12)]
+firmas_top = [(traducir(s)[:80], n) for s, n in by_sig.most_common(12)]
 
 doc = f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1036,6 +1077,49 @@ def sev(sig):
             return color, etq
     return "#8a8a86", "OTRO"
 
+# Traduccion de las firmas ET (ingles) a una descripcion en espanol. Se evalua en orden;
+# lo especifico antes que lo generico. Si no casa, se deja la firma original.
+_TRAD = [
+    (("poor reputation", "cins", "compromised ip", "dshield", "spamhaus", "abuse.ch", "known attacker", "cinsscore"),
+     "Conexion a IP de mala reputacion"),
+    (("tor exit", "tor node", "tor "), "Conexion a red Tor"),
+    (("katana",), "Botnet Katana (centro de mando)"),
+    (("mirai",), "Botnet Mirai (IoT)"),
+    (("cnc", "c2 ", "command and control", "checkin", "check-in"), "Botnet: contacto con su centro de mando"),
+    (("botnet",), "Trafico de botnet"),
+    (("ransom",), "Ransomware"),
+    (("trojan",), "Troyano"),
+    (("coinmin", "cryptomin", "miner"), "Mineria de criptomonedas"),
+    (("ssh scan",), "Escaneo SSH saliente"),
+    (("brute", "password"), "Ataque de contrasenas (fuerza bruta)"),
+    (("rdp", "vnc"), "Acceso remoto (RDP/VNC)"),
+    (("telnet",), "Escaneo Telnet (IoT)"),
+    (("tr-069", "cwmp", "7547"), "Escaneo TR-069 (routers)"),
+    (("port scan", "portscan", "sweep", "recon", "barrido"), "Escaneo de puertos"),
+    (("scan",), "Escaneo saliente"),
+    (("exploit", "cve-", "shellcode", "attempted-admin"), "Intento de exploit"),
+    (("go http client",), "Cliente HTTP Go (bot/escaner)"),
+    (("fake wget", "wget 3.0"), "User-Agent falso (wget)"),
+    (("user_agent", "user agent"), "User-Agent sospechoso"),
+    (("bittorrent", "p2p", "dht"), "BitTorrent / P2P"),
+    (("stun ",), "STUN (videollamada/WebRTC)"),
+    (("snmp",), "Acceso SNMP"),
+    (("dyn_dns", "dynamic_dns", "dyndns", "duckdns", "no-ip"), "DNS dinamico (dyndns/duckdns)"),
+    (("dns query", ".cc tld", ".su tld", ".top domain", " tld", "dns lookup"), "Consulta DNS a dominio sospechoso"),
+    (("adware", "pup"), "Adware / programa no deseado"),
+    (("malware", "compromised"), "Trafico de malware"),
+    (("quic",), "Anomalia QUIC"),
+    (("tls", "ssl"), "Anomalia TLS/SSL"),
+    (("http",), "Anomalia HTTP"),
+    (("stream", "tcp "), "Anomalia de conexion TCP"),
+]
+def traducir(sig):
+    s = sig.lower()
+    for claves, txt in _TRAD:
+        if any(k in s for k in claves):
+            return txt
+    return sig
+
 def tail_grupos(path=EVE, want=200, maxbytes=6_000_000, top=25):
     """Cola del eve.json agrupada por (origen, destino, puerto, firma) con contador."""
     try:
@@ -1090,7 +1174,7 @@ def live_feed_html():
                 f'<td class="mono">{html.escape(src)}</td>'
                 f'<td class="mono dst">{html.escape(dst)}</td>'
                 f'<td class="mono">{html.escape(puerto)}</td>'
-                f'<td>{html.escape(sig)} {veces}</td></tr>')
+                f'<td title="{html.escape(sig)}">{html.escape(traducir(sig))} {veces}</td></tr>')
         cuerpo = "".join(tr)
     ahora = datetime.now().strftime("%H:%M:%S")
     return (

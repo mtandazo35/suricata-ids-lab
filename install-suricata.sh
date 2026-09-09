@@ -649,7 +649,7 @@ def excluido(src, dst, dport):
     return False
 
 _TRAD = [
-    (("poor reputation", "cins", "compromised ip", "dshield", "spamhaus", "abuse.ch", "known attacker", "cinsscore"), "IP de mala reputacion"),
+    (("poor reputation", "cins", "compromised ip", "dshield", "spamhaus", "abuse.ch", "known attacker", "cinsscore"), "Mala reputacion"),
     (("tor exit", "tor node", "tor "), "Red Tor"),
     (("katana",), "Botnet Katana"),
     (("mirai",), "Botnet Mirai"),
@@ -670,7 +670,7 @@ _TRAD = [
     (("fake wget", "wget 3.0"), "User-Agent falso"),
     (("user_agent", "user agent"), "User-Agent raro"),
     (("bittorrent", "p2p", "dht"), "BitTorrent / P2P"),
-    (("stun ",), "STUN (videollamada)"),
+    (("stun ",), "STUN (video)"),
     (("snmp",), "Acceso SNMP"),
     (("dyn_dns", "dynamic_dns", "dyndns", "duckdns", "no-ip"), "DNS dinamico"),
     (("dns query", ".cc tld", ".su tld", ".top domain", " tld", "dns lookup"), "DNS sospechoso"),
@@ -1079,7 +1079,7 @@ def sev(sig):
 # Traduccion de las firmas ET (ingles) a una descripcion en espanol. Se evalua en orden;
 # lo especifico antes que lo generico. Si no casa, se deja la firma original.
 _TRAD = [
-    (("poor reputation", "cins", "compromised ip", "dshield", "spamhaus", "abuse.ch", "known attacker", "cinsscore"), "IP de mala reputacion"),
+    (("poor reputation", "cins", "compromised ip", "dshield", "spamhaus", "abuse.ch", "known attacker", "cinsscore"), "Mala reputacion"),
     (("tor exit", "tor node", "tor "), "Red Tor"),
     (("katana",), "Botnet Katana"),
     (("mirai",), "Botnet Mirai"),
@@ -1100,7 +1100,7 @@ _TRAD = [
     (("fake wget", "wget 3.0"), "User-Agent falso"),
     (("user_agent", "user agent"), "User-Agent raro"),
     (("bittorrent", "p2p", "dht"), "BitTorrent / P2P"),
-    (("stun ",), "STUN (videollamada)"),
+    (("stun ",), "STUN (video)"),
     (("snmp",), "Acceso SNMP"),
     (("dyn_dns", "dynamic_dns", "dyndns", "duckdns", "no-ip"), "DNS dinamico"),
     (("dns query", ".cc tld", ".su tld", ".top domain", " tld", "dns lookup"), "DNS sospechoso"),

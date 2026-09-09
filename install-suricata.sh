@@ -1233,6 +1233,26 @@ def newest_report():
     fs = sorted(glob.glob(f"{LOGDIR}/report-*.html"), key=os.path.getmtime, reverse=True)
     return fs[0] if fs else None
 
+_DETALLE_RE = re.compile(r'<section class="card">\s*<h2>Detalle:.*?</section>', re.S)
+
+def partes_reporte():
+    """Divide el ultimo reporte en (estilos, resumen-sin-detalle, seccion-detalle)."""
+    f = newest_report()
+    if not f:
+        return "", "", ""
+    try:
+        doc = open(f, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return "", "", ""
+    mh = re.search(r"<style>(.*?)</style>", doc, re.S)
+    css = f"<style>{mh.group(1)}</style>" if mh else ""
+    mm = re.search(r"<main[^>]*>(.*?)</main>", doc, re.S)
+    inner = mm.group(1) if mm else ""
+    md = _DETALLE_RE.search(inner)
+    detalle = md.group(0) if md else ""
+    resumen = _DETALLE_RE.sub("", inner)
+    return css, resumen, detalle
+
 def refrescador():
     """Hilo de fondo: regenera el reporte periodicamente, NUNCA en el request.
     Asi 'En vivo' sirve siempre el ultimo archivo al instante aunque generar tarde."""
@@ -1260,6 +1280,7 @@ box-shadow:0 1px 6px rgba(0,0,0,.15)}
 </style>
 <div class="nav"><span class="brand"><span class="sh"></span>Estadisticas Suricata</span>
 <a href="/" class="on">En vivo</a>
+<a href="/detalle">Detalle</a>
 <a href="/historico">Historico</a>
 <a href="/exclusiones">Exclusiones</a>
 <a href="/perfil">Perfil</a>
@@ -1628,21 +1649,12 @@ class H(BaseHTTPRequestHandler):
         if not self._auth_ok():
             return self._deny()
         if path in ("/", "/index.html"):
-            f = newest_report()   # instantaneo: nunca regenera en el request
             feed = live_feed_html()
-            # cabeza/estilos y <main> (resumen 24h) del ultimo reporte, si existe
-            head_css = ""; resumen = ""
-            if f:
-                try:
-                    doc = open(f, encoding="utf-8", errors="replace").read()
-                    mh = re.search(r"<style>(.*?)</style>", doc, re.S)
-                    head_css = f"<style>{mh.group(1)}</style>" if mh else ""
-                    mm = re.search(r"<main[^>]*>(.*?)</main>", doc, re.S)
-                    resumen = ("<h2 style='margin:16px 28px 0'>Resumen de las ultimas 24h</h2>"
-                               f"<main>{mm.group(1)}</main>") if mm else ""
-                except OSError:
-                    pass
-            if not resumen:
+            head_css, resumen_inner, _ = partes_reporte()   # resumen SIN la tabla de detalle
+            if resumen_inner.strip():
+                resumen = ("<h2 style='margin:16px 28px 0'>Resumen de las ultimas 24h</h2>"
+                           f"<main>{resumen_inner}</main>")
+            else:
                 resumen = ("<main style='padding:24px'><p style='color:#52514e'>El resumen de 24h se "
                            "esta generando en segundo plano; aparecera aqui en unos minutos. "
                            "El feed de abajo ya esta en vivo.</p></main>")
@@ -1650,6 +1662,16 @@ class H(BaseHTTPRequestHandler):
                     f"<meta name=viewport content='width=device-width,initial-scale=1'>"
                     f"<meta http-equiv=refresh content=20><title>Estadisticas Suricata</title>"
                     f"{head_css}</head><body>{NAV}{resumen}{feed}</body></html>")
+            return self._html(page)
+        if path == "/detalle":
+            head_css, _, detalle = partes_reporte()
+            if not detalle.strip():
+                detalle = ("<section class='card' style='margin:16px 28px'><p class='muted'>El detalle se "
+                           "esta generando; aparecera en unos minutos.</p></section>")
+            page = (f"<!doctype html><html lang=es><head><meta charset=utf-8>"
+                    f"<meta name=viewport content='width=device-width,initial-scale=1'>"
+                    f"<title>Detalle de ataques</title>{head_css}</head><body>{NAV}"
+                    f"<main>{detalle}</main></body></html>")
             return self._html(page)
         if path == "/historico":
             return self._html(historico_page())

@@ -1466,11 +1466,10 @@ class H(BaseHTTPRequestHandler):
         pw = CFG.get("PASS", "")
         if not pw:
             return True  # sin PASS configurada, sin auth (solo detras de VPN/proxy)
-        if self._sesion_ok():
-            return True
-        # compatibilidad: curl/API con auth basica sigue funcionando
-        want = "Basic " + base64.b64encode(f"{CFG['USER']}:{pw}".encode()).decode()
-        return self.headers.get("Authorization") == want
+        # Solo sesion (cookie del formulario). NO se acepta auth basica del navegador:
+        # el navegador la cachea de por vida y anularia el boton Salir. Para scripts,
+        # hacer login por POST /login y reutilizar la cookie sid.
+        return self._sesion_ok()
     def _redirect(self, location, cookie=None):
         self.send_response(303)
         self.send_header("Location", location)

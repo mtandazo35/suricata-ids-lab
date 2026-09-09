@@ -567,7 +567,9 @@ Salida: /var/log/suricata/report-AAAAMMDD-HHMM.html
 """
 import glob, gzip, io, json, os, re, sys, html, time
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+TZ_EC = timezone(timedelta(hours=-5))   # hora de Ecuador (America/Guayaquil, sin horario de verano)
 
 # Extraccion por regex (mucho mas rapida que json.loads por linea sobre cientos de MB).
 _RE = {k: re.compile(p) for k, p in {
@@ -691,8 +693,14 @@ def traducir(sig):
     return sig
 
 def parse_ts(s):
+    # Parsea con el offset de la marca (eve.json trae -0500) para obtener el epoch absoluto.
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.strptime(s, fmt).timestamp()
+        except (ValueError, TypeError):
+            pass
     try:
-        return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
+        return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=TZ_EC).timestamp()
     except Exception:
         return None
 
@@ -812,15 +820,15 @@ def timeline(by_hour):
     for i, v in enumerate(vals):
         x = pad + i * bw
         bh = (H - 2 * pad) * v / mx
-        t0 = datetime.fromtimestamp((lo + i) * BUCKET)
-        t1 = datetime.fromtimestamp((lo + i + 1) * BUCKET)
+        t0 = datetime.fromtimestamp((lo + i) * BUCKET, TZ_EC)
+        t1 = datetime.fromtimestamp((lo + i + 1) * BUCKET, TZ_EC)
         rango = t0.strftime("%H:%M") + "-" + t1.strftime("%H:%M")
         bars.append(
             f'<rect x="{x:.1f}" y="{H-pad-bh:.1f}" width="{max(1,bw-1.5):.1f}" height="{bh:.1f}" rx="1.5" fill="{BLUE}">'
             f'<title>{rango}  ·  {v:,} alertas</title></rect>')
         if i % tick_every == 0:
             ticks.append(f'<text x="{x+bw/2:.1f}" y="{H-pad+14:.0f}" text-anchor="middle" class="tick">{t0.strftime("%H:%M")}</text>')
-    pico_t = datetime.fromtimestamp((lo + vals.index(mx)) * BUCKET).strftime("%H:%M") if mx else ""
+    pico_t = datetime.fromtimestamp((lo + vals.index(mx)) * BUCKET, TZ_EC).strftime("%H:%M") if mx else ""
     return (f'<section class="card wide"><h2>Ataques por hora y minuto (ultimas {HOURS}h)</h2>'
             f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" aria-label="alertas por intervalo" style="cursor:default">'
             f'<line x1="{pad}" y1="{H-pad}" x2="{W-pad}" y2="{H-pad}" stroke="{GRID}"/>'
@@ -836,13 +844,13 @@ def dur(a, b):
     return f"{s//3600}h{(s%3600)//60:02d}m"
 
 host = os.uname().nodename if hasattr(os, "uname") else "suricata"
-gen = datetime.now().strftime("%Y-%m-%d %H:%M")
+gen = datetime.now(TZ_EC).strftime("%Y-%m-%d %H:%M")
 
 top_flujos = sorted(flujos.items(), key=lambda kv: kv[1][0], reverse=True)[:150]
 filas = []
 for (src, sport, dst, dport, proto, sig), (cnt, first, last) in top_flujos:
-    hp = datetime.fromtimestamp(first).strftime("%d/%m %H:%M") if first else "-"
-    hu = datetime.fromtimestamp(last).strftime("%H:%M") if last else "-"
+    hp = datetime.fromtimestamp(first, TZ_EC).strftime("%d/%m %H:%M") if first else "-"
+    hu = datetime.fromtimestamp(last, TZ_EC).strftime("%H:%M") if last else "-"
     filas.append(
         f"<tr><td class='mono'>{esc(src)}</td><td class='mono num'>{esc(sport)}</td>"
         f"<td class='mono dst'>{esc(dst)}</td><td class='mono num'>{esc(dport)}</td>"
@@ -950,7 +958,7 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
   </section>
 </main></body></html>"""
 
-out = os.path.join(LOGDIR, "report-" + datetime.now().strftime("%Y%m%d-%H%M") + ".html")
+out = os.path.join(LOGDIR, "report-" + datetime.now(TZ_EC).strftime("%Y%m%d-%H%M") + ".html")
 open(out, "w", encoding="utf-8").write(doc)
 
 # Historico acotado: conservar solo los 20 reportes HTML mas recientes (el panel genera
@@ -1007,7 +1015,18 @@ reportes diarios, con login basico. Solo biblioteca estandar. Corre como servici
 Config: /etc/suricata-dashboard.conf  (PORT, USER, PASS)
 """
 import base64, glob, html, json, os, re, secrets, subprocess, threading, time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+TZ_EC = timezone(timedelta(hours=-5))   # hora de Ecuador (America/Guayaquil)
+
+def hora_ec(ts):
+    """Devuelve HH:MM:SS en hora de Ecuador desde una marca de eve.json (con offset)."""
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.strptime(ts, fmt).astimezone(TZ_EC).strftime("%H:%M:%S")
+        except (ValueError, TypeError):
+            pass
+    return ts[11:19] if len(ts) >= 19 else ""
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1149,7 +1168,7 @@ def tail_grupos(path=EVE, want=200, maxbytes=6_000_000, top=25):
         if _excluido(reglas, src, dst, int(dp) if dp else None):   # exclusiones configuradas
             continue
         vistos += 1
-        ts = get("ts"); hh = ts[11:19] if len(ts) >= 19 else ""
+        hh = hora_ec(get("ts"))
         key = (src, dst, f"{dp}/{pr}" if dp else pr, sig)
         r = g.get(key)
         if r is None:
@@ -1180,7 +1199,7 @@ def live_feed_html():
                 f'<td class="mono">{html.escape(puerto)}</td>'
                 f'<td title="{html.escape(sig)}">{html.escape(traducir(sig))} {veces}</td></tr>')
         cuerpo = "".join(tr)
-    ahora = datetime.now().strftime("%H:%M:%S")
+    ahora = datetime.now(TZ_EC).strftime("%H:%M:%S")
     return (
         '<style>'
         '.feed{margin:20px 28px}'
@@ -1488,13 +1507,31 @@ def documentacion_page():
 <h1>Documentacion</h1>
 <p>Guia rapida del panel de estadisticas de Suricata y como ajustarlo.</p>
 
-<h2>Que muestra el panel</h2>
+<h2>Las pestañas del menu</h2>
+<table><tr><th>Pestaña</th><th>Que hace</th></tr>
+<tr><td><b>En vivo</b></td><td>Vista principal. Arriba, el <b>resumen de las ultimas 24h</b>:
+puertos de destino mas atacados, IPs origen (atacantes), IPs destino (objetivos) y la
+linea de tiempo por intervalos de 30 minutos. Abajo, el <b>feed de los ultimos ataques</b>,
+que se actualiza solo cada 20 segundos.</td></tr>
+<tr><td><b>Detalle</b></td><td>La tabla completa de ataques: quien ataca, a que IP y puerto,
+protocolo, tipo de ataque, cuantas veces y desde/hasta cuando. Paginada de 20 en 20; al
+imprimir a PDF salen todas las filas.</td></tr>
+<tr><td><b>Historico</b></td><td>Los ultimos 20 reportes guardados, cada uno abrible. Se
+generan cada 10 minutos y los mas viejos se borran solos.</td></tr>
+<tr><td><b>Exclusiones</b></td><td>Gestiona las IPs que NO quieres ver en el panel (tus DNS,
+tu monitoreo SNMP). Agregar, editar y eliminar; se explica mas abajo.</td></tr>
+<tr><td><b>Perfil</b></td><td>Cambiar el usuario y la clave de acceso a este panel.</td></tr>
+<tr><td><b>Documentacion</b></td><td>Esta pagina.</td></tr>
+<tr><td><b>Salir</b></td><td>Cierra la sesion.</td></tr>
+</table>
+
+<h2>Cada cuanto se actualiza</h2>
 <ul>
-<li><b>En vivo</b>: resumen de las ultimas 24h (puertos atacados, IPs origen y destino,
-linea de tiempo, tabla de detalle) y, abajo, el feed de los ultimos ataques que se
-actualiza solo cada 20 segundos.</li>
-<li><b>Historico</b>: los ultimos 20 reportes guardados; el resto se borra solo.</li>
-<li><b>Perfil</b>: cambiar el usuario y la clave de acceso a este panel.</li>
+<li><b>Feed de ultimos ataques</b> (En vivo, abajo): cada <b>20 segundos</b>.</li>
+<li><b>Resumen de 24h, Detalle e Historico</b>: se regeneran en segundo plano cada
+<b>10 minutos</b>. Por eso los graficos casi no cambian entre recargas y el feed si.</li>
+<li><b>Reglas ET</b>: se actualizan solas cada dia a las 04:30. <b>Informe por Telegram</b>: 07:30.</li>
+<li>Todas las horas del panel estan en <b>hora de Ecuador</b> (UTC-5).</li>
 </ul>
 
 <h2>Colores de gravedad</h2>

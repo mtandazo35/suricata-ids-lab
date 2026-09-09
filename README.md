@@ -54,6 +54,25 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/te
 
 > La imagen `genericcloud` de Debian no trae `curl`: antes `apt-get update && apt-get install -y curl`.
 
+## Puertos y por donde se expone cada web
+
+El instalador levanta **dos webs**, cada una en su puerto. Ambas escuchan en
+`0.0.0.0` (todas las interfaces); exponlas solo por VPN, detras de tu proxy o
+abriendo el puerto solo a tu IP.
+
+| Puerto | Proto | Servicio | Web / URL | Login | Notas |
+|---|---|---|---|---|---|
+| **5636** | TCP / HTTPS | EveBox | `https://<IP>:5636` | usuario `admin` + clave del instalador | certificado autofirmado (acepta la advertencia); explorador de alertas |
+| **5637** | TCP / HTTP | Panel de estadisticas | `http://<IP>:5637` | usuario `admin` + clave del instalador | reportes graficos; **HTTP plano**, ponlo detras de proxy/VPN |
+| **37008** | UDP | Receptor TZSP (solo con `-t`) | — (no es web) | — | espejo desde el MikroTik; no lo abras a internet |
+
+- Cambiar el puerto de **EveBox**: flag `-p PUERTO` al instalar, o `/etc/evebox/evebox.yaml`.
+- Cambiar el puerto del **panel**: `PORT=` en `/etc/suricata-dashboard.conf` y
+  `systemctl restart suricata-dashboard`.
+- Detras de un proxy inverso (Nginx Proxy Manager / openresty) apunta al backend por
+  **IP literal** (`http://<IP>:5637`), no por hostname, y en Advanced usa
+  `proxy_http_version 1.1;` con `proxy_set_header Connection "";` para que no arrastre latencia.
+
 ## Apartado de estadisticas (panel web)
 
 Ademas de EveBox, el instalador levanta un **panel de estadisticas** propio en su puerto
@@ -302,21 +321,40 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/te
 
 ### 2. Comandos en el MikroTik
 
-Sustituye `IP_SURICATA` por la IP del servidor (la que imprime el instalador).
+Sustituye `IP_SURICATA` por la IP del servidor (la que imprime el instalador) y
+`bridge` / `172.16.10.0/24` por tu interfaz y tu red de clientes.
+
+> **v6 y v7.** Los comandos de espejo (`/tool sniffer` y `action=sniff-tzsp`) son
+> **iguales en RouterOS v6 y v7**; funcionan igual copiados tal cual. Aun asi abajo
+> dejo el bloque de cada version por separado para que cualquiera aplique el suyo,
+> y marco las **dos** diferencias reales: en v7 `filter-interface` admite varias
+> interfaces separadas por coma, y el **fasttrack** de v7 tambien cubre IPv6 (hay que
+> excluir ambos). Para saber tu version: `/system resource print` (campo `version`).
 
 **Opcion A: todo el trafico de una interfaz** (`/tool sniffer` en modo streaming).
-Elige la interfaz donde pasa el trafico de clientes (el bridge LAN o el ether WAN):
+Elige la interfaz donde pasa el trafico de clientes (el bridge LAN o el ether WAN).
+
+RouterOS **v6**:
 
 ```routeros
 /tool sniffer set streaming-enabled=yes streaming-server=IP_SURICATA filter-stream=yes filter-interface=bridge
 /tool sniffer start
 # el sniffer NO sobrevive al reinicio: arrancarlo con el scheduler
 /system scheduler add name=sniffer-start start-time=startup on-event="/tool sniffer start"
-# comprobar
 /tool sniffer print
 ```
 
-Filtros utiles para no espejar todo:
+RouterOS **v7** (identico; `filter-interface` puede llevar varias interfaces):
+
+```routeros
+/tool sniffer set streaming-enabled=yes streaming-server=IP_SURICATA filter-stream=yes filter-interface=bridge
+# v7: espejar mas de una interfaz a la vez -> filter-interface=bridge1,bridge2
+/tool sniffer start
+/system scheduler add name=sniffer-start start-time=startup on-event="/tool sniffer start"
+/tool sniffer print
+```
+
+Filtros utiles para no espejar todo (iguales en v6 y v7):
 
 ```routeros
 # solo una red de clientes
@@ -328,7 +366,8 @@ Filtros utiles para no espejar todo:
 ```
 
 **Opcion B: selectivo por regla de firewall** (`action=sniff-tzsp` en mangle).
-Solo se espeja lo que matchea la regla; ideal para una red o un cliente concreto:
+Solo se espeja lo que matchea la regla; ideal para una red o un cliente concreto.
+La sintaxis es **la misma en v6 y v7**:
 
 ```routeros
 /ip firewall mangle add chain=prerouting src-address=172.16.10.0/24 action=sniff-tzsp sniff-target=IP_SURICATA sniff-target-port=37008 passthrough=yes comment="espejo a Suricata"
@@ -336,11 +375,19 @@ Solo se espeja lo que matchea la regla; ideal para una red o un cliente concreto
 /ip firewall mangle add chain=forward dst-address=172.16.10.0/24 action=sniff-tzsp sniff-target=IP_SURICATA sniff-target-port=37008 passthrough=yes comment="espejo a Suricata (vuelta)"
 ```
 
-> **Fasttrack.** Con `fasttrack-connection` activo, mangle solo ve los primeros
-> paquetes de cada conexion: se espeja el SYN y el DNS, pero no el HTTP. Excluye
-> esas redes del fasttrack
-> (`/ip firewall filter set [find action=fasttrack-connection] src-address=!172.16.10.0/24`)
-> o usa la Opcion A.
+> **Fasttrack (la unica diferencia que importa).** Con `fasttrack-connection` activo,
+> mangle solo ve los primeros paquetes de cada conexion: se espeja el SYN y el DNS,
+> pero no el HTTP. Excluye esas redes del fasttrack o usa la Opcion A.
+>
+> - **v6** (solo IPv4):
+>   ```routeros
+>   /ip firewall filter set [find action=fasttrack-connection] src-address=!172.16.10.0/24
+>   ```
+> - **v7** (el fasttrack viene activo de fabrica y tambien hay IPv6, excluye los dos):
+>   ```routeros
+>   /ip firewall filter set [find action=fasttrack-connection] src-address=!172.16.10.0/24
+>   /ipv6 firewall filter set [find action=fasttrack-connection] src-address=!2001:db8::/32
+>   ```
 
 Verificar en el servidor:
 
@@ -371,7 +418,8 @@ router o en el firewall (UDP 37008).
 **Opcion C: mirror por hardware** (switch-chip, sin CPU del router). Requiere un
 puerto libre en el MikroTik cableado a una NIC dedicada del servidor (en Proxmox,
 un bridge propio para esa NIC, sin IP). Suricata escucha esa NIC directamente
-(`-i ens19`), sin TZSP. La sintaxis depende del chip:
+(`-i ens19`), sin TZSP. La sintaxis **no depende de la version** (v6 y v7 igual)
+sino del chip switch del equipo:
 
 ```routeros
 # switch-chip clasico (RB, hEX, CCR con switch)

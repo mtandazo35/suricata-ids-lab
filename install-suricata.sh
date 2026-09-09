@@ -653,22 +653,22 @@ _TRAD = [
     (("tor exit", "tor node", "tor "), "Red Tor"),
     (("katana",), "Botnet Katana"),
     (("mirai",), "Botnet Mirai"),
-    (("cnc", "c2 ", "command and control", "checkin", "check-in"), "Botnet (centro de mando)"),
+    (("cnc", "c2 ", "command and control", "checkin", "check-in"), "Botnet CnC"),
     (("botnet",), "Botnet"),
     (("ransom",), "Ransomware"),
     (("trojan",), "Troyano"),
     (("coinmin", "cryptomin", "miner"), "Criptomineria"),
     (("ssh scan",), "Escaneo SSH"),
-    (("brute", "password"), "Fuerza bruta (claves)"),
+    (("brute", "password"), "Fuerza bruta"),
     (("rdp", "vnc"), "RDP/VNC"),
     (("telnet",), "Escaneo Telnet"),
     (("tr-069", "cwmp", "7547"), "Escaneo TR-069"),
     (("port scan", "portscan", "sweep", "recon", "barrido"), "Escaneo de puertos"),
     (("scan",), "Escaneo saliente"),
-    (("exploit", "cve-", "shellcode", "attempted-admin"), "Intento de exploit"),
+    (("exploit", "cve-", "shellcode", "attempted-admin"), "Exploit"),
     (("go http client",), "Cliente HTTP Go"),
     (("fake wget", "wget 3.0"), "User-Agent falso"),
-    (("user_agent", "user agent"), "User-Agent sospechoso"),
+    (("user_agent", "user agent"), "User-Agent raro"),
     (("bittorrent", "p2p", "dht"), "BitTorrent / P2P"),
     (("stun ",), "STUN (videollamada)"),
     (("snmp",), "Acceso SNMP"),
@@ -755,7 +755,7 @@ BLUE = "#2a78d6"; GRID = "#e7e6e2"; INK = "#0b0b0b"; INK2 = "#52514e"; SURF = "#
 
 def esc(x): return html.escape(str(x))
 
-def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=150, barw=460, card_class="card", label_above=False):
+def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_class="card", label_above=False):
     """Barras horizontales rankeadas, un solo tono, etiqueta de valor directa.
     label_above=True: el nombre va ENCIMA de la barra (a todo el ancho), no en una
     columna a la izquierda; asi los nombres largos (firmas) no se recortan nunca."""
@@ -905,7 +905,7 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
     {hbar("Puertos de destino mas atacados", top(by_dport), "alertas")}
     {hbar("IPs origen (atacantes)", top(by_src), "alertas")}
     {hbar("IPs destino (objetivos)", top(by_dst), "alertas")}
-    {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas", lblw=175)}
+    {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas")}
   </div>
   <section class="card">
     <h2>Detalle: quien ataca, a donde, por que puerto, cuando y por cuanto tiempo</h2>
@@ -1083,22 +1083,22 @@ _TRAD = [
     (("tor exit", "tor node", "tor "), "Red Tor"),
     (("katana",), "Botnet Katana"),
     (("mirai",), "Botnet Mirai"),
-    (("cnc", "c2 ", "command and control", "checkin", "check-in"), "Botnet (centro de mando)"),
+    (("cnc", "c2 ", "command and control", "checkin", "check-in"), "Botnet CnC"),
     (("botnet",), "Botnet"),
     (("ransom",), "Ransomware"),
     (("trojan",), "Troyano"),
     (("coinmin", "cryptomin", "miner"), "Criptomineria"),
     (("ssh scan",), "Escaneo SSH"),
-    (("brute", "password"), "Fuerza bruta (claves)"),
+    (("brute", "password"), "Fuerza bruta"),
     (("rdp", "vnc"), "RDP/VNC"),
     (("telnet",), "Escaneo Telnet"),
     (("tr-069", "cwmp", "7547"), "Escaneo TR-069"),
     (("port scan", "portscan", "sweep", "recon", "barrido"), "Escaneo de puertos"),
     (("scan",), "Escaneo saliente"),
-    (("exploit", "cve-", "shellcode", "attempted-admin"), "Intento de exploit"),
+    (("exploit", "cve-", "shellcode", "attempted-admin"), "Exploit"),
     (("go http client",), "Cliente HTTP Go"),
     (("fake wget", "wget 3.0"), "User-Agent falso"),
-    (("user_agent", "user agent"), "User-Agent sospechoso"),
+    (("user_agent", "user agent"), "User-Agent raro"),
     (("bittorrent", "p2p", "dht"), "BitTorrent / P2P"),
     (("stun ",), "STUN (videollamada)"),
     (("snmp",), "Acceso SNMP"),

@@ -590,6 +590,8 @@ def campos(line):
 LOGDIR = "/var/log/suricata"
 HOURS = int(sys.argv[1]) if len(sys.argv) > 1 else 24
 cutoff = time.time() - HOURS * 3600
+BUCKET_MIN = 30                 # resolucion de la linea de tiempo (minutos por barra)
+BUCKET = BUCKET_MIN * 60
 MAX_LINES = 20_000_000
 MAX_FLUJOS = 200_000     # tope de flujos unicos guardados (evita agotar la RAM en espejos de ISP)
 
@@ -733,7 +735,7 @@ for p in files:
             if dport != "":
                 by_dport[f"{dport}/{proto}"] += 1
             if ts:
-                by_hour[int(ts // 3600)] += 1
+                by_hour[int(ts // BUCKET)] += 1
             k = (src, sport, dst, dport, proto, sig)
             f = flujos.get(k)
             if f is None:
@@ -796,30 +798,34 @@ def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_clas
             f'{"".join(rows)}</svg><p class="muted">en {unidad}</p></section>')
 
 def timeline(by_hour):
-    # Ventana FIJA de HORAS barras terminando en la hora actual (rellena con 0 las horas
-    # sin datos), asi siempre se ven las 24h completas. Cada barra lleva tooltip (hover).
-    ahora_h = int(time.time() // 3600)
-    lo = ahora_h - (HOURS - 1)
-    n = HOURS
+    # Ventana FIJA de 24h en intervalos de BUCKET_MIN minutos (detalle hora:minuto),
+    # terminando en el intervalo actual, rellenando con 0 los vacios. Tooltip por barra.
+    n = HOURS * 3600 // BUCKET                      # p.ej. 48 barras de 30 min
+    ahora_b = int(time.time() // BUCKET)
+    lo = ahora_b - (n - 1)
     vals = [by_hour.get(lo + i, 0) for i in range(n)]
     mx = max(vals) or 1
-    W, H, pad = 900, 180, 30
+    W, H, pad = 1120, 190, 30
     bw = (W - 2 * pad) / n
+    tick_every = max(1, (60 // BUCKET_MIN) * 2)     # una etiqueta cada 2 horas
     bars, ticks = [], []
     for i, v in enumerate(vals):
         x = pad + i * bw
         bh = (H - 2 * pad) * v / mx
-        hlabel = datetime.fromtimestamp((lo + i) * 3600).strftime("%H:00")
+        t0 = datetime.fromtimestamp((lo + i) * BUCKET)
+        t1 = datetime.fromtimestamp((lo + i + 1) * BUCKET)
+        rango = t0.strftime("%H:%M") + "-" + t1.strftime("%H:%M")
         bars.append(
-            f'<rect x="{x:.1f}" y="{H-pad-bh:.1f}" width="{max(1,bw-2):.1f}" height="{bh:.1f}" rx="2" fill="{BLUE}">'
-            f'<title>{hlabel} - {v:,} alertas</title></rect>')
-        if i % 2 == 0:
-            ticks.append(f'<text x="{x+bw/2:.1f}" y="{H-pad+14:.0f}" text-anchor="middle" class="tick">{hlabel[:2]}h</text>')
-    return (f'<section class="card wide"><h2>Ataques por hora (ultimas {HOURS}h)</h2>'
-            f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" aria-label="alertas por hora" style="cursor:default">'
+            f'<rect x="{x:.1f}" y="{H-pad-bh:.1f}" width="{max(1,bw-1.5):.1f}" height="{bh:.1f}" rx="1.5" fill="{BLUE}">'
+            f'<title>{rango}  ·  {v:,} alertas</title></rect>')
+        if i % tick_every == 0:
+            ticks.append(f'<text x="{x+bw/2:.1f}" y="{H-pad+14:.0f}" text-anchor="middle" class="tick">{t0.strftime("%H:%M")}</text>')
+    pico_t = datetime.fromtimestamp((lo + vals.index(mx)) * BUCKET).strftime("%H:%M") if mx else ""
+    return (f'<section class="card wide"><h2>Ataques por hora y minuto (ultimas {HOURS}h)</h2>'
+            f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" aria-label="alertas por intervalo" style="cursor:default">'
             f'<line x1="{pad}" y1="{H-pad}" x2="{W-pad}" y2="{H-pad}" stroke="{GRID}"/>'
             f'{"".join(bars)}{"".join(ticks)}</svg>'
-            f'<p class="muted">{HOURS} barras, una por hora &middot; pasa el raton para ver el conteo &middot; pico: {mx:,} alertas/hora</p></section>')
+            f'<p class="muted">1 barra cada {BUCKET_MIN} min &middot; pasa el raton para ver el rango y el conteo &middot; pico: {mx:,} alertas a las {pico_t}</p></section>')
 
 def dur(a, b):
     if not a or not b or b < a:

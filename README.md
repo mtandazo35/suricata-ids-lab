@@ -354,39 +354,63 @@ RouterOS **v7** (identico; `filter-interface` puede llevar varias interfaces):
 /tool sniffer print
 ```
 
-Filtros utiles para no espejar todo (iguales en v6 y v7):
+Filtros utiles para no espejar todo (iguales en v6 y v7). `filter-ip-address`
+acepta una **lista de IPs/redes separadas por coma**, asi que sirve para espejar
+solo unos clientes concretos:
 
 ```routeros
-# solo una red de clientes
-/tool sniffer set filter-ip-address=172.16.10.0/24
+# lista de IPs concretas (los CPE que quieres vigilar) + alguna red
+/tool sniffer set filter-ip-address=172.16.10.25,172.16.10.60,172.16.10.61,172.16.20.0/24
 # solo lo que sale hacia internet (reduce a la mitad): rx en el bridge LAN, tx si sniffas el ether WAN
 /tool sniffer set filter-direction=rx
 # solo DNS + HTTP + HTTPS
 /tool sniffer set filter-port=53,80,443
 ```
 
-**Opcion B: selectivo por regla de firewall** (`action=sniff-tzsp` en mangle).
-Solo se espeja lo que matchea la regla; ideal para una red o un cliente concreto.
-La sintaxis es **la misma en v6 y v7**:
+**Opcion B: selectivo por LISTA DE IPs** (`address-list` + `action=sniff-tzsp` en
+mangle). Es la forma recomendada en un ISP: mantienes una lista con los CPE que
+quieres vigilar y una sola regla los espeja a todos. Anadir o quitar un cliente es
+tocar la lista, no la regla. **Misma sintaxis en v6 y v7.**
+
+Paso 1 — crea la lista `ids-vigilados` con las IPs a espejar (una linea por IP; se
+pueden agregar cuando quieras):
 
 ```routeros
-/ip firewall mangle add chain=prerouting src-address=172.16.10.0/24 action=sniff-tzsp sniff-target=IP_SURICATA sniff-target-port=37008 passthrough=yes comment="espejo a Suricata"
-# la respuesta (trafico de vuelta al cliente)
-/ip firewall mangle add chain=forward dst-address=172.16.10.0/24 action=sniff-tzsp sniff-target=IP_SURICATA sniff-target-port=37008 passthrough=yes comment="espejo a Suricata (vuelta)"
+/ip firewall address-list
+add list=ids-vigilados address=172.16.10.25  comment="CPE Juan Perez"
+add list=ids-vigilados address=172.16.10.60  comment="CPE Local 3"
+add list=ids-vigilados address=172.16.20.0/24 comment="barrio norte"
+```
+
+Paso 2 — dos reglas mangle que espejan lo que sale de esas IPs y lo que les vuelve:
+
+```routeros
+/ip firewall mangle
+add chain=prerouting src-address-list=ids-vigilados action=sniff-tzsp sniff-target=IP_SURICATA sniff-target-port=37008 passthrough=yes comment="espejo IDS (ida)"
+add chain=forward dst-address-list=ids-vigilados action=sniff-tzsp sniff-target=IP_SURICATA sniff-target-port=37008 passthrough=yes comment="espejo IDS (vuelta)"
+```
+
+Gestionar la lista despues (sin tocar las reglas):
+
+```routeros
+/ip firewall address-list add list=ids-vigilados address=172.16.10.99 comment="CPE nuevo"
+/ip firewall address-list print where list=ids-vigilados
+/ip firewall address-list remove [find list=ids-vigilados address=172.16.10.25]
 ```
 
 > **Fasttrack (la unica diferencia que importa).** Con `fasttrack-connection` activo,
 > mangle solo ve los primeros paquetes de cada conexion: se espeja el SYN y el DNS,
-> pero no el HTTP. Excluye esas redes del fasttrack o usa la Opcion A.
+> pero no el HTTP. Excluye del fasttrack a la **misma lista** `ids-vigilados` (asi el
+> filtro tambien se controla desde la lista), o usa la Opcion A.
 >
 > - **v6** (solo IPv4):
 >   ```routeros
->   /ip firewall filter set [find action=fasttrack-connection] src-address=!172.16.10.0/24
+>   /ip firewall filter set [find action=fasttrack-connection] src-address-list=!ids-vigilados
 >   ```
 > - **v7** (el fasttrack viene activo de fabrica y tambien hay IPv6, excluye los dos):
 >   ```routeros
->   /ip firewall filter set [find action=fasttrack-connection] src-address=!172.16.10.0/24
->   /ipv6 firewall filter set [find action=fasttrack-connection] src-address=!2001:db8::/32
+>   /ip firewall filter set [find action=fasttrack-connection] src-address-list=!ids-vigilados
+>   /ipv6 firewall filter set [find action=fasttrack-connection] src-address-list=!ids-vigilados
 >   ```
 
 Verificar en el servidor:

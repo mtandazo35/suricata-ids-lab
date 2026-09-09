@@ -1289,38 +1289,76 @@ monitoreo como <b>Origen</b> puerto <b>161</b>. Asi quitas el ruido sin perder d
 </main></body></html>"""
     return body
 
+LOGO_SVG = ('<svg viewBox="0 0 64 64" width="46" height="46" aria-hidden="true">'
+            '<defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1">'
+            '<stop offset="0" stop-color="#eaf2fd"/><stop offset="1" stop-color="#bcd6f7"/></linearGradient></defs>'
+            # meerkat (suricata) erguido, en pose de centinela
+            '<g fill="url(#lg)">'
+            '<path d="M32 8c-3.2 0-5.6 2.5-5.6 5.7 0 1.4.5 2.7 1.3 3.7-2.6 1.7-4.3 4.8-4.5 8.4'
+            'l-1.5 20.2c-.3 4.2 1.7 7.1 4.9 8.4l-.9 3.1c-.2.8.3 1.5 1.1 1.5h3c.6 0 1.1-.4 1.2-1l.5-2.4'
+            'c.3 0 .6.1 1 .1s.7 0 1-.1l.5 2.4c.1.6.6 1 1.2 1h3c.8 0 1.3-.7 1.1-1.5l-.9-3.1'
+            'c3.2-1.3 5.2-4.2 4.9-8.4l-1.5-20.2c-.2-3.6-1.9-6.7-4.5-8.4.8-1 1.3-2.3 1.3-3.7'
+            'C37.6 10.5 35.2 8 32 8z"/>'
+            '<path d="M22.5 12.2c-1.9-.6-3.9.4-4.6 2.3-.6 1.9.4 3.9 2.3 4.6l3.4 1.1c.3-2.6 1.4-4.9 3-6.6z"/>'
+            '<path d="M41.5 12.2c1.9-.6 3.9.4 4.6 2.3.6 1.9-.4 3.9-2.3 4.6l-3.4 1.1c-.3-2.6-1.4-4.9-3-6.6z"/>'
+            '<path d="M47 30c3 1.5 4.6 4.8 4 8l-1.2-.4c-1.6-.6-2.7-2.1-2.8-3.8z"/>'
+            '</g>'
+            '<circle cx="28.4" cy="20.5" r="1.7" fill="#16233a"/>'
+            '<circle cx="35.6" cy="20.5" r="1.7" fill="#16233a"/>'
+            '<path d="M30 25.5c1 .7 3 .7 4 0" stroke="#16233a" stroke-width="1.4" fill="none" stroke-linecap="round"/>'
+            '</svg>')
+
 def login_page(msg=""):
     err = f'<div class="err">{html.escape(msg)}</div>' if msg else ""
     return f"""<!doctype html><html lang=es><head><meta charset=utf-8>
-<meta name=viewport content='width=device-width,initial-scale=1'><title>Entrar - Estadisticas Suricata</title>
+<meta name=viewport content='width=device-width,initial-scale=1'><title>Entrar - Suricata IDS</title>
 <style>
 *{{box-sizing:border-box}}
-body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-background:linear-gradient(135deg,#0b0b0b 0%,#16233a 100%);
-font:15px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0b0b0b}}
-.box{{background:#fff;border-radius:16px;padding:32px 30px;width:340px;max-width:92vw;
-box-shadow:0 20px 60px rgba(0,0,0,.4)}}
-.brand{{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;margin-bottom:4px}}
-.brand .sh{{width:14px;height:14px;border-radius:4px;background:#2a78d6}}
-.sub{{color:#8a8a86;font-size:13px;margin-bottom:22px}}
-label{{display:block;font-size:13px;color:#52514e;font-weight:600;margin:14px 0 6px}}
-input{{width:100%;padding:11px 13px;border:1px solid #d7d6d2;border-radius:9px;font:15px system-ui}}
+body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;
+font:15px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0b0b0b;position:relative;overflow:hidden;
+background:
+ radial-gradient(1100px 520px at 50% -8%, rgba(42,120,214,.28), transparent 60%),
+ radial-gradient(760px 420px at 88% 112%, rgba(27,175,122,.20), transparent 60%),
+ linear-gradient(140deg,#0a0f1a 0%,#0d1a2e 55%,#0a0f1a 100%)}}
+body::before{{content:"";position:absolute;inset:0;z-index:0;
+background-image:radial-gradient(rgba(255,255,255,.05) 1px, transparent 1px);background-size:24px 24px;
+-webkit-mask-image:radial-gradient(70% 60% at 50% 45%,#000,transparent 80%);
+mask-image:radial-gradient(70% 60% at 50% 45%,#000,transparent 80%)}}
+.wrap{{position:relative;z-index:1;width:360px;max-width:94vw}}
+.badge{{width:78px;height:78px;margin:0 auto -39px;border-radius:50%;
+background:linear-gradient(160deg,#2a78d6,#1c5cab);display:flex;align-items:center;justify-content:center;
+box-shadow:0 12px 30px rgba(42,120,214,.5),0 0 0 6px rgba(255,255,255,.06);position:relative;z-index:2;
+animation:float 5s ease-in-out infinite}}
+@keyframes float{{0%,100%{{transform:translateY(0)}}50%{{transform:translateY(-6px)}}}}
+.box{{background:#fff;border-radius:18px;padding:52px 30px 28px;
+box-shadow:0 30px 70px rgba(0,0,0,.5);text-align:center}}
+.title{{font-weight:800;font-size:21px;letter-spacing:.2px}}
+.title span{{color:#2a78d6}}
+.sub{{color:#8a8a86;font-size:13px;margin:4px 0 20px}}
+form{{text-align:left}}
+label{{display:block;font-size:13px;color:#52514e;font-weight:600;margin:13px 0 6px}}
+input{{width:100%;padding:11px 13px;border:1px solid #d7d6d2;border-radius:10px;font:15px system-ui}}
 input:focus{{outline:none;border-color:#2a78d6;box-shadow:0 0 0 3px rgba(42,120,214,.18)}}
-button{{width:100%;margin-top:22px;padding:12px;background:#2a78d6;color:#fff;border:0;border-radius:9px;
-font:600 15px system-ui;cursor:pointer}}button:hover{{background:#1c5cab}}
-.err{{background:#fbeaea;color:#c0392b;border:1px solid #f0c9c9;border-radius:8px;padding:9px 12px;
-font-size:13px;margin-bottom:6px}}
-.foot{{color:#b8b7b2;font-size:11px;text-align:center;margin-top:18px}}
+button{{width:100%;margin-top:22px;padding:12px;background:linear-gradient(160deg,#2a78d6,#1f65bd);color:#fff;
+border:0;border-radius:10px;font:600 15px system-ui;cursor:pointer;transition:filter .15s}}
+button:hover{{filter:brightness(1.08)}}
+.err{{background:#fbeaea;color:#c0392b;border:1px solid #f0c9c9;border-radius:9px;padding:9px 12px;
+font-size:13px;margin-bottom:8px;text-align:left}}
+.foot{{color:#b8b7b2;font-size:11px;text-align:center;margin-top:16px}}
 </style></head><body>
-<form class=box method=post action="/login">
-<div class="brand"><span class="sh"></span>Estadisticas Suricata</div>
+<div class="wrap">
+<div class="badge">{LOGO_SVG}</div>
+<div class="box">
+<div class="title">Suricata <span>IDS</span></div>
 <div class="sub">Panel de deteccion de ataques</div>
+<form method=post action="/login">
 {err}
 <label>Usuario</label><input name=usuario autocomplete=username autofocus required>
 <label>Clave</label><input name=clave type=password autocomplete=current-password required>
 <button type=submit>Entrar</button>
+</form>
 <div class="foot">Acceso restringido</div>
-</form></body></html>"""
+</div></div></body></html>"""
 
 def documentacion_page():
     port = CFG.get("PORT", "5637")

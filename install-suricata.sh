@@ -1633,6 +1633,11 @@ def historico_page():
 
 class H(BaseHTTPRequestHandler):
     server_version = "suricata-dashboard"
+    # HTTP/1.1 con keep-alive: reutiliza la conexion en vez de reabrirla en cada
+    # respuesta. Detras de un proxy inverso quita mucha latencia (login, redirect, POST).
+    # Todas las respuestas mandan Content-Length, asi que es seguro.
+    protocol_version = "HTTP/1.1"
+    timeout = 30   # cierra conexiones keep-alive inactivas (evita acumular hilos)
     def _sid(self):
         c = self.headers.get("Cookie")
         if not c:

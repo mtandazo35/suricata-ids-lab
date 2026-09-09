@@ -1235,25 +1235,43 @@ def perfil_page(msg="", ok=False):
             "</main></body></html>")
     return body
 
-def exclusiones_page(msg="", ok=False):
+def exclusiones_page(msg="", ok=False, edit_idx=None):
     reglas = cargar_exclusiones()
     banner = ""
     if msg:
         col = "#1baf7a" if ok else "#e34948"
         banner = f'<div style="background:{col};color:#fff;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:13px">{html.escape(msg)}</div>'
+    # regla a editar (solo si es propia, no legacy)
+    ed = None
+    if edit_idx is not None and 0 <= edit_idx < len(reglas) and reglas[edit_idx].get("motivo") != "(conf)":
+        ed = reglas[edit_idx]
     filas = []
     for i, r in enumerate(reglas):
         pts = ", ".join(str(p) for p in r["puertos"]) if r["puertos"] else "todos"
         tipo = "Destino" if r["tipo"] == "dst" else "Origen"
         legacy = r.get("motivo") == "(conf)"
-        accion = ('<span class="muted">en .conf</span>' if legacy else
-                  f'<form method=post action="/exclusiones" style="margin:0">'
-                  f'<input type=hidden name=accion value=del><input type=hidden name=idx value="{i}">'
-                  f'<button class="del" type=submit>Eliminar</button></form>')
-        filas.append(f'<tr><td>{tipo}</td><td class="mono">{html.escape(r["ip"])}</td>'
+        if legacy:
+            accion = '<span class="muted">en .conf</span>'
+        else:
+            accion = (f'<div style="display:flex;gap:6px;align-items:center">'
+                      f'<a class="edit" href="/exclusiones?edit={i}">Editar</a>'
+                      f'<form method=post action="/exclusiones" style="margin:0">'
+                      f'<input type=hidden name=accion value=del><input type=hidden name=idx value="{i}">'
+                      f'<button class="del" type=submit>Eliminar</button></form></div>')
+        resalta = ' style="background:#eef4fd"' if (ed is not None and i == edit_idx) else ''
+        filas.append(f'<tr{resalta}><td>{tipo}</td><td class="mono">{html.escape(r["ip"])}</td>'
                      f'<td>{html.escape(pts)}</td><td>{html.escape(r.get("motivo",""))}</td><td>{accion}</td></tr>')
     tabla = ("".join(filas) if filas else
              '<tr><td colspan=5 class="muted">No hay exclusiones. Todo el trafico se analiza.</td></tr>')
+    titulo_form = "Editar exclusion" if ed else "Agregar exclusion"
+    val_ip = html.escape(ed["ip"]) if ed else ""
+    val_pts = ", ".join(str(p) for p in ed["puertos"]) if ed else ""
+    val_mot = html.escape(ed.get("motivo", "")) if ed else ""
+    sel_src = "selected" if ed and ed["tipo"] == "src" else ""
+    sel_dst = "selected" if not ed or ed["tipo"] == "dst" else ""
+    hid_edit = f'<input type=hidden name=editar value="{edit_idx}">' if ed else ""
+    btn_txt = "Guardar cambios" if ed else "Agregar"
+    cancelar = '<a class="cancel" href="/exclusiones">Cancelar</a>' if ed else ""
     body = f"""<!doctype html><html lang=es><head><meta charset=utf-8>
 <meta name=viewport content='width=device-width,initial-scale=1'><title>Exclusiones</title>
 <style>body{{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}}
@@ -1270,21 +1288,25 @@ input,select{{padding:9px 11px;border:1px solid #d7d6d2;border-radius:8px;font:1
 button{{padding:9px 16px;border:0;border-radius:8px;font:600 13px system-ui;cursor:pointer}}
 button[type=submit].primary{{background:#2a78d6;color:#fff;grid-column:2;justify-self:start;margin-top:4px}}
 button.del{{background:#fbeaea;color:#c0392b;border:1px solid #f0c9c9;padding:5px 10px}}
-button.del:hover{{background:#f5d5d5}}</style></head><body>{NAV}<main>
+button.del:hover{{background:#f5d5d5}}
+a.edit{{background:#eef4fd;color:#1c5cab;border:1px solid #cfe0fb;padding:5px 12px;border-radius:8px;
+text-decoration:none;font-size:13px;font-weight:600}}a.edit:hover{{background:#dceafb}}
+a.cancel{{color:#8a8a86;text-decoration:none;font-size:13px}}a.cancel:hover{{color:#52514e}}</style></head><body>{NAV}<main>
 <h1>Exclusiones</h1><p class=sub>IPs que no quieres que aparezcan en el panel ni en los reportes
 (tus DNS, tu monitoreo SNMP, etc.). Se aplica al instante.</p>
 {banner}
 <div class=card><table><thead><tr><th>Tipo</th><th>IP</th><th>Puertos</th><th>Motivo</th><th></th></tr></thead>
 <tbody>{tabla}</tbody></table></div>
-<h2>Agregar exclusion</h2>
+<h2>{titulo_form}</h2>
 <div class=card><form class=add method=post action="/exclusiones">
-<input type=hidden name=accion value=add>
-<label>Tipo</label><select name=tipo><option value=dst>Destino (a donde va)</option><option value=src>Origen (de donde sale)</option></select>
-<label>IP</label><input name=ip placeholder="10.66.66.2" required>
-<label>Puertos</label><input name=puertos placeholder="53, 161  (vacio = todos)">
+<input type=hidden name=accion value=add>{hid_edit}
+<label>Tipo</label><select name=tipo><option value=dst {sel_dst}>Destino (a donde va)</option><option value=src {sel_src}>Origen (de donde sale)</option></select>
+<label>IP</label><input name=ip placeholder="10.66.66.2" value="{val_ip}" required>
+<label>Puertos</label><input name=puertos placeholder="53, 161  (vacio = todos)" value="{val_pts}">
 <div class=hint>Para un DNS suele ser 53; para monitoreo SNMP, 161. Deja vacio para ignorar toda la IP.</div>
-<label>Motivo</label><input name=motivo placeholder="DNS interno / monitoreo SNMP">
-<button type=submit class=primary>Agregar</button>
+<label>Motivo</label><input name=motivo placeholder="DNS interno / monitoreo SNMP" value="{val_mot}">
+<div style="grid-column:2;display:flex;gap:10px;align-items:center;margin-top:4px">
+<button type=submit class=primary>{btn_txt}</button>{cancelar}</div>
 </form></div>
 <p class=sub style="margin-top:16px">Ejemplos: tu DNS interno como <b>Destino</b> puerto <b>53</b>; tu servidor de
 monitoreo como <b>Origen</b> puerto <b>161</b>. Asi quitas el ruido sin perder de vista lo demas que hagan esas IPs.</p>
@@ -1544,7 +1566,14 @@ class H(BaseHTTPRequestHandler):
         if path == "/perfil":
             return self._html(perfil_page())
         if path == "/exclusiones":
-            return self._html(exclusiones_page())
+            edit = None
+            if "?" in self.path:
+                import urllib.parse
+                try:
+                    edit = int(urllib.parse.parse_qs(self.path.split("?", 1)[1]).get("edit", [""])[0])
+                except (ValueError, TypeError):
+                    edit = None
+            return self._html(exclusiones_page(edit_idx=edit))
         if path == "/documentacion":
             return self._html(documentacion_page())
         m = re.match(r"^/r/(report-[0-9A-Za-z_-]+\.html)$", path)
@@ -1637,12 +1666,19 @@ class H(BaseHTTPRequestHandler):
                 if not p.isdigit() or not (0 < int(p) < 65536):
                     return self._html(exclusiones_page(f"Puerto invalido: {p}", ok=False))
                 puertos.append(int(p))
-        propias.append({"tipo": tipo, "ip": ip, "motivo": motivo, "puertos": puertos})
+        nueva = {"tipo": tipo, "ip": ip, "motivo": motivo, "puertos": puertos}
+        editar = q.get("editar", [""])[0]
+        if editar.isdigit() and int(editar) < len(propias):
+            propias[int(editar)] = nueva
+            msg_ok = f"Exclusion actualizada: {ip}."
+        else:
+            propias.append(nueva)
+            msg_ok = f"Exclusion agregada: {ip}."
         try:
             guardar_exclusiones(propias)
         except OSError as ex:
             return self._html(exclusiones_page(f"No se pudo guardar: {ex}", ok=False))
-        return self._html(exclusiones_page(f"Exclusion agregada: {ip}.", ok=True))
+        return self._html(exclusiones_page(msg_ok, ok=True))
 
     def log_message(self, *a):
         pass

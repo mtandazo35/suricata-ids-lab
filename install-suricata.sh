@@ -1834,6 +1834,12 @@ class H(BaseHTTPRequestHandler):
             return self._html(exclusiones_page(f"No se pudo guardar: {ex}", ok=False))
         return self._html(exclusiones_page(msg_ok, ok=True))
 
+    def do_HEAD(self):
+        # respuesta ligera para health-checks del proxy (evita el 501 y es instantanea)
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def log_message(self, *a):
         pass
 

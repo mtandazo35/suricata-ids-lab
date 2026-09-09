@@ -1240,7 +1240,7 @@ def exclusiones_page(msg="", ok=False, edit_idx=None):
     banner = ""
     if msg:
         col = "#1baf7a" if ok else "#e34948"
-        anim = "animation:fadeout 1.4s forwards;" if ok else ""   # exito se oculta solo (~1s)
+        anim = "animation:fadeout 2.7s ease forwards;" if ok else ""   # exito visible ~2s y se desvanece suave
         banner = f'<div class="banner" style="background:{col};color:#fff;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:13px;{anim}">{html.escape(msg)}</div>'
     # regla a editar (solo si es propia, no legacy)
     ed = None
@@ -1293,7 +1293,7 @@ button.del:hover{{background:#f5d5d5}}
 a.edit{{background:#eef4fd;color:#1c5cab;border:1px solid #cfe0fb;padding:5px 12px;border-radius:8px;
 text-decoration:none;font-size:13px;font-weight:600}}a.edit:hover{{background:#dceafb}}
 a.cancel{{color:#8a8a86;text-decoration:none;font-size:13px}}a.cancel:hover{{color:#52514e}}
-@keyframes fadeout{{0%,65%{{opacity:1}}100%{{opacity:0;visibility:hidden;margin:0;padding:0;height:0}}}}</style></head><body>{NAV}<main>
+@keyframes fadeout{{0%,74%{{opacity:1;transform:translateY(0)}}100%{{opacity:0;transform:translateY(-10px);visibility:hidden;margin:0;padding:0;height:0}}}}</style></head><body>{NAV}<main>
 <h1>Exclusiones</h1><p class=sub>IPs que no quieres que aparezcan en el panel ni en los reportes
 (tus DNS, tu monitoreo SNMP, etc.). Se aplica al instante.</p>
 {banner}

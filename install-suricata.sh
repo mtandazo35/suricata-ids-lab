@@ -849,8 +849,8 @@ def top(counter, n=12, fmt=str):
 
 by_sig = Counter()
 for _k, _v in flujos.items():
-    by_sig[_k[5]] += _v[0]
-firmas_top = [(traducir(s)[:80], n) for s, n in by_sig.most_common(12)]
+    by_sig[traducir(_k[5])] += _v[0]   # agrupar por descripcion en espanol (sin duplicados)
+firmas_top = [(s[:60], n) for s, n in by_sig.most_common(10)]
 
 doc = f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -907,7 +907,7 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
     {hbar("IPs origen (atacantes)", top(by_src), "alertas")}
     {hbar("IPs destino (objetivos)", top(by_dst), "alertas")}
   </div>
-  {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas", card_class="card wide", label_above=True)}
+  {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas", lblw=250, barw=560, card_class="card wide")}
   <section class="card">
     <h2>Detalle: quien ataca, a donde, por que puerto, cuando y por cuanto tiempo</h2>
     <div class="tablewrap"><table id="detalle">

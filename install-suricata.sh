@@ -958,9 +958,13 @@ reportes diarios, con login basico. Solo biblioteca estandar. Corre como servici
 
 Config: /etc/suricata-dashboard.conf  (PORT, USER, PASS)
 """
-import base64, glob, html, json, os, re, subprocess, threading, time
+import base64, glob, html, json, os, re, secrets, subprocess, threading, time
 from datetime import datetime
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+SESSIONS = {}          # token -> epoch de expiracion
+SESSION_TTL = 12 * 3600
 
 EVE = "/var/log/suricata/eve.json"
 
@@ -1170,7 +1174,8 @@ box-shadow:0 1px 6px rgba(0,0,0,.15)}
 <a href="/exclusiones">Exclusiones</a>
 <a href="/perfil">Perfil</a>
 <a href="/documentacion">Documentacion</a>
-<a href="/" class="sp">&#8635; Actualizar</a></div>"""
+<a href="/" class="sp">&#8635; Actualizar</a>
+<a href="/logout">Salir</a></div>"""
 
 def wrap(body_html, refresh=True):
     meta = '<meta http-equiv="refresh" content="300">' if refresh else ""
@@ -1224,7 +1229,7 @@ def perfil_page(msg="", ok=False):
             "<div class=hint>Minimo 6 caracteres.</div>"
             "<label>Repetir clave nueva</label><input type=password name=nueva2 autocomplete=new-password required>"
             "<button type=submit>Guardar cambios</button></form></div>"
-            "<p class=sub style='margin-top:16px'>Al guardar, el navegador te pedira entrar de nuevo con las credenciales nuevas.</p>"
+            "<p class=sub style='margin-top:16px'>Al guardar se cierra la sesion y tendras que entrar de nuevo con las credenciales nuevas.</p>"
             "</main></body></html>")
     return body
 
@@ -1283,6 +1288,39 @@ button.del:hover{{background:#f5d5d5}}</style></head><body>{NAV}<main>
 monitoreo como <b>Origen</b> puerto <b>161</b>. Asi quitas el ruido sin perder de vista lo demas que hagan esas IPs.</p>
 </main></body></html>"""
     return body
+
+def login_page(msg=""):
+    err = f'<div class="err">{html.escape(msg)}</div>' if msg else ""
+    return f"""<!doctype html><html lang=es><head><meta charset=utf-8>
+<meta name=viewport content='width=device-width,initial-scale=1'><title>Entrar - Estadisticas Suricata</title>
+<style>
+*{{box-sizing:border-box}}
+body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:linear-gradient(135deg,#0b0b0b 0%,#16233a 100%);
+font:15px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0b0b0b}}
+.box{{background:#fff;border-radius:16px;padding:32px 30px;width:340px;max-width:92vw;
+box-shadow:0 20px 60px rgba(0,0,0,.4)}}
+.brand{{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;margin-bottom:4px}}
+.brand .sh{{width:14px;height:14px;border-radius:4px;background:#2a78d6}}
+.sub{{color:#8a8a86;font-size:13px;margin-bottom:22px}}
+label{{display:block;font-size:13px;color:#52514e;font-weight:600;margin:14px 0 6px}}
+input{{width:100%;padding:11px 13px;border:1px solid #d7d6d2;border-radius:9px;font:15px system-ui}}
+input:focus{{outline:none;border-color:#2a78d6;box-shadow:0 0 0 3px rgba(42,120,214,.18)}}
+button{{width:100%;margin-top:22px;padding:12px;background:#2a78d6;color:#fff;border:0;border-radius:9px;
+font:600 15px system-ui;cursor:pointer}}button:hover{{background:#1c5cab}}
+.err{{background:#fbeaea;color:#c0392b;border:1px solid #f0c9c9;border-radius:8px;padding:9px 12px;
+font-size:13px;margin-bottom:6px}}
+.foot{{color:#b8b7b2;font-size:11px;text-align:center;margin-top:18px}}
+</style></head><body>
+<form class=box method=post action="/login">
+<div class="brand"><span class="sh"></span>Estadisticas Suricata</div>
+<div class="sub">Panel de deteccion de ataques</div>
+{err}
+<label>Usuario</label><input name=usuario autocomplete=username autofocus required>
+<label>Clave</label><input name=clave type=password autocomplete=current-password required>
+<button type=submit>Entrar</button>
+<div class="foot">Acceso restringido</div>
+</form></body></html>"""
 
 def documentacion_page():
     port = CFG.get("PORT", "5637")
@@ -1410,16 +1448,39 @@ def historico_page():
 
 class H(BaseHTTPRequestHandler):
     server_version = "suricata-dashboard"
+    def _sid(self):
+        c = self.headers.get("Cookie")
+        if not c:
+            return None
+        try:
+            m = SimpleCookie(c).get("sid")
+            return m.value if m else None
+        except Exception:
+            return None
+    def _sesion_ok(self):
+        sid = self._sid()
+        if sid and SESSIONS.get(sid, 0) > time.time():
+            return True
+        return False
     def _auth_ok(self):
         pw = CFG.get("PASS", "")
         if not pw:
             return True  # sin PASS configurada, sin auth (solo detras de VPN/proxy)
+        if self._sesion_ok():
+            return True
+        # compatibilidad: curl/API con auth basica sigue funcionando
         want = "Basic " + base64.b64encode(f"{CFG['USER']}:{pw}".encode()).decode()
         return self.headers.get("Authorization") == want
-    def _deny(self):
-        self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="Estadisticas Suricata"')
+    def _redirect(self, location, cookie=None):
+        self.send_response(303)
+        self.send_header("Location", location)
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.send_header("Content-Length", "0")
         self.end_headers()
+    def _deny(self):
+        # sin sesion -> a la pagina de login (no el popup del navegador)
+        self._redirect("/login")
     def _html(self, s, code=200):
         b = s.encode("utf-8")
         self.send_response(code)
@@ -1428,9 +1489,18 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
     def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/login":
+            if self._auth_ok():
+                return self._redirect("/")
+            return self._html(login_page())
+        if path == "/logout":
+            sid = self._sid()
+            if sid:
+                SESSIONS.pop(sid, None)
+            return self._redirect("/login", cookie="sid=; Path=/; Max-Age=0")
         if not self._auth_ok():
             return self._deny()
-        path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             f = newest_report()   # instantaneo: nunca regenera en el request
             feed = live_feed_html()
@@ -1474,11 +1544,7 @@ class H(BaseHTTPRequestHandler):
             return self._html("<h1>No encontrado</h1>", 404)
         return self._html("<h1>No encontrado</h1>", 404)
     def do_POST(self):
-        if not self._auth_ok():
-            return self._deny()
         ruta = self.path.split("?", 1)[0]
-        if ruta not in ("/perfil", "/exclusiones"):
-            return self._html("<h1>No encontrado</h1>", 404)
         import urllib.parse
         try:
             n = int(self.headers.get("Content-Length", "0"))
@@ -1486,6 +1552,19 @@ class H(BaseHTTPRequestHandler):
         except Exception:
             body = ""
         q = urllib.parse.parse_qs(body)
+        if ruta == "/login":
+            u = q.get("usuario", [""])[0]; p = q.get("clave", [""])[0]
+            if u == CFG.get("USER", "admin") and p == CFG.get("PASS", ""):
+                token = secrets.token_urlsafe(24)
+                SESSIONS[token] = time.time() + SESSION_TTL
+                for k in [k for k, v in SESSIONS.items() if v < time.time()]:
+                    SESSIONS.pop(k, None)
+                return self._redirect("/", cookie=f"sid={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}")
+            return self._html(login_page("Usuario o clave incorrectos."))
+        if not self._auth_ok():
+            return self._deny()
+        if ruta not in ("/perfil", "/exclusiones"):
+            return self._html("<h1>No encontrado</h1>", 404)
         if ruta == "/exclusiones":
             return self._post_exclusiones(q)
         actual = (q.get("actual", [""])[0])
@@ -1506,7 +1585,8 @@ class H(BaseHTTPRequestHandler):
         except OSError as ex:
             return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
         # las credenciales nuevas ya rigen; el navegador reintentara con las viejas -> 401 y re-login
-        return self._html(perfil_page("Credenciales actualizadas. Vuelve a entrar con el usuario y clave nuevos.", ok=True))
+        SESSIONS.clear()   # cerrar sesiones abiertas; hay que entrar con las nuevas
+        return self._redirect("/login", cookie="sid=; Path=/; Max-Age=0")
 
     def _post_exclusiones(self, q):
         import ipaddress

@@ -1771,6 +1771,40 @@ tu monitoreo SNMP). Agregar, editar y eliminar; se explica mas abajo.</td></tr>
 <li>Todas las horas del panel estan en <b>hora de Ecuador</b> (UTC-5).</li>
 </ul>
 
+<h2>De donde saca Suricata para confirmar (reglas) y como se actualiza</h2>
+<p>Suricata no "adivina": compara cada paquete/flujo contra un conjunto de <b>reglas</b>
+(firmas). Una alerta existe solo si algo coincide con una regla. Aqui las reglas vienen de
+dos fuentes:</p>
+<table><tr><th>Fuente</th><th>Que trae</th><th>Archivo en disco</th></tr>
+<tr><td><b>ET Open</b> (Emerging Threats, de Proofpoint)</td>
+<td>El grueso: ~40&nbsp;000 firmas gratuitas de malware, CnC/botnets, troyanos, exploits,
+escaneos, dominios de mala fama, etc. Es el catalogo publico estandar de la industria.</td>
+<td><code>/var/lib/suricata/rules/suricata.rules</code></td></tr>
+<tr><td><b>Reglas propias</b> (las crea este instalador)</td>
+<td>Deteccion de <b>escaneo/ataque saliente</b> de tus CPEs (port-scan, fuerza bruta SSH),
+que ET Open no cubre. SIDs en rango local 90000xx.</td>
+<td><code>/var/lib/suricata/rules/local.rules</code></td></tr>
+</table>
+<p>Quien las descarga es la herramienta <code>suricata-update</code>: baja el paquete de
+ET Open desde los servidores de Emerging Threats por HTTPS, lo combina con tus reglas
+propias y con la lista de reglas desactivadas (<code>/etc/suricata/disable.conf</code>,
+que quita el ruido de stream/app-layer cuando el trafico llega por espejo TZSP), y escribe
+el <code>suricata.rules</code> final.</p>
+<p><b>Como se actualiza (automatico):</b></p>
+<ul>
+<li>Un <b>timer</b> de systemd (<code>suricata-rules-update.timer</code>) corre
+<b>todos los dias a las 04:30</b> (con un retardo aleatorio de hasta 30&nbsp;min para no
+golpear al servidor a la misma hora que todos).</li>
+<li>Ejecuta <code>suricata-update</code> &rarr; descarga la ultima version de ET Open y
+recarga las reglas <b>en caliente</b> (<code>reload-rules</code>), sin reiniciar Suricata
+ni perder trafico.</li>
+<li>El registro de cada descarga queda en <code>/tmp/suricata-update.log</code>.</li>
+</ul>
+<p><b>Forzar una actualizacion ahora</b> (sin esperar a las 04:30), desde el servidor:</p>
+<pre style="background:#f4f4f2;border:1px solid #e7e6e2;border-radius:8px;padding:10px 12px;overflow:auto"><code>suricata-rules-update        # descarga ET Open + recarga en caliente
+systemctl start suricata-rules-update.service   # equivalente por systemd
+suricata-update list-sources # ver catalogos disponibles</code></pre>
+
 <h2>Colores de gravedad</h2>
 <p>Cada alerta se clasifica por el texto de su firma. Se evalua de arriba hacia abajo y
 gana la primera que coincide, asi que lo mas grave manda. Estas son <b>todas</b> las etiquetas:</p>

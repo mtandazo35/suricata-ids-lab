@@ -1610,7 +1610,10 @@ def _top_cards_tail():
 def top_page():
     css_rep, top_html = partes_top()
     if top_html.strip():
-        cuerpo, nota = top_html, "Ultimas 24h &middot; se actualiza junto con el reporte (cada ~5 min)."
+        # el titulo/intro ya lo pone la pestana; quitar el h2+intro internos para no duplicar
+        top_html = re.sub(r'<h2>Top 5 IPs origen que mas peticionan</h2>\s*<p class="muted"[^>]*>.*?</p>',
+                          '', top_html, count=1, flags=re.S)
+        cuerpo, nota = top_html, "Ultimas 24h &middot; se actualiza junto con el reporte (cada 30 min)."
     else:
         cuerpo, procesados = _top_cards_tail()
         nota = (f"Muestra reciente ({procesados:,} alertas) mientras se genera el reporte de 24h; "
@@ -4044,6 +4047,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

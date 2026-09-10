@@ -1859,7 +1859,7 @@ def refrescador():
 
 _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
               ("/historico", "Historico"), ("/exclusiones", "Exclusiones"),
-              ("/log", "Log"), ("/ajustes", "Ajustes"), ("/documentacion", "Documentacion")]
+              ("/ajustes", "Ajustes"), ("/log", "Log"), ("/documentacion", "Documentacion")]
 _NAV_CSS = """<style>
 .nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
 font:15px system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25)}
@@ -3887,6 +3887,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

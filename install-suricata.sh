@@ -1716,19 +1716,19 @@ _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"
               ("/ajustes", "Ajustes"), ("/documentacion", "Documentacion")]
 _NAV_CSS = """<style>
 .nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
-padding:0 22px;font:14px system-ui,-apple-system,Segoe UI,sans-serif;display:flex;align-items:center;gap:4px;
-box-shadow:0 2px 10px rgba(0,0,0,.25)}
-.nav .brand{font-weight:700;font-size:15px;margin-right:14px;display:flex;align-items:center;gap:10px;letter-spacing:.2px}
-.nav .brand .applogo{height:24px;width:auto;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.4))}
-.nav .brand .elogo{height:28px;width:auto;max-width:130px;object-fit:contain;border-radius:4px;background:#fff;padding:2px;display:block}
-.nav .brand .bn{white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
-.nav a.tab{position:relative;color:#c3ccd8;text-decoration:none;padding:9px 13px;margin:8px 1px;border-radius:8px;
-font-weight:500;transition:background .15s,color .15s}
+font:15px system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25)}
+.nav .navwrap{max-width:1360px;margin:0 auto;padding:0 26px;min-height:58px;display:flex;align-items:center;gap:4px}
+.nav .brand{font-weight:700;font-size:16px;margin-right:14px;display:flex;align-items:center;gap:11px;letter-spacing:.2px}
+.nav .brand .applogo{height:30px;width:auto;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.4))}
+.nav .brand .elogo{height:34px;width:auto;max-width:150px;object-fit:contain;border-radius:5px;background:#fff;padding:3px;display:block}
+.nav .brand .bn{white-space:nowrap;max-width:240px;overflow:hidden;text-overflow:ellipsis}
+.nav a.tab{position:relative;color:#c9d2dd;text-decoration:none;padding:11px 15px;margin:9px 1px;border-radius:8px;
+font-size:15px;font-weight:500;transition:background .15s,color .15s}
 .nav a.tab:hover{color:#fff;background:rgba(255,255,255,.08)}
 .nav a.tab.on{color:#fff;background:rgba(42,120,214,.22);font-weight:600}
-.nav a.tab.on::after{content:"";position:absolute;left:13px;right:13px;bottom:-9px;height:2px;background:#2a78d6;border-radius:2px}
+.nav a.tab.on::after{content:"";position:absolute;left:15px;right:15px;bottom:-9px;height:3px;background:#2a78d6;border-radius:2px}
 .nav .push{margin-left:auto}
-.nav .out{margin-left:12px;color:#f3b0b0;text-decoration:none;font-weight:600;padding:7px 15px;border-radius:8px;
+.nav .out{margin-left:14px;color:#f3b0b0;text-decoration:none;font-weight:600;padding:9px 17px;border-radius:8px;font-size:15px;
 border:1px solid rgba(243,176,176,.35);transition:background .15s,color .15s,border-color .15s}
 .nav .out:hover{background:#e34948;color:#fff;border-color:#e34948}
 </style>"""
@@ -1750,9 +1750,9 @@ def nav(active=""):
         brand = (f'<span class="brand"><img class="applogo" src="/logo.png" alt="Suricata">{elogo}{enom}</span>')
     else:
         brand = '<span class="brand"><img class="applogo" src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
-    # marca a la izquierda, pestañas empujadas a la derecha
-    return (_NAV_CSS + '<div class="nav">' + brand + '<span class="push"></span>'
-            + "".join(parts) + '<a href="/logout" class="out">Salir</a></div>')
+    # marca a la izquierda, pestañas empujadas a la derecha, todo centrado en un contenedor
+    return (_NAV_CSS + '<div class="nav"><div class="navwrap">' + brand + '<span class="push"></span>'
+            + "".join(parts) + '<a href="/logout" class="out">Salir</a></div></div>')
 
 # compat: algunas plantillas todavia interpolan {NAV} (barra sin pestana activa marcada)
 NAV = nav()
@@ -1881,12 +1881,10 @@ def perfil_page(msg="", ok=False, edit_user=None):
             f"<input type=text name=nombre maxlength=60 value=\"{esc(emp.get('nombre',''))}\"></div>"
             "<div class=field><label>Logo</label><div class=avup>"
             f"<img id=lpreview class='avprev logo' src=\"{esc(elogo)}\" alt=''{'' if tiene_logo else ' style=display:none'}>"
-            "<input type=file accept=image/* onchange=\"foto(this,'l')\"></div>"
+            "<input id=lfile type=file accept=image/* onchange=\"foto(this,'l')\">"
+            "<button class=cancelbtn type=button onclick=\"quitarimg('l')\">Quitar imagen</button></div>"
             "<input type=hidden name=logo id=lavatar></div></div>"
-            + ("<div style='margin-top:10px'><button class=cancelbtn type=button "
-               "onclick=\"document.getElementById('lavatar').value='__BORRAR__';this.form.submit();\">"
-               "Quitar logo</button></div>" if tiene_logo else "")
-            + "<div class=actions><button class=primary type=submit>Guardar empresa</button></div>"
+            "<div class=actions><button class=primary type=submit>Guardar empresa</button></div>"
             "</form></section>")
     # --- tarjeta: gestion de usuarios estilo tabla (solo admin) ---
     card_users = ""
@@ -1933,7 +1931,8 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<div class=hint>Minimo 6 caracteres. Nombre y correo son opcionales.</div></div>"
             "<div class=field><label>Foto (opcional)</label><div class=avup>"
             "<img id=npreview class=avprev alt='' style=display:none>"
-            "<input type=file accept=image/* onchange=\"foto(this,'n')\"></div>"
+            "<input id=nfile type=file accept=image/* onchange=\"foto(this,'n')\">"
+            "<button class=cancelbtn type=button onclick=\"quitarimg('n')\">Quitar</button></div>"
             "<input type=hidden name=avatar id=navatar></div>"
             "</div>"
             "<div class=mfoot><button class=cancelbtn type=button onclick=\"cerrar('ovlNew')\">Cancelar</button>"
@@ -1954,8 +1953,9 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<div class=hint>Si la escribes, minimo 6 caracteres.</div></div>"
             "<div class=field><label>Foto (opcional)</label><div class=avup>"
             "<img id=epreview class=avprev alt='' style=display:none>"
-            "<input type=file accept=image/* onchange=\"foto(this,'e')\"></div>"
-            "<div class=hint>Sube una imagen para cambiarla.</div>"
+            "<input id=efile type=file accept=image/* onchange=\"foto(this,'e')\">"
+            "<button class=cancelbtn type=button onclick=\"quitarimg('e')\">Quitar</button></div>"
+            "<div class=hint>Sube una imagen para cambiarla, o Quitar para borrarla.</div>"
             "<input type=hidden name=avatar id=eavatar></div>"
             "</div>"
             "<div class=mfoot><button class=cancelbtn type=button onclick=\"cerrar('ovlEdit')\">Cancelar</button>"
@@ -2016,7 +2016,10 @@ def perfil_page(msg="", ok=False, edit_user=None):
         ".ic:hover{background:#eef2f7;color:#2a78d6;border-color:#cddaea}"
         ".ic.danger:hover{background:#e34948;color:#fff;border-color:#e34948}"
         ".banner{padding:11px 14px;border-radius:9px;margin-bottom:16px;font-size:13px;color:#fff}"
-        ".banner.ok{background:#1baf7a}.banner.err{background:#e34948}"
+        ".banner.err{background:#e34948}"
+        ".banner.ok{background:#1baf7a;animation:bfade 2.8s ease forwards}"
+        "@keyframes bfade{0%,68%{opacity:1;transform:translateY(0)}"
+        "100%{opacity:0;transform:translateY(-8px);visibility:hidden;height:0;margin:0;padding:0}}"
         ".ovl{position:fixed;inset:0;background:rgba(11,11,11,.45);display:flex;align-items:center;justify-content:center;z-index:100;padding:18px}"
         ".ovl[hidden]{display:none}"
         ".modal{background:#fff;border-radius:14px;width:100%;max-width:470px;box-shadow:0 20px 55px rgba(0,0,0,.32);animation:mpop .16s ease}"
@@ -2043,6 +2046,9 @@ def perfil_page(msg="", ok=False, edit_user=None):
               "var d=c.toDataURL('image/png');var hid=document.getElementById(p+'avatar');if(hid)hid.value=d;"
               "var pv=document.getElementById(p+'preview');if(pv){pv.src=d;pv.style.display='';}};im.src=r.result;};"
               "r.readAsDataURL(f);}"
+              "function quitarimg(p){var h=document.getElementById(p+'avatar');if(h)h.value='__BORRAR__';"
+              "var pv=document.getElementById(p+'preview');if(pv){pv.removeAttribute('src');pv.style.display='none';}"
+              "var fi=document.getElementById(p+'file');if(fi)fi.value='';}"
               "function abrir(id){document.getElementById(id).hidden=false;}"
               "function cerrar(id){document.getElementById(id).hidden=true;}"
               "function abrirEdit(b){document.getElementById('eu').value=b.getAttribute('data-user');"
@@ -3526,6 +3532,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

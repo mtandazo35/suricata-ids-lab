@@ -1797,8 +1797,8 @@ def perfil_page(msg="", ok=False, edit_user=None):
     banner = ""
     if msg:
         banner = f'<div class="banner {"ok" if ok else "err"}">{esc(msg)}</div>'
-    # --- tarjeta: mi cuenta / cambiar mi clave ---
-    if yo:
+    # --- tarjeta: cambiar mi clave (solo para lectura; el admin lo hace desde su fila) ---
+    if yo and not es_admin:
         card_pw = (
             "<section class=card>"
             "<div class=acct>"
@@ -1817,32 +1817,11 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<input type=password name=nueva2 autocomplete=new-password required></div></div>"
             "<div class=actions><button class=primary type=submit>Actualizar mi clave</button></div>"
             "</form></section>")
-    else:
+    elif not yo:
         card_pw = "<section class=card><p>Autenticacion desactivada (sin usuarios configurados en el servidor).</p></section>"
+    else:
+        card_pw = ""   # admin: cambia su clave con el lapiz de su fila
     usuarios = cargar_usuarios() if (es_admin and yo) else []
-    # --- tarjeta de edicion (si un admin pulso el lapiz) ---
-    card_edit = ""
-    eo = next((r for r in usuarios if r.get("user") == edit_user), None) if edit_user else None
-    if eo:
-        un = esc(eo.get("user", "")); rl = eo.get("role", "admin")
-        sa = " selected" if rl == "admin" else ""; sl = " selected" if rl == "lectura" else ""
-        card_edit = (
-            f"<section class=card id=editcard><h2>Editar usuario &middot; <span class=mono>{un}</span></h2>"
-            "<form method=post action='/perfil'>"
-            "<input type=hidden name=accion value=edit_user>"
-            f"<input type=hidden name=user value='{un}'>"
-            "<div class=addgrid>"
-            f"<div class=field><label>Nombre</label><input type=text name=nombre value='{esc(eo.get('nombre',''))}'></div>"
-            f"<div class=field><label>Correo</label><input type=email name=correo value='{esc(eo.get('correo',''))}'></div>"
-            f"<div class=field><label>Rol</label><select name=role>"
-            f"<option value=admin{sa}>Administrador</option><option value=lectura{sl}>Solo lectura</option></select></div>"
-            "</div>"
-            "<div class=field><label>Clave nueva (opcional)</label>"
-            "<input type=password name=npass autocomplete=new-password placeholder='dejar vacio para no cambiar'>"
-            "<div class=hint>Si la escribes, minimo 6 caracteres.</div></div>"
-            "<div class=actions><button class=primary type=submit>Guardar cambios</button>"
-            "<a class=cancel href='/perfil'>Cancelar</a></div>"
-            "</form></section>")
     # --- tarjeta: gestion de usuarios estilo tabla (solo admin) ---
     card_users = ""
     if es_admin and yo:
@@ -1856,7 +1835,6 @@ def perfil_page(msg="", ok=False, edit_user=None):
             tu = ' <span class=me>tu</span>' if uraw == yo else ''
             filtro = esc(((nombre + " " + uraw + " " + correo).lower()))
             correo_c = esc(correo) if correo else "<span class=dash>&mdash;</span>"
-            href = "/perfil?edit=" + _up.quote(uraw)
             rows.append(
                 f"<tr data-f=\"{filtro}\"><td class=idc>{i}</td>"
                 f"<td><div class=nmcell>{_avatar(nombre, uraw)}<span class=nm>{disp}</span>{tu}</div></td>"
@@ -1866,36 +1844,57 @@ def perfil_page(msg="", ok=False, edit_user=None):
                 f"<input type=hidden name=accion value=toggle_user><input type=hidden name=user value='{un}'>"
                 f"<button class='estado {est_cls}' type=submit title='clic para activar/desactivar'>{est_txt}</button></form></td>"
                 "<td class=acts>"
-                f"<a class=ic title=Editar href=\"{href}\">{_IC_EDIT}</a>"
+                f"<button class=ic title=Editar type=button onclick=\"abrirEdit(this)\" "
+                f"data-user='{un}' data-nombre=\"{esc(nombre)}\" data-correo=\"{esc(correo)}\" "
+                f"data-role='{rl}'>{_IC_EDIT}</button>"
                 "<form method=post action='/perfil' class=inl "
                 f"onsubmit=\"return confirm('Eliminar al usuario {un}?')\">"
                 f"<input type=hidden name=accion value=del_user><input type=hidden name=user value='{un}'>"
                 f"<button class='ic danger' title=Eliminar type=submit>{_IC_DEL}</button></form>"
                 "</td></tr>")
+        modal_new = (
+            "<div id=ovlNew class=ovl hidden onclick=\"if(event.target===this)cerrar('ovlNew')\">"
+            "<div class=modal><div class=mhead><h3>Nuevo usuario</h3>"
+            "<button class=mx type=button onclick=\"cerrar('ovlNew')\" aria-label=Cerrar>&times;</button></div>"
+            "<form method=post action='/perfil'><input type=hidden name=accion value=add_user>"
+            "<div class=mbody>"
+            "<div class=grid2><div class=field><label>Nombre</label><input type=text name=nnombre autocomplete=off></div>"
+            "<div class=field><label>Usuario</label><input type=text name=nuser autocomplete=off required></div></div>"
+            "<div class=grid2><div class=field><label>Correo</label><input type=email name=ncorreo autocomplete=off></div>"
+            "<div class=field><label>Rol</label><select name=nrole>"
+            "<option value=lectura>Solo lectura</option><option value=admin>Administrador</option></select></div></div>"
+            "<div class=field><label>Clave</label><input type=password name=npass autocomplete=new-password required>"
+            "<div class=hint>Minimo 6 caracteres. Nombre y correo son opcionales.</div></div></div>"
+            "<div class=mfoot><button class=cancelbtn type=button onclick=\"cerrar('ovlNew')\">Cancelar</button>"
+            "<button class=primary type=submit>Crear usuario</button></div></form></div></div>")
+        modal_edit = (
+            "<div id=ovlEdit class=ovl hidden onclick=\"if(event.target===this)cerrar('ovlEdit')\">"
+            "<div class=modal><div class=mhead><h3>Editar usuario</h3>"
+            "<button class=mx type=button onclick=\"cerrar('ovlEdit')\" aria-label=Cerrar>&times;</button></div>"
+            "<form method=post action='/perfil'><input type=hidden name=accion value=edit_user>"
+            "<input type=hidden name=user id=eu>"
+            "<div class=mbody>"
+            "<div class=grid2><div class=field><label>Nombre</label><input type=text name=nombre id=en></div>"
+            "<div class=field><label>Correo</label><input type=email name=correo id=ec></div></div>"
+            "<div class=field><label>Rol</label><select name=role id=er>"
+            "<option value=admin>Administrador</option><option value=lectura>Solo lectura</option></select></div>"
+            "<div class=field><label>Clave nueva (opcional)</label>"
+            "<input type=password name=npass autocomplete=new-password placeholder='dejar vacio para no cambiar'>"
+            "<div class=hint>Si la escribes, minimo 6 caracteres.</div></div></div>"
+            "<div class=mfoot><button class=cancelbtn type=button onclick=\"cerrar('ovlEdit')\">Cancelar</button>"
+            "<button class=primary type=submit>Guardar cambios</button></div></form></div></div>")
         card_users = (
             "<section class=card>"
             "<div class=uhead><h2>Usuarios</h2>"
             "<div class=tools>"
-            "<button class='primary sm' type=button onclick=\"var b=document.getElementById('addbox');b.hidden=!b.hidden;if(!b.hidden)b.scrollIntoView({behavior:'smooth'});\">+ Nuevo</button>"
+            "<button class='primary sm' type=button onclick=\"abrir('ovlNew')\">+ Nuevo</button>"
             "<input class=search id=usearch placeholder='Buscar...' oninput='ufiltrar()'></div></div>"
             "<p class=sub2>Los de <b>solo lectura</b> ven paneles y reportes pero no editan exclusiones, "
             "ni actualizan reglas, ni gestionan usuarios.</p>"
             "<div class=twrap><table class=ut><thead><tr>"
             "<th>ID</th><th>Nombre</th><th>Usuario</th><th>Correo</th><th>Rol</th><th>Estado</th><th></th>"
             f"</tr></thead><tbody id=ubody>{''.join(rows)}</tbody></table></div>"
-            "<div id=addbox hidden><h3 class=ch>Nuevo usuario</h3>"
-            "<form method=post action='/perfil'>"
-            "<input type=hidden name=accion value=add_user>"
-            "<div class=addgrid>"
-            "<div class=field><label>Nombre</label><input type=text name=nnombre autocomplete=off></div>"
-            "<div class=field><label>Usuario</label><input type=text name=nuser autocomplete=off required></div>"
-            "<div class=field><label>Correo</label><input type=email name=ncorreo autocomplete=off></div>"
-            "<div class=field><label>Clave</label><input type=password name=npass autocomplete=new-password required></div>"
-            "<div class=field><label>Rol</label><select name=nrole>"
-            "<option value=lectura>Solo lectura</option><option value=admin>Administrador</option></select></div>"
-            "</div><div class=hint>La clave debe tener minimo 6 caracteres. Nombre y correo son opcionales.</div>"
-            "<div class=actions><button class=primary type=submit>Crear usuario</button></div>"
-            "</form></div></section>")
+            "</section>" + modal_new + modal_edit)
     css = (
         "body{margin:0;background:#f6f6f4;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
         "main{max-width:900px;margin:0 auto;padding:26px 20px 40px}"
@@ -1940,17 +1939,38 @@ def perfil_page(msg="", ok=False, edit_user=None):
         ".ic:hover{background:#eef2f7;color:#2a78d6;border-color:#cddaea}"
         ".ic.danger:hover{background:#e34948;color:#fff;border-color:#e34948}"
         ".banner{padding:11px 14px;border-radius:9px;margin-bottom:16px;font-size:13px;color:#fff}"
-        ".banner.ok{background:#1baf7a}.banner.err{background:#e34948}")
-    script = ("<script>function ufiltrar(){var q=(document.getElementById('usearch').value||'').toLowerCase();"
+        ".banner.ok{background:#1baf7a}.banner.err{background:#e34948}"
+        ".ovl{position:fixed;inset:0;background:rgba(11,11,11,.45);display:flex;align-items:center;justify-content:center;z-index:100;padding:18px}"
+        ".ovl[hidden]{display:none}"
+        ".modal{background:#fff;border-radius:14px;width:100%;max-width:470px;box-shadow:0 20px 55px rgba(0,0,0,.32);animation:mpop .16s ease}"
+        "@keyframes mpop{from{transform:translateY(10px);opacity:.5}to{transform:none;opacity:1}}"
+        ".mhead{display:flex;align-items:center;justify-content:space-between;padding:15px 20px;border-bottom:1px solid #f0efec}"
+        ".mhead h3{margin:0;font-size:16px}"
+        ".mx{background:none;border:0;font-size:24px;line-height:1;color:#8a8a86;cursor:pointer;padding:0 2px}.mx:hover{color:#0b0b0b}"
+        ".mbody{padding:2px 20px 16px}"
+        ".mfoot{display:flex;justify-content:flex-end;gap:10px;align-items:center;padding:14px 20px;border-top:1px solid #f0efec;background:#fafafa;border-radius:0 0 14px 14px}"
+        ".mfoot button.primary{margin:0}"
+        ".cancelbtn{padding:9px 16px;background:#fff;border:1px solid #d7d6d2;border-radius:9px;color:#52514e;font:600 13px system-ui;cursor:pointer}.cancelbtn:hover{background:#f4f4f2}")
+    script = ("<script>"
+              "function abrir(id){document.getElementById(id).hidden=false;}"
+              "function cerrar(id){document.getElementById(id).hidden=true;}"
+              "function abrirEdit(b){document.getElementById('eu').value=b.getAttribute('data-user');"
+              "document.getElementById('en').value=b.getAttribute('data-nombre')||'';"
+              "document.getElementById('ec').value=b.getAttribute('data-correo')||'';"
+              "document.getElementById('er').value=b.getAttribute('data-role')||'lectura';"
+              "var p=document.querySelector('#ovlEdit input[name=npass]');if(p)p.value='';abrir('ovlEdit');}"
+              "function ufiltrar(){var q=(document.getElementById('usearch').value||'').toLowerCase();"
               "var rs=document.querySelectorAll('#ubody tr');for(var i=0;i<rs.length;i++){"
-              "var f=rs[i].getAttribute('data-f')||'';rs[i].style.display=f.indexOf(q)>=0?'':'none';}}</script>")
+              "var f=rs[i].getAttribute('data-f')||'';rs[i].style.display=f.indexOf(q)>=0?'':'none';}}"
+              "document.addEventListener('keydown',function(e){if(e.key==='Escape'){cerrar('ovlNew');cerrar('ovlEdit');}});"
+              "</script>")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Perfil</title>"
             f"<style>{css}</style></head><body>"
             + nav("/perfil") +
             "<main><h1>Perfil</h1>"
             "<p class=psub>Tu cuenta y, si eres administrador, la gestion de usuarios del panel.</p>"
-            + banner + card_pw + card_edit + card_users + script +
+            + banner + card_pw + card_users + script +
             "</main></body></html>")
 
 def exclusiones_page(msg="", ok=False, edit_idx=None):
@@ -3326,6 +3346,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

@@ -1648,7 +1648,7 @@ def top_page():
 LOGDIR = "/var/log/suricata"
 GEN = "/usr/local/bin/suricata-html-report"
 CONF = "/etc/suricata-dashboard.conf"
-REFRESH_SECS = 600   # regeneracion en segundo plano (el reporte puede tardar en redes grandes)
+REFRESH_SECS = 1800   # regeneracion del resumen en segundo plano: cada 30 min (tiles, graficos y linea de tiempo)
 
 def conf():
     d = {"PORT": "5637", "USER": "admin", "PASS": ""}
@@ -2515,8 +2515,9 @@ tu monitoreo SNMP). Agregar, editar y eliminar; se explica mas abajo.</td></tr>
 <h2>Cada cuanto se actualiza</h2>
 <ul>
 <li><b>Feed de ultimos ataques</b> (En vivo, abajo): cada <b>20 segundos</b>.</li>
-<li><b>Resumen de 24h, Detalle e Historico</b>: se regeneran en segundo plano cada
-<b>10 minutos</b>. Por eso los graficos casi no cambian entre recargas y el feed si.</li>
+<li><b>Resumen de 24h (tiles, graficos y linea de tiempo), Detalle e Historico</b>: se
+regeneran en segundo plano cada <b>30 minutos</b>. Por eso los graficos casi no cambian
+entre recargas y el feed de abajo si (ese es en vivo).</li>
 <li><b>Reglas ET</b>: se actualizan solas cada dia a las 04:30. <b>Informe por Telegram</b>: 07:30.</li>
 <li>Todas las horas del panel estan en <b>hora de Ecuador</b> (UTC-5).</li>
 </ul>
@@ -4043,6 +4044,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

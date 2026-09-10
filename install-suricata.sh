@@ -1713,7 +1713,7 @@ def refrescador():
 
 _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
               ("/historico", "Historico"), ("/exclusiones", "Exclusiones"),
-              ("/documentacion", "Documentacion"), ("/ajustes", "Ajustes")]
+              ("/ajustes", "Ajustes"), ("/documentacion", "Documentacion")]
 _NAV_CSS = """<style>
 .nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
 padding:0 22px;font:14px system-ui,-apple-system,Segoe UI,sans-serif;display:flex;align-items:center;gap:4px;
@@ -2259,13 +2259,7 @@ def documentacion_page():
            ".b{display:inline-block;color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px}"
            "table{border-collapse:collapse;width:100%;margin:8px 0}td,th{border:1px solid #e7e6e2;padding:7px 10px;text-align:left;font-size:14px}"
            "th{background:#f4f4f2}")
-    body = f"""<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>
-<meta name=viewport content='width=device-width,initial-scale=1'>{refresh_meta}<title>Documentacion</title>
-<style>{css}</style></head><body>{nav("/documentacion")}<main>
-<h1>Documentacion</h1>
-<p>Guia rapida del panel de estadisticas de Suricata y como ajustarlo.</p>
-
-<h2>Las pestañas del menu</h2>
+    art = f"""<h2>Las pestañas del menu</h2>
 <table><tr><th>Pestaña</th><th>Que hace</th></tr>
 <tr><td><b>En vivo</b></td><td>Vista principal. Arriba, el <b>resumen de las ultimas 24h</b>:
 puertos de destino mas atacados, IPs origen (atacantes), IPs destino (objetivos) y la
@@ -2428,8 +2422,61 @@ en <code>/etc/suricata-report.conf</code>. Se envia cada dia a las 07:30.</li>
 
 <h2>Reinstalar o actualizar</h2>
 <p>Todo esta en un instalador idempotente. Para actualizar a la ultima version:</p>
-<pre><code>curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -n 172.19.1.0/24,10.0.0.0/8</code></pre>
-</main></body></html>"""
+<pre><code>curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -n 172.19.1.0/24,10.0.0.0/8</code></pre>"""
+    # --- indice (tabla de contenidos estilo Wikipedia) generado desde los <h2> ---
+    secciones = []; usados = {}
+    def _slug(t):
+        s = re.sub(r"<[^>]+>", "", t)
+        s = re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") or "sec"
+        n = usados.get(s, 0) + 1; usados[s] = n
+        return s if n == 1 else f"{s}-{n}"
+    def _h2(m):
+        txt = m.group(1); sl = _slug(txt)
+        secciones.append((sl, re.sub(r"<[^>]+>", "", txt)))
+        return (f'<h2 id="{sl}">{txt}'
+                f'<a class=anchor href="#{sl}" aria-label=enlace>&para;</a></h2>')
+    art = re.sub(r"<h2>(.*?)</h2>", _h2, art, flags=re.S)
+    toc = "".join(f'<li><a href="#{sl}">{html.escape(t)}</a></li>' for sl, t in secciones)
+    wcss = (
+        "*{box-sizing:border-box}"
+        "body{margin:0;background:#fff;color:#202122;font:16px/1.65 Georgia,'Times New Roman',serif}"
+        ".wiki{display:flex;gap:34px;max-width:1120px;margin:0 auto;padding:24px 24px 70px;align-items:flex-start}"
+        ".toc{position:sticky;top:58px;flex:0 0 240px;font:13px/1.5 -apple-system,system-ui,Segoe UI,sans-serif}"
+        ".toc .toch{font-weight:700;color:#54595d;text-transform:uppercase;font-size:11px;letter-spacing:.5px;"
+        "margin:0 0 8px;padding-bottom:7px;border-bottom:1px solid #eaecf0}"
+        ".toc ol{list-style:none;margin:0;padding:0;counter-reset:s}"
+        ".toc li{counter-increment:s;margin:1px 0}"
+        ".toc li a{color:#3366cc;text-decoration:none;display:block;padding:4px 9px;border-left:2px solid transparent}"
+        ".toc li a::before{content:counter(s) '. ';color:#72777d}"
+        ".toc li a:hover{background:#f4f8ff;border-left-color:#3366cc;text-decoration:underline}"
+        "article{flex:1;min-width:0;max-width:770px}"
+        "article h1{font:400 28px/1.3 Georgia,serif;margin:0 0 3px;border-bottom:1px solid #a2a9b1;padding-bottom:7px}"
+        ".lead{color:#54595d;font-size:15px;margin:0 0 8px}"
+        "article h2{font:400 22px/1.3 Georgia,serif;border-bottom:1px solid #a2a9b1;padding-bottom:5px;"
+        "margin:30px 0 10px;scroll-margin-top:62px;display:flex;align-items:baseline}"
+        "article h3{font-size:16px;font-weight:700;margin:18px 0 6px;color:#202122}"
+        "p,li{color:#202122}a{color:#3366cc;text-decoration:none}a:hover{text-decoration:underline}"
+        "code{font-family:ui-monospace,Consolas,monospace;font-size:13px;background:#f8f9fa;border:1px solid #eaecf0;border-radius:3px;padding:1px 5px}"
+        "pre{background:#f8f9fa;border:1px solid #eaecf0;color:#202122;padding:12px 14px;border-radius:4px;overflow-x:auto;font-size:13px}"
+        "pre code{border:0;background:none;padding:0}"
+        "table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px}"
+        "th,td{border:1px solid #a2a9b1;padding:7px 10px;text-align:left;vertical-align:top}th{background:#eaecf0}"
+        "ul,ol.doc{margin:8px 0;padding-left:22px}"
+        ".b{display:inline-block;color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px}"
+        ".anchor{color:#c8ccd1;text-decoration:none;font-size:14px;margin-left:8px;opacity:0;transition:opacity .1s}"
+        "article h2:hover .anchor{opacity:1}"
+        "@media(max-width:900px){.wiki{flex-direction:column;gap:14px}.toc{position:static;flex:none;width:100%;"
+        "border:1px solid #eaecf0;border-radius:8px;padding:12px 14px;background:#f8f9fa}}")
+    body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'>" + refresh_meta +
+            "<title>Documentacion</title><style>" + wcss + "</style></head><body>"
+            + nav("/documentacion") +
+            "<div class=wiki>"
+            "<aside class=toc><div class=toch>Contenido</div><nav><ol>" + toc + "</ol></nav></aside>"
+            "<article><h1>Documentacion</h1>"
+            "<p class=lead>Guia del panel de estadisticas de Suricata: que hace cada apartado y como ajustarlo.</p>"
+            + art +
+            "</article></div></body></html>")
     return body
 
 def historico_page():
@@ -3478,6 +3525,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

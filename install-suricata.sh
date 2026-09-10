@@ -1772,7 +1772,7 @@ def update_box():
                  'padding:10px 16px;border-radius:8px;font:600 14px system-ui;cursor:pointer">'
                  '&#8635; Actualizar base de conocimiento</button></form>')
     return (
-        '<div style="border:1px solid #e7e6e2;border-radius:10px;background:#fff;padding:16px;margin:6px 0 14px">'
+        '<div id="reglas" style="border:1px solid #e7e6e2;border-radius:10px;background:#fff;padding:16px;margin:6px 0 14px;scroll-margin-top:70px">'
         f'{estado}'
         f'<p style="margin:0 0 4px"><b>Ultima actualizacion de reglas:</b> {ult_txt} '
         '<span style="color:#52514e">(hora de Ecuador)</span></p>'
@@ -1783,7 +1783,7 @@ def update_box():
 def documentacion_page():
     port = CFG.get("PORT", "5637")
     ubox = update_box()
-    refresh_meta = "<meta http-equiv=refresh content=15>" if UPDATE["running"] else ""
+    refresh_meta = "<meta http-equiv=refresh content='15;url=/documentacion#reglas'>" if UPDATE["running"] else ""
     css = ("body{margin:0;background:#fcfcfb;font:15px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
            "main{max-width:820px;margin:0 auto;padding:24px 22px}h1{font-size:22px;margin:0 0 4px}"
            "h2{font-size:16px;margin:26px 0 8px;border-bottom:1px solid #e7e6e2;padding-bottom:6px}"
@@ -2124,7 +2124,7 @@ class H(BaseHTTPRequestHandler):
             if not UPDATE["running"]:
                 UPDATE["running"] = True; UPDATE["started"] = time.time(); UPDATE["msg"] = ""
                 threading.Thread(target=_run_rules_update, daemon=True).start()
-            return self._redirect("/documentacion")
+            return self._redirect("/documentacion#reglas")
         if ruta not in ("/perfil", "/exclusiones"):
             return self._html("<h1>No encontrado</h1>", 404)
         if ruta == "/exclusiones":
@@ -2781,5 +2781,6 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 

@@ -845,19 +845,29 @@ def timeline(by_hour):
         t0 = datetime.fromtimestamp((lo + i) * BUCKET, TZ_EC)
         t1 = datetime.fromtimestamp((lo + i + 1) * BUCKET, TZ_EC)
         rango = t0.strftime("%H:%M") + "-" + t1.strftime("%H:%M")
+        tip = f"{rango} · {v:,} alertas"
         bars.append(
-            f'<rect x="{x:.1f}" y="{H-pad-bh:.1f}" width="{max(1,bw-1.5):.1f}" height="{bh:.1f}" rx="1.5" fill="{heat(v/mx)}">'
-            f'<title>{rango}  ·  {v:,} alertas</title></rect>')
+            f'<rect class="tl-bar" x="{x:.1f}" y="{H-pad-bh:.1f}" width="{max(1,bw-1.5):.1f}" '
+            f'height="{bh:.1f}" rx="1.5" fill="{heat(v/mx)}" style="animation-delay:{i*10}ms" '
+            f'onmousemove="tlShow(evt,\'{tip}\')" onmouseleave="tlHide(evt)">'
+            f'<title>{tip}</title></rect>')
         # etiquetas ancladas a la DERECHA: la ultima barra (intervalo actual) siempre
         # lleva su hora, para que se vea que el eje llega hasta "ahora" y no se corta antes
         if (n - 1 - i) % tick_every == 0:
             ticks.append(f'<text x="{x+bw/2:.1f}" y="{H-pad+14:.0f}" text-anchor="middle" class="tick">{t0.strftime("%H:%M")}</text>')
     pico_t = datetime.fromtimestamp((lo + vals.index(mx)) * BUCKET, TZ_EC).strftime("%H:%M") if mx else ""
     return (f'<section class="card wide"><h2>Ataques por hora y minuto ({COB})</h2>'
+            f'<div class="tlwrap"><div class="tltip"></div>'
             f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" aria-label="alertas por intervalo" style="cursor:default">'
             f'<line x1="{pad}" y1="{H-pad}" x2="{W-pad}" y2="{H-pad}" stroke="{GRID}"/>'
-            f'{"".join(bars)}{"".join(ticks)}</svg>'
-            f'<p class="muted">1 barra cada {BUCKET_MIN} min &middot; pasa el raton para ver el rango y el conteo &middot; pico: {mx:,} alertas a las {pico_t}</p></section>')
+            f'{"".join(bars)}{"".join(ticks)}</svg></div>'
+            '<script>'
+            'function tlShow(e,t){var c=e.currentTarget.closest(".tlwrap");if(!c)return;'
+            'var p=c.querySelector(".tltip"),r=c.getBoundingClientRect();'
+            'p.textContent=t;p.style.left=(e.clientX-r.left)+"px";p.style.top=(e.clientY-r.top)+"px";p.style.opacity=1;}'
+            'function tlHide(e){var c=e.currentTarget.closest(".tlwrap");if(c){var p=c.querySelector(".tltip");if(p)p.style.opacity=0;}}'
+            '</script>'
+            f'<p class="muted">1 barra cada {BUCKET_MIN} min &middot; pasa el raton por una barra para ver el rango y el numero de peticiones &middot; pico: {mx:,} alertas a las {pico_t}</p></section>')
 
 def dur(a, b):
     if not a or not b or b < a:
@@ -993,6 +1003,14 @@ main{{padding:20px 28px;max-width:1200px;margin:0 auto}}
 .card.wide{{grid-column:1/-1}}
 .lbl{{font-size:12px;fill:{INK2}}} .val{{font-size:12px;fill:{INK};font-weight:600}}
 .tick{{font-size:11px;fill:{INK2}}}
+.tlwrap{{position:relative}}
+.tl-bar{{transform-box:fill-box;transform-origin:bottom;animation:tlgrow .6s cubic-bezier(.2,.75,.3,1) both;transition:filter .12s}}
+.tl-bar:hover{{filter:brightness(1.18)}}
+@keyframes tlgrow{{from{{transform:scaleY(0)}}to{{transform:scaleY(1)}}}}
+.tltip{{position:absolute;left:0;top:0;transform:translate(-50%,-145%);background:#0b0b0b;color:#fff;
+font-size:12px;font-weight:600;padding:5px 9px;border-radius:6px;pointer-events:none;white-space:nowrap;
+opacity:0;transition:opacity .1s;z-index:6;box-shadow:0 2px 8px rgba(0,0,0,.25)}}
+@media(prefers-reduced-motion:reduce){{.tl-bar{{animation:none}}}}
 .muted{{color:{INK2};font-size:12px;margin:8px 0 0}}
 table{{width:100%;border-collapse:collapse;font-size:12.5px}}
 th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid {GRID};vertical-align:top}}
@@ -2119,7 +2137,8 @@ class H(BaseHTTPRequestHandler):
                     f"<h1>Resumen de las {cob}</h1>"
                     f"<p class='ph-sub'>Panel IDS Suricata &middot; alertas graves salientes &middot; "
                     f"actualizado {ahora_ec} (hora de Ecuador)</p></div>"
-                    "<span class='ph-live'><span class='dotlive'></span>en vivo</span></header>")
+                    "<span class='ph-live'><span class='dotlive'></span>en vivo &middot; "
+                    "refresca en <span id='cd'>20</span>s</span></header>")
                 resumen = f"{cabecera}<main>{resumen_inner}</main>"
             else:
                 cabecera = (
@@ -2131,7 +2150,10 @@ class H(BaseHTTPRequestHandler):
             page = (f"<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
                     f"<meta name=viewport content='width=device-width,initial-scale=1'>"
                     f"<meta http-equiv=refresh content=20><title>Estadisticas Suricata</title>"
-                    f"{_PAGEH_CSS}{head_css}</head><body>{nav('/')}{resumen}{feed}</body></html>")
+                    f"{_PAGEH_CSS}{head_css}</head><body>{nav('/')}{resumen}{feed}"
+                    "<script>(function(){var s=20,e=document.getElementById('cd');"
+                    "var t=setInterval(function(){s--;if(s<0)s=0;if(e)e.textContent=s;"
+                    "if(s<=0)clearInterval(t);},1000);})();</script></body></html>")
             return self._html(page)
         if path == "/top":
             return self._html(top_page())
@@ -2851,6 +2873,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

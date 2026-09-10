@@ -894,20 +894,11 @@ def dur(a, b):
 host = os.uname().nodename if hasattr(os, "uname") else "suricata"
 gen = datetime.now(TZ_EC).strftime("%Y-%m-%d %H:%M")
 
-def cobertura_label():
-    """Cuanto tiempo cubren realmente los datos. Si no llega a las HORAS pedidas
-    (p.ej. Suricata lleva poco capturando), muestra la cobertura real en vez de mentir."""
-    if ts_min is None:
-        return f"ultimas {HOURS} horas"
-    cob = time.time() - ts_min
-    if cob >= (HOURS - 0.5) * 3600:      # cubre practicamente la ventana completa
-        return f"ultimas {HOURS} horas"
-    h = int(cob // 3600); m = int((cob % 3600) // 60)
-    if h >= 1:
-        return f"ultimas {h} h" + (f" {m} min" if m else "")
-    return f"ultimos {max(1, m)} min"
-
-COB = cobertura_label()
+# La ventana del reporte SIEMPRE es de HOURS (24 por defecto): la linea de tiempo
+# tiene 48 barras de 30 min terminando "ahora", rellenando con 0 los intervalos sin
+# alertas. Por eso la etiqueta es fija; que aun no haya datos en las primeras horas
+# no cambia el tamano de la ventana.
+COB = f"ultimas {HOURS} horas"
 
 def ipnum(s):
     # convierte una IPv4 en entero para ordenar bien (10 antes que 9 no; 9<10 numerico)
@@ -3959,6 +3950,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

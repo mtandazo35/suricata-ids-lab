@@ -2632,9 +2632,29 @@ en <code>/etc/suricata-report.conf</code>. Se envia cada dia a las 07:30.</li>
 <tr><td>Ver logs en vivo</td><td><code>journalctl -u suricata-dashboard -f</code></td></tr>
 </table>
 
+<h2>Espejo MikroTik y HOME_NET (por que a veces no se ven datos)</h2>
+<p>Con espejo TZSP desde el MikroTik, el flujo llega al receptor (<code>tzsp-decap</code>)
+y Suricata lo inspecciona. Pero el panel muestra <b>alertas</b>, no trafico normal, y las
+reglas de <b>ataque saliente</b> (escaneo de puertos, Telnet/Mirai, fuerza bruta SSH de un
+CPE) solo disparan si la IP de origen esta dentro de <code>HOME_NET</code>.</p>
+<p><b>Sintoma tipico:</b> el espejo llega (<code>journalctl -u tzsp-decap</code> muestra
+<code>rx/tx</code> subiendo) pero el panel se ve casi vacio. Casi siempre es que
+<code>HOME_NET</code> no incluye las redes de tus clientes.</p>
+<p>En un ISP los CPE suelen estar repartidos en varias redes privadas (10.6.x, 10.69.x,
+172.16.x...), asi que lo mas seguro es cubrir <b>todas las redes privadas (RFC1918)</b>:</p>
+<pre><code># en la instalacion (flag -n):
+... -t -m &lt;IP_MikroTik&gt; -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+
+# o cambiarlo despues sin reinstalar:
+sed -i 's#^\\s*HOME_NET:.*#    HOME_NET: "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"#' /etc/suricata/suricata.yaml
+suricata -T -c /etc/suricata/suricata.yaml   # validar
+systemctl restart suricata</code></pre>
+<p><code>EXTERNAL_NET</code> se ajusta solo (<code>!$HOME_NET</code>).</p>
+
 <h2>Reinstalar o actualizar</h2>
-<p>Todo esta en un instalador idempotente. Para actualizar a la ultima version:</p>
-<pre><code>curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -n 172.19.1.0/24,10.0.0.0/8</code></pre>"""
+<p>Todo esta en un instalador idempotente. Para actualizar a la ultima version
+(ejemplo ISP con espejo y todas las redes privadas):</p>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -m &lt;IP_MikroTik&gt; -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16</code></pre>"""
     # --- indice (tabla de contenidos estilo Wikipedia) generado desde los <h2> ---
     secciones = []; usados = {}
     def _slug(t):
@@ -3950,6 +3970,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

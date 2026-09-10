@@ -52,8 +52,10 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/in
 # 3) ESPEJO DESDE MIKROTIK (TZSP) — el caso ISP. Monta el receptor y captura el espejo.
 #    -t = activa el receptor TZSP (UDP 37008)
 #    -m = IP del MikroTik que envia el espejo (restringe el 37008 solo a ese origen)
-#    -n = las REDES DE TUS CLIENTES espejadas (para HOME_NET y detectar ataque saliente)
-curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -m 10.87.87.1 -n 10.87.87.0/24
+#    -n = las REDES DE TUS CLIENTES espejadas (para HOME_NET y detectar ataque saliente).
+#         En un ISP lo normal es cubrir TODAS las redes privadas (RFC1918), porque los
+#         CPE suelen estar repartidos en varios /16 (10.6.x, 10.69.x, 172.16.x...).
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -m 10.87.87.1 -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 
 # 4) WEB a tu medida — otro puerto y clave propia de EveBox.
 #    -p = puerto de la web   -P = clave del usuario admin
@@ -63,13 +65,18 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/in
 #    -W = sin web (solo Suricata + eve.json/fast.log)
 curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -W
 
-# 6) ISP COMPLETO — espejo MikroTik + interfaz fija + varias redes de clientes + clave.
-curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -i ens18 -t -m 10.87.87.1 -n 172.16.0.0/16,10.0.0.0/8 -P 'MiClaveSegura'
+# 6) ISP COMPLETO — espejo MikroTik + interfaz fija + TODAS las redes privadas + clave.
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -i ens18 -t -m 10.87.87.1 -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 -P 'MiClaveSegura'
 ```
 
 > **Ojo con el `-n` en modo espejo (`-t`)**: van **las redes de tus clientes** (las IPs
-> de los CPE que espejas), no la IP del servidor. Si `HOME_NET` esta mal, las reglas de
-> ataque saliente no disparan.
+> de los CPE que espejas), **no** la IP del servidor. Si `HOME_NET` esta mal, las reglas de
+> ataque saliente (escaneo/Telnet/Mirai de los CPE) **no disparan** y el panel se ve vacio
+> aunque el espejo llegue. En un ISP lo mas seguro es cubrir **todas las redes privadas**:
+> `-n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`.
+>
+> Cambiarlo despues sin reinstalar: edita `HOME_NET` en `/etc/suricata/suricata.yaml`
+> (`HOME_NET: "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"`) y `systemctl restart suricata`.
 
 Script de prueba de deteccion (se guarda en `/root`, segun convencion):
 

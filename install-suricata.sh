@@ -1737,6 +1737,13 @@ def cargar_empresa():
         pass
     return {"nombre": "", "logo": ""}
 
+def panel_actualizado():
+    """Fecha de la ultima actualizacion del panel desde GitHub, o None."""
+    try:
+        return open("/etc/suricata-dashboard.updated", encoding="utf-8").read().strip() or None
+    except OSError:
+        return None
+
 TRUST_FILE = "/etc/suricata-dashboard-trust.json"
 
 def cargar_confianza():
@@ -2029,6 +2036,20 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<input type=hidden name=logo id=lavatar></div></div>"
             "<div class=actions><button class=primary type=submit>Guardar</button></div>"
             "</form></section>")
+    # --- tarjeta: actualizar el panel desde GitHub (solo codigo, no config; solo admin) ---
+    card_update = ""
+    if es_admin and yo:
+        ult = panel_actualizado()
+        ult_txt = f"Ultima actualizacion del panel: <b>{esc(ult)}</b>." if ult else "El panel aun no se ha actualizado desde aqui."
+        card_update = (
+            "<section class=card><h2>Actualizar panel</h2>"
+            "<p class=sub2>Descarga la ultima version del panel desde GitHub. <b>Solo actualiza el codigo</b> "
+            "del panel y de los reportes; <b>no toca tu configuracion</b> (usuarios, exclusiones, empresa, "
+            "IPs de confianza, clave, ni HOME_NET/Suricata).</p>"
+            f"<p class=sub2>{ult_txt}</p>"
+            "<form method=post action='/update-panel' onsubmit=\"return confirm('Actualizar el panel a la ultima version de GitHub? Se reiniciara en unos segundos.')\">"
+            "<div class=actions><button class=primary type=submit>&#8681; Buscar y aplicar actualizaciones</button></div>"
+            "</form></section>")
     # --- tarjeta: gestion de usuarios estilo tabla (solo admin) ---
     card_users = ""
     if es_admin and yo:
@@ -2257,7 +2278,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
             + nav("/ajustes") +
             "<main><h1>Ajustes</h1>"
             "<p class=psub>Tu cuenta, la gestion de usuarios y los datos de la empresa.</p>"
-            + banner + card_pw + card_empresa + card_users + card_acceso + script +
+            + banner + card_pw + card_empresa + card_users + card_acceso + card_update + script +
             "</main></body></html>")
 
 def exclusiones_page(msg="", ok=False, edit_idx=None):
@@ -3000,6 +3021,28 @@ class H(BaseHTTPRequestHandler):
                 UPDATE["running"] = True; UPDATE["started"] = time.time(); UPDATE["msg"] = ""
                 threading.Thread(target=_run_rules_update, daemon=True).start()
             return self._redirect("/documentacion#reglas")
+        if ruta == "/update-panel":
+            if not self._admin():
+                return self._deny()
+            # el actualizador reinicia el panel: se lanza DESACOPLADO (systemd-run) para
+            # que sobreviva al reinicio; si no hay systemd-run, con setsid como respaldo.
+            try:
+                subprocess.Popen(["systemd-run", "--no-block", "--collect",
+                                  "--unit=suricata-panel-update-run",
+                                  "/usr/local/bin/suricata-panel-update"])
+            except Exception:
+                try:
+                    subprocess.Popen(["setsid", "/usr/local/bin/suricata-panel-update"])
+                except Exception:
+                    pass
+            return self._html(
+                "<!doctype html><meta charset=utf-8><title>Actualizando panel</title>"
+                "<meta http-equiv=refresh content='45;url=/ajustes'>"
+                "<div style='font:15px system-ui;max-width:560px;margin:70px auto;padding:26px;text-align:center'>"
+                "<h2>Actualizando el panel&hellip;</h2>"
+                "<p style='color:#52514e'>Bajando la ultima version desde GitHub. El panel se "
+                "reiniciara en unos segundos (tu configuracion no se toca). Esta pagina volvera "
+                "a Ajustes sola; si no, recarga en ~1 minuto.</p></div>")
         if ruta == "/exclusiones":
             if not self._admin():
                 return self._deny()   # lectura no gestiona exclusiones
@@ -3354,6 +3397,36 @@ if __name__ == "__main__":
     main()
 DASH
 chmod 755 /usr/local/bin/suricata-dashboard
+
+# Actualizador del PANEL: baja la ultima version del repo y reemplaza SOLO el codigo del
+# panel y del generador de reportes. NO toca configuracion (usuarios, exclusiones, empresa,
+# IPs de confianza, .conf, suricata.yaml/HOME_NET ni las units systemd).
+cat > /usr/local/bin/suricata-panel-update <<'UPDSH'
+#!/bin/sh
+set -e
+REPO="https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh"
+TMP="$(mktemp)"
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> /tmp/suricata-panel-update.log; }
+trap 'rm -f "$TMP"' EXIT
+log "descargando $REPO"
+curl -fsSL "$REPO" -o "$TMP" || { log "descarga fallo"; exit 1; }
+extraer() { # $1=linea-inicio (substr)  $2=marcador-fin  $3=destino
+  awk -v s="$1" -v e="$2" 'index($0,s){f=1;next} f&&$0==e{exit} f{print}' "$TMP" > "$3.new"
+  [ -s "$3.new" ] || { log "extraccion vacia: $3"; return 1; }
+  python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$3.new" || { log "invalido: $3"; return 1; }
+}
+extraer "cat > /usr/local/bin/suricata-dashboard <<'DASH'" "DASH" /usr/local/bin/suricata-dashboard || exit 1
+extraer "cat > /usr/local/bin/suricata-html-report <<'HREP'" "HREP" /usr/local/bin/suricata-html-report || exit 1
+# aplicar solo si AMBOS validaron
+mv /usr/local/bin/suricata-dashboard.new     /usr/local/bin/suricata-dashboard
+mv /usr/local/bin/suricata-html-report.new   /usr/local/bin/suricata-html-report
+chmod 755 /usr/local/bin/suricata-dashboard /usr/local/bin/suricata-html-report
+date '+%Y-%m-%d %H:%M:%S' > /etc/suricata-dashboard.updated
+log "actualizado OK; reiniciando panel"
+systemctl restart suricata-dashboard
+UPDSH
+chmod 755 /usr/local/bin/suricata-panel-update
+
 if [ ! -f /etc/suricata-dashboard.conf ]; then
   DASH_PASS="$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(16)))')"
   cat > /etc/suricata-dashboard.conf <<CONF
@@ -3970,6 +4043,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

@@ -36,16 +36,40 @@ Opciones (se pasan tras `bash -s --`):
 | `-m IP[,IP]` | con `-t`: **IP/CIDR del MikroTik** que envia el espejo. Restringe UFW y el receptor solo a ese origen (recomendado). Sin `-m`, 37008/udp queda abierto a todos | abierto |
 | `-W` | **sin web**, solo Suricata + logs | web activada |
 
+### One-liner segun tu caso
+
+Todos usan la misma URL; solo cambian las opciones tras `bash -s --`. El instalador es
+**idempotente**: re-ejecutarlo con otras opciones re-configura sin romper lo anterior.
+
 ```bash
-# forzar interfaz y red
+# 1) BASICO — captura la interfaz por defecto, con web. Para empezar y probar.
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash
+
+# 2) INTERFAZ + RED fijas — cuando la auto-deteccion no acierta.
+#    -i = interfaz a escuchar   -n = tu(s) red(es) HOME_NET
 curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -i ens18 -n 10.0.0.0/24
 
-# web en otro puerto y con clave propia
+# 3) ESPEJO DESDE MIKROTIK (TZSP) — el caso ISP. Monta el receptor y captura el espejo.
+#    -t = activa el receptor TZSP (UDP 37008)
+#    -m = IP del MikroTik que envia el espejo (restringe el 37008 solo a ese origen)
+#    -n = las REDES DE TUS CLIENTES espejadas (para HOME_NET y detectar ataque saliente)
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -m 10.87.87.1 -n 10.87.87.0/24
+
+# 4) WEB a tu medida — otro puerto y clave propia de EveBox.
+#    -p = puerto de la web   -P = clave del usuario admin
 curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -p 8443 -P 'MiClaveSegura'
 
-# solo IDS, sin web
+# 5) SOLO SENSOR (sin web) — util si el panel lo pones aparte o solo quieres logs.
+#    -W = sin web (solo Suricata + eve.json/fast.log)
 curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -W
+
+# 6) ISP COMPLETO — espejo MikroTik + interfaz fija + varias redes de clientes + clave.
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -i ens18 -t -m 10.87.87.1 -n 172.16.0.0/16,10.0.0.0/8 -P 'MiClaveSegura'
 ```
+
+> **Ojo con el `-n` en modo espejo (`-t`)**: van **las redes de tus clientes** (las IPs
+> de los CPE que espejas), no la IP del servidor. Si `HOME_NET` esta mal, las reglas de
+> ataque saliente no disparan.
 
 Script de prueba de deteccion (se guarda en `/root`, segun convencion):
 

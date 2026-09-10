@@ -1726,8 +1726,64 @@ font-size:13px;margin-bottom:8px}}
 <div class="foot">Acceso restringido</div>
 </div></div></body></html>"""
 
+RULES_FILE = "/var/lib/suricata/rules/suricata.rules"
+UPDATE = {"running": False, "started": 0.0, "msg": ""}   # estado del boton "actualizar reglas"
+
+def ultima_actualizacion_reglas():
+    """Cuando se escribio por ultima vez el archivo de reglas (= ultima actualizacion)."""
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(RULES_FILE), TZ_EC)
+    except OSError:
+        return None
+
+def _run_rules_update():
+    try:
+        r = subprocess.run(["/usr/local/bin/suricata-rules-update"], timeout=600,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        UPDATE["msg"] = "ok" if r.returncode == 0 else "err"
+    except Exception:
+        UPDATE["msg"] = "err"
+    finally:
+        UPDATE["running"] = False
+
+def update_box():
+    """Recuadro con el estado de las reglas y el boton de actualizacion manual."""
+    ult = ultima_actualizacion_reglas()
+    ult_txt = ult.strftime("%d/%m/%Y %H:%M") if ult else "desconocida"
+    if UPDATE["running"]:
+        h = datetime.fromtimestamp(UPDATE["started"], TZ_EC).strftime("%H:%M:%S")
+        estado = (f'<div style="background:#eda100;color:#fff;padding:9px 13px;border-radius:8px;'
+                  f'font-size:13px;margin:0 0 10px">Actualizacion en curso desde las {h}&hellip; '
+                  f'esta pagina se refresca sola; termina en ~1 min.</div>')
+        boton = ('<button type="button" disabled style="background:#9aa;color:#fff;border:0;'
+                 'padding:10px 16px;border-radius:8px;font:600 14px system-ui;cursor:default">'
+                 'Actualizando&hellip;</button>')
+    else:
+        estado = ""
+        if UPDATE["msg"] == "ok":
+            estado = ('<div style="background:#1baf7a;color:#fff;padding:9px 13px;border-radius:8px;'
+                      'font-size:13px;margin:0 0 10px">Base de conocimiento actualizada correctamente.</div>')
+        elif UPDATE["msg"] == "err":
+            estado = ('<div style="background:#e34948;color:#fff;padding:9px 13px;border-radius:8px;'
+                      'font-size:13px;margin:0 0 10px">La actualizacion fallo. Revisa '
+                      '<code>/tmp/suricata-update.log</code> en el servidor.</div>')
+        boton = ('<form method="post" action="/update-reglas" style="display:inline">'
+                 '<button type="submit" style="background:#2a78d6;color:#fff;border:0;'
+                 'padding:10px 16px;border-radius:8px;font:600 14px system-ui;cursor:pointer">'
+                 '&#8635; Actualizar base de conocimiento</button></form>')
+    return (
+        '<div style="border:1px solid #e7e6e2;border-radius:10px;background:#fff;padding:16px;margin:6px 0 14px">'
+        f'{estado}'
+        f'<p style="margin:0 0 4px"><b>Ultima actualizacion de reglas:</b> {ult_txt} '
+        '<span style="color:#52514e">(hora de Ecuador)</span></p>'
+        '<p style="margin:0 0 12px;color:#52514e;font-size:13px">Es <b>automatica cada dia a las 04:30</b>. '
+        'Con este boton la fuerzas ahora sin esperar; descarga ET Open y recarga en caliente.</p>'
+        f'{boton}</div>')
+
 def documentacion_page():
     port = CFG.get("PORT", "5637")
+    ubox = update_box()
+    refresh_meta = "<meta http-equiv=refresh content=15>" if UPDATE["running"] else ""
     css = ("body{margin:0;background:#fcfcfb;font:15px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
            "main{max-width:820px;margin:0 auto;padding:24px 22px}h1{font-size:22px;margin:0 0 4px}"
            "h2{font-size:16px;margin:26px 0 8px;border-bottom:1px solid #e7e6e2;padding-bottom:6px}"
@@ -1739,7 +1795,7 @@ def documentacion_page():
            "table{border-collapse:collapse;width:100%;margin:8px 0}td,th{border:1px solid #e7e6e2;padding:7px 10px;text-align:left;font-size:14px}"
            "th{background:#f4f4f2}")
     body = f"""<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>
-<meta name=viewport content='width=device-width,initial-scale=1'><title>Documentacion</title>
+<meta name=viewport content='width=device-width,initial-scale=1'>{refresh_meta}<title>Documentacion</title>
 <style>{css}</style></head><body>{NAV}<main>
 <h1>Documentacion</h1>
 <p>Guia rapida del panel de estadisticas de Suricata y como ajustarlo.</p>
@@ -1800,7 +1856,8 @@ recarga las reglas <b>en caliente</b> (<code>reload-rules</code>), sin reiniciar
 ni perder trafico.</li>
 <li>El registro de cada descarga queda en <code>/tmp/suricata-update.log</code>.</li>
 </ul>
-<p><b>Forzar una actualizacion ahora</b> (sin esperar a las 04:30), desde el servidor:</p>
+{ubox}
+<p><b>Forzar una actualizacion ahora</b> (sin esperar a las 04:30), tambien desde el servidor:</p>
 <pre style="background:#f4f4f2;border:1px solid #e7e6e2;border-radius:8px;padding:10px 12px;overflow:auto"><code>suricata-rules-update        # descarga ET Open + recarga en caliente
 systemctl start suricata-rules-update.service   # equivalente por systemd
 suricata-update list-sources # ver catalogos disponibles</code></pre>
@@ -2063,6 +2120,11 @@ class H(BaseHTTPRequestHandler):
             return self._html(login_page("Usuario o clave incorrectos."))
         if not self._auth_ok():
             return self._deny()
+        if ruta == "/update-reglas":
+            if not UPDATE["running"]:
+                UPDATE["running"] = True; UPDATE["started"] = time.time(); UPDATE["msg"] = ""
+                threading.Thread(target=_run_rules_update, daemon=True).start()
+            return self._redirect("/documentacion")
         if ruta not in ("/perfil", "/exclusiones"):
             return self._html("<h1>No encontrado</h1>", 404)
         if ruta == "/exclusiones":
@@ -2719,4 +2781,5 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 

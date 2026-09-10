@@ -1859,7 +1859,7 @@ def refrescador():
 
 _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
               ("/historico", "Historico"), ("/exclusiones", "Exclusiones"),
-              ("/ajustes", "Ajustes"), ("/documentacion", "Documentacion")]
+              ("/log", "Log"), ("/ajustes", "Ajustes"), ("/documentacion", "Documentacion")]
 _NAV_CSS = """<style>
 .nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
 font:15px system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25)}
@@ -1887,8 +1887,8 @@ def nav(active=""):
     es_lectura = getattr(CTX, "role", None) == "lectura"
     parts = []
     for h, t in _NAV_LINKS:
-        if h == "/exclusiones" and es_lectura:
-            continue   # solo lectura no gestiona exclusiones
+        if h in ("/exclusiones", "/log") and es_lectura:
+            continue   # solo lectura no ve exclusiones ni el log de accesos
         cls = "tab on" if h == active else "tab"
         parts.append(f'<a href="{h}" class="{cls}">{t}</a>')
     brand = '<span class="brand"><img class="applogo" src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
@@ -2126,10 +2126,6 @@ def perfil_page(msg="", ok=False, edit_user=None):
     # --- tarjeta: accesos y seguridad (log de login + desbloqueo; solo admin) ---
     card_acceso = ""
     if es_admin and yo:
-        _col = {"OK": "#12b886", "FAIL": "#e34948", "BLOQUEADO": "#eb6834"}
-        def _estb(e):
-            c = _col.get(e, "#8a8a86" if not e.startswith("DESBLOQUEO") else "#2a78d6")
-            return f'<span style="background:{c};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px">{esc(e)}</span>'
         bloq = ips_bloqueadas()
         if bloq:
             brows = "".join(
@@ -2143,16 +2139,6 @@ def perfil_page(msg="", ok=False, edit_user=None):
                    f"<th>Expira en</th><th></th></tr></thead><tbody>{brows}</tbody></table></div>")
         else:
             blq = "<p class=sub2>No hay IPs bloqueadas ahora.</p>"
-        rec = login_recientes(30)
-        if rec:
-            rrows = "".join(
-                f"<tr><td class=mono>{esc(ts)}</td><td class=mono>{esc(ip)}</td>"
-                f"<td>{esc(us) or '<span class=dash>&mdash;</span>'}</td><td>{_estb(est)}</td></tr>"
-                for ts, ip, us, est in rec)
-            rtab = ("<div class=twrap><table class=ut><thead><tr><th>Fecha (Ecuador)</th><th>IP</th>"
-                    f"<th>Usuario</th><th>Resultado</th></tr></thead><tbody>{rrows}</tbody></table></div>")
-        else:
-            rtab = "<p class=sub2>Sin intentos registrados todavia.</p>"
         # IPs de confianza (allowlist del panel)
         trust = cargar_confianza()
         myip = getattr(CTX, "ip", "?")
@@ -2179,10 +2165,10 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "Agregala (o un rango que la incluya) antes de restringir, o quedarias fuera.</p>")
         card_acceso = (
             "<section class=card><h2>Accesos y seguridad</h2>"
-            "<p class=sub2>Controla quien puede entrar al panel y revisa los intentos de acceso.</p>"
+            "<p class=sub2>Controla quien puede entrar al panel. El historial de intentos esta en la pestana "
+            "<b>Log</b>.</p>"
             "<h3 class=ch>IPs de confianza</h3>" + ctab + addc +
             "<h3 class=ch>IPs bloqueadas ahora</h3>" + blq +
-            "<h3 class=ch>Ultimos intentos de acceso</h3>" + rtab +
             "</section>")
     css = (
         "body{margin:0;background:#f6f6f4;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
@@ -2698,6 +2684,50 @@ en <code>/etc/suricata-report.conf</code>. Se envia cada dia a las 07:30.</li>
             "</article></div></body></html>")
     return body
 
+def log_page():
+    """Pestana Log: historial de intentos de acceso al panel (solo admin)."""
+    esc = html.escape
+    _col = {"OK": "#12b886", "FAIL": "#e34948", "BLOQUEADO": "#eb6834"}
+    def estb(e):
+        c = _col.get(e, "#2a78d6" if e.startswith("DESBLOQUEO") else "#8a8a86")
+        return (f'<span style="background:{c};color:#fff;font-size:10px;font-weight:700;'
+                f'padding:2px 8px;border-radius:20px">{esc(e)}</span>')
+    rec = login_recientes(200)
+    if rec:
+        rows = "".join(
+            f"<tr data-f=\"{esc((ts + ' ' + ip + ' ' + us + ' ' + est).lower())}\">"
+            f"<td class=mono>{esc(ts)}</td><td class=mono>{esc(ip)}</td>"
+            f"<td>{esc(us) or '<span style=color:#c3c2be>&mdash;</span>'}</td><td>{estb(est)}</td></tr>"
+            for ts, ip, us, est in rec)
+        cuerpo = ("<div class=twrap><table class=ut><thead><tr><th>Fecha (Ecuador)</th><th>IP</th>"
+                  f"<th>Usuario</th><th>Resultado</th></tr></thead><tbody id=logbody>{rows}</tbody></table></div>")
+    else:
+        cuerpo = "<p class=sub2>Sin intentos de acceso registrados todavia.</p>"
+    css = (
+        "body{margin:0;background:#f6f6f4;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
+        "main{max-width:1000px;margin:0 auto;padding:22px 22px 40px}"
+        "h1{font-size:21px;margin:0 0 2px}.sub2{color:#6b6a66;font-size:13px;margin:0 0 14px}"
+        ".card{border:1px solid #e7e6e2;border-radius:14px;padding:20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.03)}"
+        ".uhead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}"
+        ".search{width:240px;padding:8px 12px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui}"
+        ".twrap{overflow-x:auto;border:1px solid #eee;border-radius:10px}"
+        ".ut{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}"
+        ".ut th{text-align:left;color:#8a8a86;font-weight:600;padding:10px 12px;background:#fafafa;border-bottom:1px solid #eee}"
+        ".ut td{padding:8px 12px;border-bottom:1px solid #f2f1ee}"
+        ".ut tbody tr:last-child td{border-bottom:0}.ut tbody tr:hover{background:#fafbfd}"
+        ".mono{font-family:ui-monospace,Consolas,monospace}")
+    script = ("<script>function lfiltrar(){var q=(document.getElementById('lsearch').value||'').toLowerCase();"
+              "var rs=document.querySelectorAll('#logbody tr');for(var i=0;i<rs.length;i++){"
+              "var f=rs[i].getAttribute('data-f')||'';rs[i].style.display=f.indexOf(q)>=0?'':'none';}}</script>")
+    return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Log de accesos</title>"
+            f"<style>{css}</style></head><body>" + nav("/log") +
+            "<main><h1>Log de accesos</h1>"
+            "<p class=sub2>Historial de intentos de acceso al panel: fecha, IP de origen, usuario y resultado.</p>"
+            "<section class=card><div class=uhead><h2 style='font-size:15px;margin:0'>Ultimos intentos</h2>"
+            "<input class=search id=lsearch placeholder='Buscar IP, usuario...' oninput='lfiltrar()'></div>"
+            + cuerpo + "</section></main>" + script + "</body></html>")
+
 def historico_page():
     fs = sorted(glob.glob(f"{LOGDIR}/report-*.html"), key=os.path.getmtime, reverse=True)
     rows = []
@@ -2855,6 +2885,10 @@ class H(BaseHTTPRequestHandler):
             return self._html(page)
         if path == "/historico":
             return self._html(historico_page())
+        if path == "/log":
+            if not self._admin():
+                return self._redirect("/")   # lectura no ve el log de accesos
+            return self._html(log_page())
         if path == "/perfil":
             return self._redirect("/ajustes")
         if path == "/ajustes":
@@ -3853,6 +3887,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

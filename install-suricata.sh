@@ -1397,7 +1397,7 @@ def live_feed_html():
     ahora = datetime.now(TZ_EC).strftime("%H:%M:%S")
     return (
         '<style>'
-        '.feed{margin:20px 28px}'
+        '.feed{max-width:1360px;margin:20px auto;padding:0 28px}'
         '.feed h2{display:flex;align-items:center;gap:10px;margin:0 0 12px}'
         '.pulse{width:9px;height:9px;border-radius:50%;background:#e34948;display:inline-block;'
         'box-shadow:0 0 0 0 rgba(227,73,72,.6);animation:pulse 1.6s infinite}'
@@ -1717,7 +1717,7 @@ _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"
 _NAV_CSS = """<style>
 .nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
 font:15px system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25)}
-.nav .navwrap{max-width:1360px;margin:0 auto;padding:0 26px;min-height:58px;display:flex;align-items:center;gap:4px}
+.nav .navwrap{max-width:1360px;margin:0 auto;padding:0 28px;min-height:58px;display:flex;align-items:center;gap:4px}
 .nav .brand{font-weight:700;font-size:16px;margin-right:14px;display:flex;align-items:center;gap:11px;letter-spacing:.2px}
 .nav .brand .applogo{height:30px;width:auto;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.4))}
 .nav .brand .elogo{height:34px;width:auto;max-width:150px;object-fit:contain;border-radius:5px;background:#fff;padding:3px;display:block}
@@ -1731,6 +1731,10 @@ font-size:15px;font-weight:500;transition:background .15s,color .15s}
 .nav .out{margin-left:14px;color:#f3b0b0;text-decoration:none;font-weight:600;padding:9px 17px;border-radius:8px;font-size:15px;
 border:1px solid rgba(243,176,176,.35);transition:background .15s,color .15s,border-color .15s}
 .nav .out:hover{background:#e34948;color:#fff;border-color:#e34948}
+.empbar{background:#fff;border-bottom:1px solid #ececec}
+.empbar .empwrap{max-width:1360px;margin:0 auto;padding:7px 28px;display:flex;justify-content:flex-end;align-items:center;gap:10px}
+.empbar .elogo{height:30px;width:auto;max-width:150px;object-fit:contain;display:block}
+.empbar .en{color:#33322f;font-size:14px;font-weight:700;white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis}
 </style>"""
 
 def nav(active=""):
@@ -1741,29 +1745,30 @@ def nav(active=""):
             continue   # solo lectura no gestiona exclusiones
         cls = "tab on" if h == active else "tab"
         parts.append(f'<a href="{h}" class="{cls}">{t}</a>')
+    brand = '<span class="brand"><img class="applogo" src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
+    navbar = ('<div class="nav"><div class="navwrap">' + brand + '<span class="push"></span>'
+              + "".join(parts) + '<a href="/logout" class="out">Salir</a></div></div>')
+    # marca de la empresa (logo + nombre) en una franja debajo, alineada a la derecha (bajo Salir)
     emp = cargar_empresa()
     tiene_logo = emp.get("logo", "").startswith("data:image/")
+    empbar = ""
     if tiene_logo or emp.get("nombre"):
-        # empresa configurada: su logo y nombre van a la IZQUIERDA (marca principal)
         elogo = f'<img class="elogo" src="{html.escape(emp["logo"])}" alt="">' if tiene_logo else ""
-        enom = f'<span class="bn">{html.escape(emp["nombre"])}</span>' if emp.get("nombre") else ""
-        brand = (f'<span class="brand"><img class="applogo" src="/logo.png" alt="Suricata">{elogo}{enom}</span>')
-    else:
-        brand = '<span class="brand"><img class="applogo" src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
-    # marca a la izquierda, pestañas empujadas a la derecha, todo centrado en un contenedor
-    return (_NAV_CSS + '<div class="nav"><div class="navwrap">' + brand + '<span class="push"></span>'
-            + "".join(parts) + '<a href="/logout" class="out">Salir</a></div></div>')
+        enom = f'<span class="en">{html.escape(emp["nombre"])}</span>' if emp.get("nombre") else ""
+        empbar = f'<div class="empbar"><div class="empwrap">{elogo}{enom}</div></div>'
+    return _NAV_CSS + navbar + empbar
 
 # compat: algunas plantillas todavia interpolan {NAV} (barra sin pestana activa marcada)
 NAV = nav()
 
 # cabecera de pagina (titulo con presencia + subtitulo + indicador en vivo)
 _PAGEH_CSS = """<style>
-.pageh{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:18px 28px 8px}
+.pageh{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;
+max-width:1360px;margin:0 auto;padding:18px 28px 8px}
 .pageh h1{margin:0;font-size:21px;font-weight:700;letter-spacing:-.2px;color:#0b0b0b}
 .pageh .ph-sub{margin:4px 0 0;color:#6b6a66;font-size:13px}
 .pageh .ph-live{display:inline-flex;align-items:center;gap:7px;color:#c0392b;font-size:12px;font-weight:700;
-background:#fdecea;border:1px solid #f7c9c4;padding:5px 11px;border-radius:20px}
+background:#fdecea;border:1px solid #f7c9c4;padding:4px 10px;border-radius:20px;margin-left:8px;vertical-align:middle}
 .pageh .dotlive{width:8px;height:8px;border-radius:50%;background:#e34948;
 box-shadow:0 0 0 0 rgba(227,73,72,.6);animation:phpulse 1.6s infinite}
 @keyframes phpulse{0%{box-shadow:0 0 0 0 rgba(227,73,72,.5)}70%{box-shadow:0 0 0 8px rgba(227,73,72,0)}100%{box-shadow:0 0 0 0 rgba(227,73,72,0)}}
@@ -2592,11 +2597,11 @@ class H(BaseHTTPRequestHandler):
                 cob = mcob.group(1) if mcob else "ultimas 24 horas"
                 cabecera = (
                     "<header class='pageh'><div>"
-                    f"<h1>Resumen de las {cob}</h1>"
-                    f"<p class='ph-sub'>Panel IDS Suricata &middot; alertas graves salientes &middot; "
-                    f"actualizado {ahora_ec} (hora de Ecuador)</p></div>"
+                    "<h1>Resumen</h1>"
+                    "<p class='ph-sub'>Panel IDS Suricata &middot; alertas graves salientes &middot; "
+                    f"actualizado {ahora_ec} (hora de Ecuador) "
                     "<span class='ph-live'><span class='dotlive'></span>en vivo &middot; "
-                    "refresca en <span id='cd'>20</span>s</span></header>")
+                    "refresca en <span id='cd'>20</span>s</span></p></div></header>")
                 resumen = f"{cabecera}<main>{resumen_inner}</main>"
             else:
                 cabecera = (
@@ -2608,7 +2613,9 @@ class H(BaseHTTPRequestHandler):
             page = (f"<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
                     f"<meta name=viewport content='width=device-width,initial-scale=1'>"
                     f"<meta http-equiv=refresh content=20><title>Estadisticas Suricata</title>"
-                    f"{_PAGEH_CSS}{head_css}</head><body>{nav('/')}{resumen}{feed}"
+                    f"{_PAGEH_CSS}{head_css}"
+                    "<style>main{max-width:1360px;margin:0 auto;padding-top:8px}</style>"
+                    f"</head><body>{nav('/')}{resumen}{feed}"
                     "<script>(function(){var s=20,e=document.getElementById('cd');"
                     "var t=setInterval(function(){s--;if(s<0)s=0;if(e)e.textContent=s;"
                     "if(s<=0)clearInterval(t);},1000);})();</script></body></html>")
@@ -3532,6 +3539,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

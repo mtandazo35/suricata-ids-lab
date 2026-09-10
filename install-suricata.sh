@@ -1623,9 +1623,9 @@ def buscar_usuario(user):
     return None
 
 def verificar_login(user, pw):
-    """Devuelve el rol si user/clave son correctos, si no None."""
+    """Devuelve el rol si user/clave son correctos y la cuenta esta activa; si no None."""
     r = buscar_usuario(user)
-    if not r:
+    if not r or r.get("activo", True) is False:
         return None
     try:
         _, h = _hash_pw(pw, r.get("salt", ""))
@@ -1766,7 +1766,29 @@ def _rol_badge(rl):
         return '<span class="rbadge lec">Solo lectura</span>'
     return '<span class="rbadge">—</span>'
 
-def perfil_page(msg="", ok=False):
+_AV_COLORS = ["#c0392b", "#8e44ad", "#2980b9", "#16a085", "#27ae60", "#d35400",
+              "#2c3e50", "#e67e22", "#7f8c8d", "#c2185b", "#00838f", "#5d4037"]
+
+def _iniciales(nombre, user):
+    base = (nombre or user or "?").strip()
+    parts = base.split()
+    if len(parts) >= 2:
+        return (parts[0][:1] + parts[1][:1]).upper()
+    return base[:2].upper()
+
+def _avatar(nombre, user):
+    ini = html.escape(_iniciales(nombre, user))
+    col = _AV_COLORS[sum(ord(c) for c in (user or nombre or "?")) % len(_AV_COLORS)]
+    return f'<span class="av" style="background:{col}">{ini}</span>'
+
+_IC_EDIT = ('<svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" '
+            'd="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41'
+            'l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>')
+_IC_DEL = ('<svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" '
+           'd="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>')
+
+def perfil_page(msg="", ok=False, edit_user=None):
+    import urllib.parse as _up
     esc = html.escape
     yo = getattr(CTX, "user", None)
     mirol = getattr(CTX, "role", None)
@@ -1774,16 +1796,14 @@ def perfil_page(msg="", ok=False):
     inicial = esc(yo[0].upper()) if yo else "?"
     banner = ""
     if msg:
-        cls = "ok" if ok else "err"
-        banner = f'<div class="banner {cls}">{esc(msg)}</div>'
+        banner = f'<div class="banner {"ok" if ok else "err"}">{esc(msg)}</div>'
     # --- tarjeta: mi cuenta / cambiar mi clave ---
     if yo:
         card_pw = (
             "<section class=card>"
             "<div class=acct>"
             f"<div class=avatar>{inicial}</div>"
-            f"<div><div class=aname>{esc(yo)}</div><div class=arole>{_rol_badge(mirol)}</div></div>"
-            "</div>"
+            f"<div><div class=aname>{esc(yo)}</div><div class=arole>{_rol_badge(mirol)}</div></div></div>"
             "<h3 class=ch>Cambiar mi clave</h3>"
             "<form method=post action='/perfil'>"
             "<input type=hidden name=accion value=mi_clave>"
@@ -1794,101 +1814,143 @@ def perfil_page(msg="", ok=False):
             "<input type=password name=nueva autocomplete=new-password required>"
             "<div class=hint>Minimo 6 caracteres.</div></div>"
             "<div class=field><label>Repetir clave nueva</label>"
-            "<input type=password name=nueva2 autocomplete=new-password required></div>"
-            "</div>"
+            "<input type=password name=nueva2 autocomplete=new-password required></div></div>"
             "<div class=actions><button class=primary type=submit>Actualizar mi clave</button></div>"
             "</form></section>")
     else:
         card_pw = "<section class=card><p>Autenticacion desactivada (sin usuarios configurados en el servidor).</p></section>"
-    # --- tarjeta: gestion de usuarios (solo admin) ---
+    usuarios = cargar_usuarios() if (es_admin and yo) else []
+    # --- tarjeta de edicion (si un admin pulso el lapiz) ---
+    card_edit = ""
+    eo = next((r for r in usuarios if r.get("user") == edit_user), None) if edit_user else None
+    if eo:
+        un = esc(eo.get("user", "")); rl = eo.get("role", "admin")
+        sa = " selected" if rl == "admin" else ""; sl = " selected" if rl == "lectura" else ""
+        card_edit = (
+            f"<section class=card id=editcard><h2>Editar usuario &middot; <span class=mono>{un}</span></h2>"
+            "<form method=post action='/perfil'>"
+            "<input type=hidden name=accion value=edit_user>"
+            f"<input type=hidden name=user value='{un}'>"
+            "<div class=addgrid>"
+            f"<div class=field><label>Nombre</label><input type=text name=nombre value='{esc(eo.get('nombre',''))}'></div>"
+            f"<div class=field><label>Correo</label><input type=email name=correo value='{esc(eo.get('correo',''))}'></div>"
+            f"<div class=field><label>Rol</label><select name=role>"
+            f"<option value=admin{sa}>Administrador</option><option value=lectura{sl}>Solo lectura</option></select></div>"
+            "</div>"
+            "<div class=field><label>Clave nueva (opcional)</label>"
+            "<input type=password name=npass autocomplete=new-password placeholder='dejar vacio para no cambiar'>"
+            "<div class=hint>Si la escribes, minimo 6 caracteres.</div></div>"
+            "<div class=actions><button class=primary type=submit>Guardar cambios</button>"
+            "<a class=cancel href='/perfil'>Cancelar</a></div>"
+            "</form></section>")
+    # --- tarjeta: gestion de usuarios estilo tabla (solo admin) ---
     card_users = ""
     if es_admin and yo:
         rows = []
-        for r in cargar_usuarios():
+        for i, r in enumerate(usuarios, 1):
             uraw = r.get("user", ""); un = esc(uraw); rl = r.get("role", "admin")
-            sa = " selected" if rl == "admin" else ""
-            sl = " selected" if rl == "lectura" else ""
-            eres_tu = ' <span class=me>tu</span>' if uraw == yo else ''
+            nombre = r.get("nombre", ""); correo = r.get("correo", "")
+            disp = esc(nombre) if nombre else un
+            activo = r.get("activo", True)
+            est_cls = "on" if activo else "off"; est_txt = "ACTIVADO" if activo else "DESACTIVADO"
+            tu = ' <span class=me>tu</span>' if uraw == yo else ''
+            filtro = esc(((nombre + " " + uraw + " " + correo).lower()))
+            correo_c = esc(correo) if correo else "<span class=dash>&mdash;</span>"
+            href = "/perfil?edit=" + _up.quote(uraw)
             rows.append(
-                f"<tr><td><span class=uname>{un}</span>{eres_tu}</td>"
+                f"<tr data-f=\"{filtro}\"><td class=idc>{i}</td>"
+                f"<td><div class=nmcell>{_avatar(nombre, uraw)}<span class=nm>{disp}</span>{tu}</div></td>"
+                f"<td class=mono>{un}</td><td class=mono cmail>{correo_c}</td>"
                 f"<td>{_rol_badge(rl)}</td>"
+                "<td><form method=post action='/perfil' class=inl>"
+                f"<input type=hidden name=accion value=toggle_user><input type=hidden name=user value='{un}'>"
+                f"<button class='estado {est_cls}' type=submit title='clic para activar/desactivar'>{est_txt}</button></form></td>"
                 "<td class=acts>"
-                "<form method=post action='/perfil' class=inl>"
-                "<input type=hidden name=accion value=rol_user>"
-                f"<input type=hidden name=user value='{un}'>"
-                f"<select name=role><option value=admin{sa}>admin</option><option value=lectura{sl}>lectura</option></select>"
-                "<button class=mini type=submit>Cambiar rol</button></form>"
+                f"<a class=ic title=Editar href=\"{href}\">{_IC_EDIT}</a>"
                 "<form method=post action='/perfil' class=inl "
                 f"onsubmit=\"return confirm('Eliminar al usuario {un}?')\">"
-                "<input type=hidden name=accion value=del_user>"
-                f"<input type=hidden name=user value='{un}'>"
-                "<button class='mini danger' type=submit>Eliminar</button></form>"
+                f"<input type=hidden name=accion value=del_user><input type=hidden name=user value='{un}'>"
+                f"<button class='ic danger' title=Eliminar type=submit>{_IC_DEL}</button></form>"
                 "</td></tr>")
         card_users = (
-            "<section class=card><h2>Usuarios</h2>"
-            "<p class=sub2>Los de <b>solo lectura</b> ven paneles y reportes pero no editan "
-            "exclusiones, ni actualizan reglas, ni gestionan usuarios.</p>"
-            "<div class=twrap><table class=ut><thead><tr><th>Usuario</th><th>Rol</th><th></th></tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody></table></div>"
-            "<h3 class=ch>Agregar usuario</h3>"
+            "<section class=card>"
+            "<div class=uhead><h2>Usuarios</h2>"
+            "<div class=tools>"
+            "<button class='primary sm' type=button onclick=\"var b=document.getElementById('addbox');b.hidden=!b.hidden;if(!b.hidden)b.scrollIntoView({behavior:'smooth'});\">+ Nuevo</button>"
+            "<input class=search id=usearch placeholder='Buscar...' oninput='ufiltrar()'></div></div>"
+            "<p class=sub2>Los de <b>solo lectura</b> ven paneles y reportes pero no editan exclusiones, "
+            "ni actualizan reglas, ni gestionan usuarios.</p>"
+            "<div class=twrap><table class=ut><thead><tr>"
+            "<th>ID</th><th>Nombre</th><th>Usuario</th><th>Correo</th><th>Rol</th><th>Estado</th><th></th>"
+            f"</tr></thead><tbody id=ubody>{''.join(rows)}</tbody></table></div>"
+            "<div id=addbox hidden><h3 class=ch>Nuevo usuario</h3>"
             "<form method=post action='/perfil'>"
             "<input type=hidden name=accion value=add_user>"
             "<div class=addgrid>"
+            "<div class=field><label>Nombre</label><input type=text name=nnombre autocomplete=off></div>"
             "<div class=field><label>Usuario</label><input type=text name=nuser autocomplete=off required></div>"
+            "<div class=field><label>Correo</label><input type=email name=ncorreo autocomplete=off></div>"
             "<div class=field><label>Clave</label><input type=password name=npass autocomplete=new-password required></div>"
             "<div class=field><label>Rol</label><select name=nrole>"
             "<option value=lectura>Solo lectura</option><option value=admin>Administrador</option></select></div>"
-            "</div><div class=hint>La clave debe tener minimo 6 caracteres.</div>"
+            "</div><div class=hint>La clave debe tener minimo 6 caracteres. Nombre y correo son opcionales.</div>"
             "<div class=actions><button class=primary type=submit>Crear usuario</button></div>"
-            "</form></section>")
+            "</form></div></section>")
     css = (
         "body{margin:0;background:#f6f6f4;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
-        "main{max-width:680px;margin:0 auto;padding:26px 20px 40px}"
-        "h1{font-size:22px;margin:0 0 2px}h2{font-size:16px;margin:0 0 4px}"
-        ".psub{color:#6b6a66;font-size:13px;margin:0 0 18px}.sub2{color:#6b6a66;font-size:12.5px;margin:2px 0 14px}"
-        ".card{border:1px solid #e7e6e2;border-radius:14px;padding:22px 22px 20px;background:#fff;margin-bottom:16px;"
-        "box-shadow:0 1px 3px rgba(0,0,0,.03)}"
+        "main{max-width:900px;margin:0 auto;padding:26px 20px 40px}"
+        "h1{font-size:22px;margin:0 0 2px}h2{font-size:16px;margin:0}"
+        ".psub{color:#6b6a66;font-size:13px;margin:0 0 18px}.sub2{color:#6b6a66;font-size:12.5px;margin:6px 0 12px}"
+        ".card{border:1px solid #e7e6e2;border-radius:14px;padding:22px 22px 20px;background:#fff;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.03)}"
         ".ch{font-size:13px;color:#52514e;margin:18px 0 6px;padding-top:16px;border-top:1px solid #f0efec}"
         ".acct{display:flex;align-items:center;gap:14px}"
-        ".avatar{width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#2a78d6,#1c5cab);"
-        "color:#fff;font:700 20px system-ui;display:flex;align-items:center;justify-content:center;flex:none}"
+        ".avatar{width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#2a78d6,#1c5cab);color:#fff;font:700 20px system-ui;display:flex;align-items:center;justify-content:center;flex:none}"
         ".aname{font-size:17px;font-weight:700}.arole{margin-top:3px}"
-        ".rbadge{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;"
-        "background:#ecebe7;color:#52514e}"
+        ".rbadge{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;background:#ecebe7;color:#52514e}"
         ".rbadge.adm{background:#e7f0fb;color:#1c5cab}.rbadge.lec{background:#eceae6;color:#6b6a66}"
         ".field{margin:12px 0 0}label{display:block;font-size:12.5px;color:#52514e;margin:0 0 5px;font-weight:600}"
-        "input,select{width:100%;padding:9px 11px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui;"
-        "box-sizing:border-box;background:#fff}"
+        "input,select{width:100%;padding:9px 11px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui;box-sizing:border-box;background:#fff}"
         "input:focus,select:focus{outline:none;border-color:#2a78d6;box-shadow:0 0 0 3px rgba(42,120,214,.15)}"
         ".grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}"
-        ".addgrid{display:grid;grid-template-columns:1.2fr 1.2fr .9fr;gap:14px}"
-        "@media(max-width:560px){.grid2,.addgrid{grid-template-columns:1fr}}"
-        ".hint{color:#9a9a95;font-size:12px;margin-top:6px}"
-        ".actions{margin-top:18px}"
-        "button.primary{padding:10px 18px;background:#2a78d6;color:#fff;border:0;border-radius:9px;"
-        "font:600 14px system-ui;cursor:pointer}button.primary:hover{background:#1c5cab}"
+        ".addgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}"
+        "@media(max-width:640px){.grid2,.addgrid{grid-template-columns:1fr}}"
+        ".hint{color:#9a9a95;font-size:12px;margin-top:6px}.actions{margin-top:18px;display:flex;gap:12px;align-items:center}"
+        "button.primary{padding:10px 18px;background:#2a78d6;color:#fff;border:0;border-radius:9px;font:600 14px system-ui;cursor:pointer}"
+        "button.primary:hover{background:#1c5cab}button.primary.sm{padding:8px 14px;font-size:13px}"
+        ".cancel{color:#6b6a66;font-size:13px;text-decoration:none}.cancel:hover{color:#0b0b0b}"
+        ".uhead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}"
+        ".tools{display:flex;gap:10px;align-items:center}"
+        ".search{width:220px;padding:8px 12px}"
         ".twrap{overflow-x:auto;border:1px solid #eee;border-radius:10px;margin:6px 0 4px}"
-        ".ut{width:100%;border-collapse:collapse;font-size:13px}"
-        ".ut th{text-align:left;color:#8a8a86;font-weight:600;padding:9px 12px;background:#fafafa;border-bottom:1px solid #eee}"
+        ".ut{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}"
+        ".ut th{text-align:left;color:#8a8a86;font-weight:600;padding:10px 12px;background:#fafafa;border-bottom:1px solid #eee}"
         ".ut td{padding:9px 12px;border-bottom:1px solid #f2f1ee;vertical-align:middle}"
         ".ut tbody tr:last-child td{border-bottom:0}.ut tbody tr:hover{background:#fafbfd}"
-        ".uname{font-family:ui-monospace,Consolas,monospace;font-weight:600}"
-        ".me{background:#e7f0fb;color:#1c5cab;font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;margin-left:6px}"
-        ".acts{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}"
-        ".inl{display:inline-flex;gap:6px;align-items:center;margin:0}.inl select{width:auto;padding:6px 8px}"
-        "button.mini{padding:7px 12px;font-size:12px;font-weight:600;background:#eef2f7;color:#243b53;"
-        "border:1px solid #d7dee8;border-radius:8px;cursor:pointer}button.mini:hover{background:#e2eaf4}"
-        "button.mini.danger{background:#fdecea;color:#c0392b;border-color:#f3c9c4}"
-        "button.mini.danger:hover{background:#e34948;color:#fff;border-color:#e34948}"
+        ".idc{color:#9a9a95;font-variant-numeric:tabular-nums}"
+        ".nmcell{display:flex;align-items:center;gap:9px}.nm{font-weight:600}"
+        ".av{width:30px;height:30px;border-radius:50%;color:#fff;font:700 11px system-ui;display:inline-flex;align-items:center;justify-content:center;flex:none}"
+        ".mono{font-family:ui-monospace,Consolas,monospace}.cmail{color:#52514e}.dash{color:#c3c2be}"
+        ".me{background:#e7f0fb;color:#1c5cab;font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;margin-left:2px}"
+        ".estado{font-size:10px;font-weight:800;letter-spacing:.3px;padding:4px 9px;border-radius:6px;border:0;cursor:pointer}"
+        ".estado.on{background:#12b886;color:#fff}.estado.off{background:#eceae6;color:#8a8a86}"
+        ".estado:hover{filter:brightness(1.06)}"
+        ".acts{display:flex;gap:8px;justify-content:flex-end}.inl{display:inline-flex;margin:0}"
+        ".ic{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;"
+        "border:1px solid #e0dfda;background:#fff;color:#52514e;cursor:pointer;text-decoration:none}"
+        ".ic:hover{background:#eef2f7;color:#2a78d6;border-color:#cddaea}"
+        ".ic.danger:hover{background:#e34948;color:#fff;border-color:#e34948}"
         ".banner{padding:11px 14px;border-radius:9px;margin-bottom:16px;font-size:13px;color:#fff}"
         ".banner.ok{background:#1baf7a}.banner.err{background:#e34948}")
+    script = ("<script>function ufiltrar(){var q=(document.getElementById('usearch').value||'').toLowerCase();"
+              "var rs=document.querySelectorAll('#ubody tr');for(var i=0;i<rs.length;i++){"
+              "var f=rs[i].getAttribute('data-f')||'';rs[i].style.display=f.indexOf(q)>=0?'':'none';}}</script>")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Perfil</title>"
             f"<style>{css}</style></head><body>"
             + nav("/perfil") +
             "<main><h1>Perfil</h1>"
             "<p class=psub>Tu cuenta y, si eres administrador, la gestion de usuarios del panel.</p>"
-            + banner + card_pw + card_users +
+            + banner + card_pw + card_edit + card_users + script +
             "</main></body></html>")
 
 def exclusiones_page(msg="", ok=False, edit_idx=None):
@@ -2401,7 +2463,11 @@ class H(BaseHTTPRequestHandler):
         if path == "/historico":
             return self._html(historico_page())
         if path == "/perfil":
-            return self._html(perfil_page())
+            ed = None
+            if "?" in self.path and self._admin():
+                import urllib.parse
+                ed = urllib.parse.parse_qs(self.path.split("?", 1)[1]).get("edit", [None])[0]
+            return self._html(perfil_page(edit_user=ed))
         if path == "/exclusiones":
             if not self._admin():
                 return self._redirect("/")   # lectura no gestiona exclusiones
@@ -2492,6 +2558,8 @@ class H(BaseHTTPRequestHandler):
             nu = (q.get("nuser", [""])[0]).strip()
             npw = q.get("npass", [""])[0]
             nrole = q.get("nrole", ["lectura"])[0]
+            nombre = (q.get("nnombre", [""])[0]).strip()[:60]
+            correo = (q.get("ncorreo", [""])[0]).strip()[:80]
             if nrole not in ROLES:
                 nrole = "lectura"
             if not nu or " " in nu or len(nu) > 40:
@@ -2502,7 +2570,8 @@ class H(BaseHTTPRequestHandler):
             if any(r.get("user") == nu for r in us):
                 return self._html(perfil_page(f"Ya existe un usuario llamado {nu}.", ok=False))
             salt, h = _hash_pw(npw)
-            us.append({"user": nu, "salt": salt, "hash": h, "role": nrole})
+            us.append({"user": nu, "salt": salt, "hash": h, "role": nrole,
+                       "nombre": nombre, "correo": correo, "activo": True})
             try:
                 guardar_usuarios(us)
             except OSError as ex:
@@ -2545,6 +2614,51 @@ class H(BaseHTTPRequestHandler):
             except OSError as ex:
                 return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
             return self._html(perfil_page(f"'{objetivo}' ahora es {nrole}.", ok=True))
+        if accion == "edit_user":
+            objetivo = q.get("user", [""])[0]
+            nombre = (q.get("nombre", [""])[0]).strip()[:60]
+            correo = (q.get("correo", [""])[0]).strip()[:80]
+            nrole = q.get("role", ["lectura"])[0]
+            npw = q.get("npass", [""])[0]
+            if nrole not in ROLES:
+                return self._html(perfil_page("Rol invalido.", ok=False))
+            us = cargar_usuarios()
+            admins = [r for r in us if r.get("role") == "admin"]
+            obj = next((r for r in us if r.get("user") == objetivo), None)
+            if not obj:
+                return self._html(perfil_page("Ese usuario no existe.", ok=False))
+            if obj.get("role") == "admin" and nrole != "admin" and len(admins) <= 1:
+                return self._html(perfil_page("No puedes quitar el rol al unico administrador.", ok=False))
+            if npw:
+                if len(npw) < 6:
+                    return self._html(perfil_page("La clave nueva debe tener al menos 6 caracteres.", ok=False, edit_user=objetivo))
+                obj["salt"], obj["hash"] = _hash_pw(npw)
+            obj["nombre"] = nombre; obj["correo"] = correo; obj["role"] = nrole
+            try:
+                guardar_usuarios(us)
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            return self._html(perfil_page(f"Usuario '{objetivo}' actualizado.", ok=True))
+        if accion == "toggle_user":
+            objetivo = q.get("user", [""])[0]
+            us = cargar_usuarios()
+            obj = next((r for r in us if r.get("user") == objetivo), None)
+            if not obj:
+                return self._html(perfil_page("Ese usuario no existe.", ok=False))
+            act_admins = [r for r in us if r.get("role") == "admin" and r.get("activo", True)]
+            va_desactivar = obj.get("activo", True)
+            if va_desactivar and obj.get("role") == "admin" and len(act_admins) <= 1:
+                return self._html(perfil_page("No puedes desactivar el unico administrador activo.", ok=False))
+            obj["activo"] = not va_desactivar
+            try:
+                guardar_usuarios(us)
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            if not obj["activo"] and objetivo == yo:
+                SESSIONS.pop(self._sid(), None)
+                return self._redirect("/login", cookie="sid=; Path=/; Max-Age=0")
+            estado = "activado" if obj["activo"] else "desactivado"
+            return self._html(perfil_page(f"Usuario '{objetivo}' {estado}.", ok=True))
         return self._html(perfil_page("Accion no reconocida.", ok=False))
 
     def _post_exclusiones(self, q):
@@ -3212,6 +3326,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

@@ -1718,18 +1718,17 @@ _NAV_CSS = """<style>
 .nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
 padding:0 22px;font:14px system-ui,-apple-system,Segoe UI,sans-serif;display:flex;align-items:center;gap:4px;
 box-shadow:0 2px 10px rgba(0,0,0,.25)}
-.nav .brand{font-weight:700;font-size:15px;margin-right:22px;display:flex;align-items:center;gap:9px;letter-spacing:.2px}
-.nav .brand img{height:24px;width:auto;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.4))}
+.nav .brand{font-weight:700;font-size:15px;margin-right:14px;display:flex;align-items:center;gap:10px;letter-spacing:.2px}
+.nav .brand .applogo{height:24px;width:auto;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.4))}
+.nav .brand .elogo{height:28px;width:auto;max-width:130px;object-fit:contain;border-radius:4px;background:#fff;padding:2px;display:block}
+.nav .brand .bn{white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
 .nav a.tab{position:relative;color:#c3ccd8;text-decoration:none;padding:9px 13px;margin:8px 1px;border-radius:8px;
 font-weight:500;transition:background .15s,color .15s}
 .nav a.tab:hover{color:#fff;background:rgba(255,255,255,.08)}
 .nav a.tab.on{color:#fff;background:rgba(42,120,214,.22);font-weight:600}
 .nav a.tab.on::after{content:"";position:absolute;left:13px;right:13px;bottom:-9px;height:2px;background:#2a78d6;border-radius:2px}
 .nav .push{margin-left:auto}
-.nav .emp{display:flex;align-items:center;gap:9px;padding:0 12px;border-left:1px solid rgba(255,255,255,.12);color:#dfe6ef}
-.nav .emp img{height:26px;width:auto;max-width:130px;object-fit:contain;border-radius:4px;background:#fff;padding:2px}
-.nav .emp .en{font-weight:600;font-size:13px;white-space:nowrap;max-width:190px;overflow:hidden;text-overflow:ellipsis}
-.nav .out{margin-left:8px;color:#f3b0b0;text-decoration:none;font-weight:600;padding:7px 15px;border-radius:8px;
+.nav .out{margin-left:12px;color:#f3b0b0;text-decoration:none;font-weight:600;padding:7px 15px;border-radius:8px;
 border:1px solid rgba(243,176,176,.35);transition:background .15s,color .15s,border-color .15s}
 .nav .out:hover{background:#e34948;color:#fff;border-color:#e34948}
 </style>"""
@@ -1743,15 +1742,17 @@ def nav(active=""):
         cls = "tab on" if h == active else "tab"
         parts.append(f'<a href="{h}" class="{cls}">{t}</a>')
     emp = cargar_empresa()
-    marca = ""
-    if emp.get("logo", "").startswith("data:image/") or emp.get("nombre"):
-        img = f'<img src="{html.escape(emp["logo"])}" alt="">' if emp.get("logo", "").startswith("data:image/") else ""
-        nom = f'<span class="en">{html.escape(emp.get("nombre",""))}</span>' if emp.get("nombre") else ""
-        marca = f'<span class="emp">{img}{nom}</span>'
-    return (_NAV_CSS +
-            '<div class="nav"><span class="brand"><img src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
-            + "".join(parts) + '<span class="push"></span>' + marca +
-            '<a href="/logout" class="out">Salir</a></div>')
+    tiene_logo = emp.get("logo", "").startswith("data:image/")
+    if tiene_logo or emp.get("nombre"):
+        # empresa configurada: su logo y nombre van a la IZQUIERDA (marca principal)
+        elogo = f'<img class="elogo" src="{html.escape(emp["logo"])}" alt="">' if tiene_logo else ""
+        enom = f'<span class="bn">{html.escape(emp["nombre"])}</span>' if emp.get("nombre") else ""
+        brand = (f'<span class="brand"><img class="applogo" src="/logo.png" alt="Suricata">{elogo}{enom}</span>')
+    else:
+        brand = '<span class="brand"><img class="applogo" src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
+    # marca a la izquierda, pestañas empujadas a la derecha
+    return (_NAV_CSS + '<div class="nav">' + brand + '<span class="push"></span>'
+            + "".join(parts) + '<a href="/logout" class="out">Salir</a></div>')
 
 # compat: algunas plantillas todavia interpolan {NAV} (barra sin pestana activa marcada)
 NAV = nav()
@@ -3525,6 +3526,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

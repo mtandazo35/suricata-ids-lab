@@ -1759,94 +1759,135 @@ def save_conf(user, pw):
     os.replace(tmp, CONF)
     CFG["USER"], CFG["PASS"], CFG["PORT"] = user, pw, port
 
+def _rol_badge(rl):
+    if rl == "admin":
+        return '<span class="rbadge adm">Administrador</span>'
+    if rl == "lectura":
+        return '<span class="rbadge lec">Solo lectura</span>'
+    return '<span class="rbadge">—</span>'
+
 def perfil_page(msg="", ok=False):
     esc = html.escape
     yo = getattr(CTX, "user", None)
     mirol = getattr(CTX, "role", None)
     es_admin = mirol != "lectura"
-    rolh = {"admin": "Administrador", "lectura": "Solo lectura"}.get(mirol, "—")
+    inicial = esc(yo[0].upper()) if yo else "?"
     banner = ""
     if msg:
-        col = "#1baf7a" if ok else "#e34948"
-        banner = (f'<div style="background:{col};color:#fff;padding:10px 14px;border-radius:8px;'
-                  f'margin-bottom:16px;font-size:13px">{esc(msg)}</div>')
-    # --- tarjeta: cambiar mi clave ---
+        cls = "ok" if ok else "err"
+        banner = f'<div class="banner {cls}">{esc(msg)}</div>'
+    # --- tarjeta: mi cuenta / cambiar mi clave ---
     if yo:
         card_pw = (
-            "<div class=card><h2>Cambiar mi clave</h2>"
-            f"<p class=sub2>Sesion iniciada como <b>{esc(yo)}</b> &middot; {rolh}</p>"
+            "<section class=card>"
+            "<div class=acct>"
+            f"<div class=avatar>{inicial}</div>"
+            f"<div><div class=aname>{esc(yo)}</div><div class=arole>{_rol_badge(mirol)}</div></div>"
+            "</div>"
+            "<h3 class=ch>Cambiar mi clave</h3>"
             "<form method=post action='/perfil'>"
             "<input type=hidden name=accion value=mi_clave>"
-            "<label>Clave actual</label><input type=password name=actual autocomplete=current-password required>"
-            "<label>Clave nueva</label><input type=password name=nueva autocomplete=new-password required>"
-            "<div class=hint>Minimo 6 caracteres.</div>"
-            "<label>Repetir clave nueva</label><input type=password name=nueva2 autocomplete=new-password required>"
-            "<button type=submit>Actualizar mi clave</button></form></div>")
+            "<div class=field><label>Clave actual</label>"
+            "<input type=password name=actual autocomplete=current-password required></div>"
+            "<div class=grid2>"
+            "<div class=field><label>Clave nueva</label>"
+            "<input type=password name=nueva autocomplete=new-password required>"
+            "<div class=hint>Minimo 6 caracteres.</div></div>"
+            "<div class=field><label>Repetir clave nueva</label>"
+            "<input type=password name=nueva2 autocomplete=new-password required></div>"
+            "</div>"
+            "<div class=actions><button class=primary type=submit>Actualizar mi clave</button></div>"
+            "</form></section>")
     else:
-        card_pw = "<div class=card><p>Autenticacion desactivada (sin usuarios configurados en el servidor).</p></div>"
+        card_pw = "<section class=card><p>Autenticacion desactivada (sin usuarios configurados en el servidor).</p></section>"
     # --- tarjeta: gestion de usuarios (solo admin) ---
     card_users = ""
     if es_admin and yo:
         rows = []
         for r in cargar_usuarios():
-            un = esc(r.get("user", "")); rl = r.get("role", "admin")
+            uraw = r.get("user", ""); un = esc(uraw); rl = r.get("role", "admin")
             sa = " selected" if rl == "admin" else ""
             sl = " selected" if rl == "lectura" else ""
+            eres_tu = ' <span class=me>tu</span>' if uraw == yo else ''
             rows.append(
-                f"<tr><td class=mono>{un}{' <span class=me>(tu)</span>' if r.get('user')==yo else ''}</td>"
-                "<td><form method=post action='/perfil' class=inl>"
+                f"<tr><td><span class=uname>{un}</span>{eres_tu}</td>"
+                f"<td>{_rol_badge(rl)}</td>"
+                "<td class=acts>"
+                "<form method=post action='/perfil' class=inl>"
                 "<input type=hidden name=accion value=rol_user>"
                 f"<input type=hidden name=user value='{un}'>"
                 f"<select name=role><option value=admin{sa}>admin</option><option value=lectura{sl}>lectura</option></select>"
-                "<button class=mini type=submit>Cambiar</button></form></td>"
-                "<td style='text-align:right'><form method=post action='/perfil' class=inl "
+                "<button class=mini type=submit>Cambiar rol</button></form>"
+                "<form method=post action='/perfil' class=inl "
                 f"onsubmit=\"return confirm('Eliminar al usuario {un}?')\">"
                 "<input type=hidden name=accion value=del_user>"
                 f"<input type=hidden name=user value='{un}'>"
-                "<button class='mini danger' type=submit>Eliminar</button></form></td></tr>")
+                "<button class='mini danger' type=submit>Eliminar</button></form>"
+                "</td></tr>")
         card_users = (
-            "<div class=card><h2>Usuarios</h2>"
-            "<p class=sub2>Los de <b>solo lectura</b> ven los paneles y reportes pero no pueden editar "
-            "exclusiones, actualizar reglas ni gestionar usuarios.</p>"
-            "<table class=ut><thead><tr><th>Usuario</th><th>Rol</th><th></th></tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody></table>"
-            "<h3>Agregar usuario</h3>"
+            "<section class=card><h2>Usuarios</h2>"
+            "<p class=sub2>Los de <b>solo lectura</b> ven paneles y reportes pero no editan "
+            "exclusiones, ni actualizan reglas, ni gestionan usuarios.</p>"
+            "<div class=twrap><table class=ut><thead><tr><th>Usuario</th><th>Rol</th><th></th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>"
+            "<h3 class=ch>Agregar usuario</h3>"
             "<form method=post action='/perfil'>"
             "<input type=hidden name=accion value=add_user>"
-            "<label>Usuario</label><input type=text name=nuser autocomplete=off required>"
-            "<label>Clave</label><input type=password name=npass autocomplete=new-password required>"
-            "<div class=hint>Minimo 6 caracteres.</div>"
-            "<label>Rol</label><select name=nrole class=full>"
-            "<option value=lectura>Solo lectura</option><option value=admin>Administrador</option></select>"
-            "<button type=submit>Crear usuario</button></form></div>")
+            "<div class=addgrid>"
+            "<div class=field><label>Usuario</label><input type=text name=nuser autocomplete=off required></div>"
+            "<div class=field><label>Clave</label><input type=password name=npass autocomplete=new-password required></div>"
+            "<div class=field><label>Rol</label><select name=nrole>"
+            "<option value=lectura>Solo lectura</option><option value=admin>Administrador</option></select></div>"
+            "</div><div class=hint>La clave debe tener minimo 6 caracteres.</div>"
+            "<div class=actions><button class=primary type=submit>Crear usuario</button></div>"
+            "</form></section>")
     css = (
-        "body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
-        "main{max-width:640px;margin:0 auto;padding:26px 20px}h1{font-size:20px;margin:0 0 4px}"
-        "h2{font-size:16px;margin:0 0 6px}h3{font-size:14px;margin:22px 0 2px}"
-        ".sub{color:#52514e;font-size:13px;margin:0 0 20px}.sub2{color:#52514e;font-size:13px;margin:0 0 14px}"
-        ".card{border:1px solid #e7e6e2;border-radius:12px;padding:22px;background:#fff;margin-bottom:16px}"
-        "label{display:block;font-size:13px;color:#52514e;margin:14px 0 5px;font-weight:600}"
-        "input,select{width:100%;padding:9px 11px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui;box-sizing:border-box;background:#fff}"
+        "body{margin:0;background:#f6f6f4;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
+        "main{max-width:680px;margin:0 auto;padding:26px 20px 40px}"
+        "h1{font-size:22px;margin:0 0 2px}h2{font-size:16px;margin:0 0 4px}"
+        ".psub{color:#6b6a66;font-size:13px;margin:0 0 18px}.sub2{color:#6b6a66;font-size:12.5px;margin:2px 0 14px}"
+        ".card{border:1px solid #e7e6e2;border-radius:14px;padding:22px 22px 20px;background:#fff;margin-bottom:16px;"
+        "box-shadow:0 1px 3px rgba(0,0,0,.03)}"
+        ".ch{font-size:13px;color:#52514e;margin:18px 0 6px;padding-top:16px;border-top:1px solid #f0efec}"
+        ".acct{display:flex;align-items:center;gap:14px}"
+        ".avatar{width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#2a78d6,#1c5cab);"
+        "color:#fff;font:700 20px system-ui;display:flex;align-items:center;justify-content:center;flex:none}"
+        ".aname{font-size:17px;font-weight:700}.arole{margin-top:3px}"
+        ".rbadge{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;"
+        "background:#ecebe7;color:#52514e}"
+        ".rbadge.adm{background:#e7f0fb;color:#1c5cab}.rbadge.lec{background:#eceae6;color:#6b6a66}"
+        ".field{margin:12px 0 0}label{display:block;font-size:12.5px;color:#52514e;margin:0 0 5px;font-weight:600}"
+        "input,select{width:100%;padding:9px 11px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui;"
+        "box-sizing:border-box;background:#fff}"
         "input:focus,select:focus{outline:none;border-color:#2a78d6;box-shadow:0 0 0 3px rgba(42,120,214,.15)}"
-        "button{margin-top:20px;width:100%;padding:11px;background:#2a78d6;color:#fff;border:0;"
-        "border-radius:8px;font:600 14px system-ui;cursor:pointer}button:hover{background:#1c5cab}"
-        ".hint{color:#8a8a86;font-size:12px;margin-top:6px}"
-        ".ut{width:100%;border-collapse:collapse;font-size:13px;margin:6px 0}"
-        ".ut th{text-align:left;color:#52514e;font-weight:600;padding:6px 8px;border-bottom:1px solid #eee}"
-        ".ut td{padding:6px 8px;border-bottom:1px solid #f2f1ee;vertical-align:middle}"
-        ".ut .mono{font-family:ui-monospace,Consolas,monospace}.me{color:#2a78d6;font-size:11px}"
-        ".inl{display:inline-flex;gap:6px;align-items:center;margin:0}"
-        ".inl select{width:auto;padding:5px 8px}"
-        "button.mini{margin:0;width:auto;padding:6px 12px;font-size:12px;background:#eef2f7;color:#0b0b0b;border:1px solid #d7d6d2}"
-        "button.mini:hover{background:#e2eaf4}"
+        ".grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}"
+        ".addgrid{display:grid;grid-template-columns:1.2fr 1.2fr .9fr;gap:14px}"
+        "@media(max-width:560px){.grid2,.addgrid{grid-template-columns:1fr}}"
+        ".hint{color:#9a9a95;font-size:12px;margin-top:6px}"
+        ".actions{margin-top:18px}"
+        "button.primary{padding:10px 18px;background:#2a78d6;color:#fff;border:0;border-radius:9px;"
+        "font:600 14px system-ui;cursor:pointer}button.primary:hover{background:#1c5cab}"
+        ".twrap{overflow-x:auto;border:1px solid #eee;border-radius:10px;margin:6px 0 4px}"
+        ".ut{width:100%;border-collapse:collapse;font-size:13px}"
+        ".ut th{text-align:left;color:#8a8a86;font-weight:600;padding:9px 12px;background:#fafafa;border-bottom:1px solid #eee}"
+        ".ut td{padding:9px 12px;border-bottom:1px solid #f2f1ee;vertical-align:middle}"
+        ".ut tbody tr:last-child td{border-bottom:0}.ut tbody tr:hover{background:#fafbfd}"
+        ".uname{font-family:ui-monospace,Consolas,monospace;font-weight:600}"
+        ".me{background:#e7f0fb;color:#1c5cab;font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;margin-left:6px}"
+        ".acts{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}"
+        ".inl{display:inline-flex;gap:6px;align-items:center;margin:0}.inl select{width:auto;padding:6px 8px}"
+        "button.mini{padding:7px 12px;font-size:12px;font-weight:600;background:#eef2f7;color:#243b53;"
+        "border:1px solid #d7dee8;border-radius:8px;cursor:pointer}button.mini:hover{background:#e2eaf4}"
         "button.mini.danger{background:#fdecea;color:#c0392b;border-color:#f3c9c4}"
-        "button.mini.danger:hover{background:#e34948;color:#fff;border-color:#e34948}")
+        "button.mini.danger:hover{background:#e34948;color:#fff;border-color:#e34948}"
+        ".banner{padding:11px 14px;border-radius:9px;margin-bottom:16px;font-size:13px;color:#fff}"
+        ".banner.ok{background:#1baf7a}.banner.err{background:#e34948}")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Perfil</title>"
             f"<style>{css}</style></head><body>"
             + nav("/perfil") +
             "<main><h1>Perfil</h1>"
-            "<p class=sub>Tu cuenta y, si eres administrador, la gestion de usuarios del panel.</p>"
+            "<p class=psub>Tu cuenta y, si eres administrador, la gestion de usuarios del panel.</p>"
             + banner + card_pw + card_users +
             "</main></body></html>")
 
@@ -3171,6 +3212,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

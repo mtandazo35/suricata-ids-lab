@@ -1772,16 +1772,35 @@ tu monitoreo SNMP). Agregar, editar y eliminar; se explica mas abajo.</td></tr>
 </ul>
 
 <h2>Colores de gravedad</h2>
-<table><tr><th>Etiqueta</th><th>Que significa</th><th>Que hacer</th></tr>
+<p>Cada alerta se clasifica por el texto de su firma. Se evalua de arriba hacia abajo y
+gana la primera que coincide, asi que lo mas grave manda. Estas son <b>todas</b> las etiquetas:</p>
+<table><tr><th>Etiqueta</th><th>Que significa</th><th>Palabras clave en la firma</th><th>Que hacer</th></tr>
 <tr><td><span class="b" style="background:#e34948">INFECTADO</span></td>
-<td>El equipo habla con un centro de mando (CnC/botnet/troyano). Infeccion confirmada.</td>
+<td>El equipo habla con un centro de mando (CnC/botnet/troyano). Es la mas grave:
+comunicacion real con el atacante, infeccion confirmada.</td>
+<td>cnc, c2, command and control, checkin, botnet, mirai, katana, trojan, ransom,
+coinminer, cryptominer, compromised.</td>
 <td>Aislar el equipo y avisar al cliente.</td></tr>
 <tr><td><span class="b" style="background:#eb6834">ATAQUE</span></td>
-<td>Escaneo o ataque saliente (SSH, puertos, exploits).</td><td>Revisar el equipo.</td></tr>
+<td>Escaneo o ataque saliente: el equipo esta agrediendo a otros (SSH, barrido de puertos,
+intento de exploit).</td>
+<td>scan, brute, exploit, attack, recon, sweep, portscan.</td>
+<td>Revisar el equipo.</td></tr>
 <tr><td><span class="b" style="background:#eda100">SOSPECHOSO</span></td>
-<td>Consulta a dominios de mala fama (.su, .cc, .top, dyndns). El destino suele ser tu
-propio DNS; el sospechoso es el equipo de origen.</td><td>Vigilar.</td></tr>
+<td>Consulta a dominios de mala fama (.su, .cc, .top, DNS dinamico como dyndns/duckdns/no-ip)
+o firma generica de malware/adware. El destino suele ser tu propio DNS; el sospechoso
+es el equipo de ORIGEN.</td>
+<td>malware, dns query, tld, dyndns, duckdns, no-ip, adware, pup, suspicious, hostile,
+observed dns.</td>
+<td>Vigilar; si se repite, revisar el equipo.</td></tr>
+<tr><td><span class="b" style="background:#8a8a86">OTRO</span></td>
+<td>Alerta que no encaja en ninguna categoria anterior (firma poco comun o de otro tipo).
+No es benigna &mdash; el ruido puramente informativo (ET INFO) ya se descarta antes.</td>
+<td>Cualquier otra firma (ninguna de las palabras de arriba).</td>
+<td>Revisar el detalle para entender que es.</td></tr>
 </table>
+<p class="muted" style="color:#52514e;font-size:12px">Nota: las alertas <b>ET INFO</b> (trafico
+informativo, no sospechoso) no se muestran en el panel ni cuentan en los reportes.</p>
 
 <h2>Modulo de Exclusiones</h2>
 <p>El apartado <b>Exclusiones</b> (en el menu de arriba) sirve para que ciertas IPs propias

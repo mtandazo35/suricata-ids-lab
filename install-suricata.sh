@@ -1048,6 +1048,10 @@ th.sortable.asc .ar,th.sortable.desc .ar{{opacity:1;color:{BLUE}}}
 td.num,td.mono{{white-space:nowrap}} .mono{{font-family:ui-monospace,Consolas,monospace}}
 td.num{{text-align:right;font-variant-numeric:tabular-nums}}
 .tablewrap{{overflow-x:auto}}
+.detbar{{display:flex;align-items:center;gap:12px;margin:2px 0 12px;flex-wrap:wrap}}
+.detsearch{{padding:8px 12px;border:1px solid {GRID};border-radius:8px;font:13px system-ui;width:300px;max-width:100%}}
+.detsearch:focus{{outline:none;border-color:{BLUE};box-shadow:0 0 0 3px rgba(42,120,214,.15)}}
+@media print{{.detbar{{display:none}}}}
 .pager{{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}}
 .pager button{{font:13px system-ui;padding:6px 12px;border:1px solid {GRID};background:#fff;border-radius:8px;cursor:pointer;color:{INK}}}
 .pager button:hover:not(:disabled){{background:#eef4fd;border-color:{BLUE}}}
@@ -1083,6 +1087,7 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
   {top_sec}
   <section class="card">
     <h2>Detalle: quien ataca, a donde, por que puerto, cuando y por cuanto tiempo</h2>
+    <div class="detbar"><input id="detbuscar" class="detsearch" placeholder="Filtrar por IP, puerto, protocolo, firma..."><span id="detcount" class="muted"></span></div>
     <div class="tablewrap"><table id="detalle">
       <thead><tr>
       <th class="sortable" data-col="0">IP origen<span class="ar">&#8597;</span></th>
@@ -1105,21 +1110,33 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
     <script>
     (function(){{
       var tbody=document.querySelector('#detalle tbody');
-      var rows=[].slice.call(tbody.querySelectorAll('tr'));
-      var per=20, n=Math.max(1,Math.ceil(rows.length/per)), p=1;
+      var all=[].slice.call(tbody.querySelectorAll('tr'));
+      var rows=all.slice();
+      var per=20, p=1;
       var pager=document.getElementById('pager');
-      var small=rows.length<=per;
-      if(small && pager) pager.style.display='none';
-      function rd(){{var m=(location.hash||'').match(/p=(\\d+)/); return m?Math.min(n,Math.max(1,+m[1])):1;}}
+      var buscar=document.getElementById('detbuscar');
+      var cnt=document.getElementById('detcount');
+      function npag(){{return Math.max(1,Math.ceil(rows.length/per));}}
       function draw(){{
-        if(small){{for(var i=0;i<rows.length;i++) rows[i].style.display=''; return;}}
-        for(var i=0;i<rows.length;i++) rows[i].style.display=(i>=(p-1)*per&&i<p*per)?'':'none';
-        document.getElementById('pgi').textContent='Pagina '+p+' de '+n;
-        document.getElementById('prev').disabled=(p<=1);
-        document.getElementById('next').disabled=(p>=n);
+        for(var i=0;i<all.length;i++) all[i].style.display='none';
+        var small=rows.length<=per;
+        if(pager) pager.style.display=(small||rows.length===0)?'none':'';
+        for(var i=0;i<rows.length;i++) rows[i].style.display=(small||(i>=(p-1)*per&&i<p*per))?'':'none';
+        if(pager && !small){{
+          document.getElementById('pgi').textContent='Pagina '+p+' de '+npag();
+          document.getElementById('prev').disabled=(p<=1);
+          document.getElementById('next').disabled=(p>=npag());
+        }}
+        if(cnt) cnt.textContent=(rows.length===all.length? '' : rows.length+' de '+all.length+' filas');
       }}
-      function go(x){{p=Math.min(n,Math.max(1,x)); try{{location.hash='p='+p;}}catch(e){{}} draw();}}
-      // ordenar al pulsar un encabezado: 1er clic ascendente, 2do descendente
+      function go(x){{p=Math.min(npag(),Math.max(1,x)); draw();}}
+      function filtrar(){{
+        var q=((buscar&&buscar.value)||'').toLowerCase().trim();
+        try{{sessionStorage.setItem('detq',q);}}catch(e){{}}
+        rows = q ? all.filter(function(tr){{return tr.textContent.toLowerCase().indexOf(q)>=0;}}) : all.slice();
+        p=1; draw();
+      }}
+      // ordenar al pulsar un encabezado: 1er clic ascendente, 2do descendente (sobre lo filtrado)
       var ths=[].slice.call(document.querySelectorAll('#detalle thead th.sortable'));
       function val(tr,i){{
         var td=tr.children[i]; if(!td) return '';
@@ -1139,13 +1156,15 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
           p=1; draw();
         }};
       }});
-      if(!small){{
-        p=rd();
+      if(pager){{
         document.getElementById('prev').onclick=function(){{go(p-1);}};
         document.getElementById('next').onclick=function(){{go(p+1);}};
-        window.addEventListener('hashchange',function(){{p=rd();draw();}});
       }}
-      draw();
+      if(buscar){{
+        buscar.oninput=filtrar;
+        try{{var sq=sessionStorage.getItem('detq'); if(sq) buscar.value=sq;}}catch(e){{}}
+      }}
+      filtrar();
     }})();
     </script>
     <p class="muted">Top {len(filas)} flujos por numero de alertas. Se excluye ruido informativo (ET INFO).</p>
@@ -2932,6 +2951,9 @@ class H(BaseHTTPRequestHandler):
                            "esta generando; aparecera en unos minutos.</p></section>")
             page = (f"<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
                     f"<meta name=viewport content='width=device-width,initial-scale=1'>"
+                    # se recarga solo cada 2 min para tomar el reporte nuevo (cada 30 min);
+                    # el filtro de busqueda persiste en sessionStorage, no se pierde al recargar
+                    f"<meta http-equiv=refresh content=120>"
                     f"<title>Detalle de ataques</title>{head_css}</head><body>{nav('/detalle')}"
                     f"<main>{detalle}</main></body></html>")
             return self._html(page)
@@ -4047,6 +4069,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

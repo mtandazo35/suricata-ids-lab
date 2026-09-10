@@ -1745,6 +1745,44 @@ def cargar_empresa():
         pass
     return {"nombre": "", "logo": ""}
 
+TRUST_FILE = "/etc/suricata-dashboard-trust.json"
+
+def cargar_confianza():
+    """Lista de IPs/CIDR de confianza. Vacia = acceso abierto (con bloqueo por fallos)."""
+    try:
+        d = json.load(open(TRUST_FILE, encoding="utf-8"))
+        if isinstance(d, list):
+            return [str(x) for x in d if x]
+    except (OSError, ValueError):
+        pass
+    return []
+
+def guardar_confianza(lst):
+    tmp = TRUST_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(lst, f, ensure_ascii=False)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, TRUST_FILE)
+
+def ip_en_lista(ip, lst):
+    import ipaddress
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    for c in lst:
+        try:
+            if a in ipaddress.ip_network(c, strict=False):
+                return True
+        except ValueError:
+            pass
+    return False
+
+def ip_confiable(ip):
+    """True si la IP puede acceder: con lista vacia todos; con lista, solo las incluidas."""
+    lst = cargar_confianza()
+    return True if not lst else ip_en_lista(ip, lst)
+
 def guardar_empresa(d):
     tmp = EMPRESA_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -2115,10 +2153,34 @@ def perfil_page(msg="", ok=False, edit_user=None):
                     f"<th>Usuario</th><th>Resultado</th></tr></thead><tbody>{rrows}</tbody></table></div>")
         else:
             rtab = "<p class=sub2>Sin intentos registrados todavia.</p>"
+        # IPs de confianza (allowlist del panel)
+        trust = cargar_confianza()
+        myip = getattr(CTX, "ip", "?")
+        if trust:
+            crows = "".join(
+                f"<tr><td class=mono>{esc(t)}</td>"
+                "<td class=acts><form method=post action='/perfil' class=inl>"
+                "<input type=hidden name=accion value=del_trust>"
+                f"<input type=hidden name=ip value='{esc(t)}'>"
+                "<button class='mini danger' type=submit>Quitar</button></form></td></tr>"
+                for t in trust)
+            ctab = ("<div class=twrap><table class=ut><thead><tr><th>IP / CIDR de confianza</th><th></th>"
+                    f"</tr></thead><tbody>{crows}</tbody></table></div>"
+                    "<p class=sub2 style='color:#12805a'><b>Activo:</b> solo estas IPs pueden entrar al panel.</p>")
+        else:
+            ctab = ("<p class=sub2>Sin IPs de confianza: <b>cualquiera</b> puede intentar entrar y se "
+                    "<b>bloquea tras 8 fallos</b>. Si agregas IPs aqui, <b>solo esas</b> podran acceder.</p>")
+        addc = (
+            "<form method=post action='/perfil' class=fotoform style='margin-top:4px'>"
+            "<input type=hidden name=accion value=add_trust>"
+            f"<input type=text name=ip placeholder='IP o CIDR (ej. {esc(myip)} o 10.0.0.0/24)' style='flex:1;min-width:200px'>"
+            "<button class=primary type=submit>Agregar</button></form>"
+            f"<p class=sub2>Tu IP actual es <b class=mono>{esc(myip)}</b>. "
+            "Agregala (o un rango que la incluya) antes de restringir, o quedarias fuera.</p>")
         card_acceso = (
             "<section class=card><h2>Accesos y seguridad</h2>"
-            "<p class=sub2>Tras 8 fallos, una IP se bloquea 10 min. Aqui ves y desbloqueas falsos positivos, "
-            "y el historial de intentos (IP + usuario).</p>"
+            "<p class=sub2>Controla quien puede entrar al panel y revisa los intentos de acceso.</p>"
+            "<h3 class=ch>IPs de confianza</h3>" + ctab + addc +
             "<h3 class=ch>IPs bloqueadas ahora</h3>" + blq +
             "<h3 class=ch>Ultimos intentos de acceso</h3>" + rtab +
             "</section>")
@@ -2692,7 +2754,7 @@ class H(BaseHTTPRequestHandler):
         return self._rol() != "lectura"
     def _set_ctx(self):
         s = self._sesion()
-        CTX.user = s.get("user"); CTX.role = s.get("role")
+        CTX.user = s.get("user"); CTX.role = s.get("role"); CTX.ip = self._client_ip()
     def _auth_ok(self):
         if not cargar_usuarios():
             return True  # sin usuarios (PASS vacia en .conf): sin auth, solo tras VPN/proxy
@@ -2730,6 +2792,11 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(img)
             return
+        if not ip_confiable(self._client_ip()):
+            return self._html("<!doctype html><meta charset=utf-8><title>Acceso restringido</title>"
+                              "<div style='font:15px system-ui;max-width:520px;margin:60px auto;padding:24px;text-align:center'>"
+                              "<h2>Acceso restringido</h2><p style='color:#52514e'>Tu IP no esta en la lista de "
+                              "IPs de confianza del panel.</p></div>", 403)
         if path == "/login":
             if self._auth_ok():
                 return self._redirect("/")
@@ -2824,10 +2891,14 @@ class H(BaseHTTPRequestHandler):
         except Exception:
             body = ""
         q = urllib.parse.parse_qs(body)
+        if not ip_confiable(self._client_ip()):
+            return self._html("<h1>Acceso restringido</h1>", 403)
         if ruta == "/login":
             ip = self._client_ip()
             u = q.get("usuario", [""])[0]; p = q.get("clave", [""])[0]
-            espera = login_bloqueado(ip)
+            # el bloqueo por fuerza bruta solo aplica cuando NO hay lista de confianza;
+            # con lista, el acceso ya esta restringido a IPs de confianza (no hay que bloquearlas)
+            espera = login_bloqueado(ip) if not cargar_confianza() else 0
             if espera > 0:
                 login_registrar(ip, u, "BLOQUEADO")
                 time.sleep(1)
@@ -2841,7 +2912,8 @@ class H(BaseHTTPRequestHandler):
                 for k in [k for k, v in SESSIONS.items() if v.get("exp", 0) < time.time()]:
                     SESSIONS.pop(k, None)
                 return self._redirect("/", cookie=f"sid={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}")
-            login_fallo(ip)
+            if not cargar_confianza():
+                login_fallo(ip)   # solo se cuenta para bloquear si no hay lista de confianza
             login_registrar(ip, u, "FAIL")
             time.sleep(1)   # ralentiza la fuerza bruta
             return self._html(login_page("Usuario o clave incorrectos."))
@@ -2927,6 +2999,37 @@ class H(BaseHTTPRequestHandler):
             existia = LOGIN_FAILS.pop(ip, None)
             login_registrar(self._client_ip(), CTX.user or "?", f"DESBLOQUEO {ip}")
             return self._html(perfil_page(f"IP {ip} desbloqueada." if existia else f"La IP {ip} no estaba bloqueada.", ok=bool(existia)))
+        if accion == "add_trust":
+            import ipaddress
+            val = q.get("ip", [""])[0].strip()
+            try:
+                ipaddress.ip_network(val, strict=False)
+            except ValueError:
+                return self._html(perfil_page("IP o CIDR invalido.", ok=False))
+            lst = cargar_confianza()
+            if val in lst:
+                return self._html(perfil_page("Esa IP ya esta en la lista.", ok=False))
+            nueva = lst + [val]
+            # proteccion: no habilitar/ampliar la lista si tu IP actual queda fuera
+            if not ip_en_lista(self._client_ip(), nueva):
+                return self._html(perfil_page(
+                    f"Agrega primero tu IP actual ({self._client_ip()}) o quedarias fuera del panel.", ok=False))
+            try:
+                guardar_confianza(nueva)
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            return self._html(perfil_page(f"IP de confianza agregada: {val}. Ahora solo estas IPs pueden entrar.", ok=True))
+        if accion == "del_trust":
+            val = q.get("ip", [""])[0]
+            nueva = [x for x in cargar_confianza() if x != val]
+            if nueva and not ip_en_lista(self._client_ip(), nueva):
+                return self._html(perfil_page("No puedes quitar tu propia IP mientras la lista siga activa.", ok=False))
+            try:
+                guardar_confianza(nueva)
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            extra = " La lista quedo vacia: acceso abierto con bloqueo por fallos." if not nueva else ""
+            return self._html(perfil_page(f"IP {val} quitada de confianza.{extra}", ok=True))
         if accion == "add_user":
             nu = (q.get("nuser", [""])[0]).strip()
             npw = q.get("npass", [""])[0]
@@ -3750,6 +3853,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

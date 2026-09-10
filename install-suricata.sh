@@ -3436,19 +3436,31 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> /tmp/suricata-panel-update.log
 trap 'rm -f "$TMP"' EXIT
 log "descargando $REPO"
 curl -fsSL "$REPO" -o "$TMP" || { log "descarga fallo"; exit 1; }
-extraer() { # $1=linea-inicio (substr)  $2=marcador-fin  $3=destino
-  awk -v s="$1" -v e="$2" 'index($0,s){f=1;next} f&&$0==e{exit} f{print}' "$TMP" > "$3.new"
+extraer() { # $1=linea-inicio (substr)  $2=marcador-fin  $3=destino  $4=validador(py|sh)
+  # !f: solo marca el inicio la PRIMERA vez, asi las lineas del cuerpo que contengan el
+  # marcador (p.ej. el propio actualizador) no rompen la extraccion.
+  awk -v s="$1" -v e="$2" '!f && index($0,s){f=1;next} f&&$0==e{exit} f{print}' "$TMP" > "$3.new"
   [ -s "$3.new" ] || { log "extraccion vacia: $3"; return 1; }
-  python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$3.new" || { log "invalido: $3"; return 1; }
+  if [ "$4" = "sh" ]; then
+    sh -n "$3.new" || { log "sh invalido: $3"; return 1; }
+  else
+    python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$3.new" || { log "py invalido: $3"; return 1; }
+  fi
 }
-extraer "cat > /usr/local/bin/suricata-dashboard <<'DASH'" "DASH" /usr/local/bin/suricata-dashboard || exit 1
-extraer "cat > /usr/local/bin/suricata-html-report <<'HREP'" "HREP" /usr/local/bin/suricata-html-report || exit 1
-# aplicar solo si AMBOS validaron
+extraer "cat > /usr/local/bin/suricata-dashboard <<'DASH'" "DASH" /usr/local/bin/suricata-dashboard py || exit 1
+extraer "cat > /usr/local/bin/suricata-html-report <<'HREP'" "HREP" /usr/local/bin/suricata-html-report py || exit 1
+# el actualizador se auto-actualiza tambien (si falla, se sigue con lo demas)
+extraer "cat > /usr/local/bin/suricata-panel-update <<'UPDSH'" "UPDSH" /usr/local/bin/suricata-panel-update sh || log "no se autoactualizo el updater"
+# aplicar (dashboard y report son obligatorios; el updater si se pudo)
 mv /usr/local/bin/suricata-dashboard.new     /usr/local/bin/suricata-dashboard
 mv /usr/local/bin/suricata-html-report.new   /usr/local/bin/suricata-html-report
-chmod 755 /usr/local/bin/suricata-dashboard /usr/local/bin/suricata-html-report
+[ -f /usr/local/bin/suricata-panel-update.new ] && mv /usr/local/bin/suricata-panel-update.new /usr/local/bin/suricata-panel-update
+chmod 755 /usr/local/bin/suricata-dashboard /usr/local/bin/suricata-html-report /usr/local/bin/suricata-panel-update
 date '+%Y-%m-%d %H:%M:%S' > /etc/suricata-dashboard.updated
-log "actualizado OK; reiniciando panel"
+log "actualizado OK; regenerando reporte y reiniciando panel"
+# regenerar el reporte YA con el codigo nuevo, para que los cambios (tablas/graficos) se
+# vean sin esperar los 30 min del ciclo normal
+/usr/local/bin/suricata-html-report >/dev/null 2>&1 || true
 systemctl restart suricata-dashboard
 UPDSH
 chmod 755 /usr/local/bin/suricata-panel-update

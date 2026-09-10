@@ -33,6 +33,7 @@ Opciones (se pasan tras `bash -s --`):
 | `-p PUERTO` | puerto de la web | `5636` |
 | `-P CLAVE` | clave del usuario web `admin` | aleatoria (se muestra al final) |
 | `-t` | **receptor TZSP** (UDP 37008) para espejo MikroTik | apagado |
+| `-m IP[,IP]` | con `-t`: **IP/CIDR del MikroTik** que envia el espejo. Restringe UFW y el receptor solo a ese origen (recomendado). Sin `-m`, 37008/udp queda abierto a todos | abierto |
 | `-W` | **sin web**, solo Suricata + logs | web activada |
 
 ```bash

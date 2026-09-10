@@ -38,12 +38,15 @@ trap 'rc=$?; printf "%s[x]%s Fallo (exit %s) en la linea %s: %s\n" "$c_r" "$c_0"
 
 usage(){
   cat <<'USAGE'
-Uso: sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] [-t] [-W] [-h]
+Uso: sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] [-m ORIGEN] [-t] [-W] [-h]
 
   -i IFACE     interfaz a escuchar (default: auto-deteccion por ruta default)
   -n HOME_NET  red(es) "casa" en CIDR, separadas por coma (default: la de la interfaz)
   -p PUERTO    puerto de la web EveBox (default: 5636)
   -P CLAVE     clave del usuario web 'admin' (default: aleatoria, se muestra al final)
+  -m ORIGEN    con -t: IP/CIDR del MikroTik que envia el espejo TZSP (una o varias,
+               separadas por coma). Restringe UFW y el receptor a ese origen.
+               Sin -m, el receptor 37008/udp queda abierto a cualquier origen (no recomendado).
   -t           receptor TZSP (UDP 37008) para espejo desde MikroTik
   -W           sin web (solo Suricata + logs locales)
   -h           esta ayuda
@@ -56,13 +59,14 @@ USAGE
 [ "$(id -u)" -eq 0 ] || die "Ejecuta como root (sudo)."
 
 # ----------------------------------------------------------------------------- args
-IFACE=""; HOME_NET=""; HOME_NET_GIVEN=0; WEB=1; WEB_PORT=5636; WEB_PASS=""; TZSP=0; TZSP_PORT=37008
-while getopts "i:n:p:P:tWh" opt; do
+IFACE=""; HOME_NET=""; HOME_NET_GIVEN=0; WEB=1; WEB_PORT=5636; WEB_PASS=""; TZSP=0; TZSP_PORT=37008; MIRROR_SRC=""
+while getopts "i:n:p:P:m:tWh" opt; do
   case "$opt" in
     i) IFACE="$OPTARG" ;;
     n) HOME_NET="$OPTARG"; HOME_NET_GIVEN=1 ;;
     p) WEB_PORT="$OPTARG" ;;
     P) WEB_PASS="$OPTARG" ;;
+    m) MIRROR_SRC="$OPTARG" ;;
     t) TZSP=1 ;;
     W) WEB=0 ;;
     h) usage; exit 0 ;;
@@ -158,7 +162,7 @@ if [ "$TZSP" -eq 1 ]; then
   done
   ok "Reglas de ruido stream/app-layer desactivadas (espejo TZSP)."
 fi
-suricata-update --no-test >/dev/null 2>&1 || suricata-update --no-test || warn "suricata-update reporto avisos (normal la 1a vez)."
+suricata-update >/dev/null 2>&1 || suricata-update || warn "suricata-update reporto avisos (normal la 1a vez); valida las reglas antes de recargar."
 RULES_COUNT="$(grep -c '^alert' /var/lib/suricata/rules/suricata.rules 2>/dev/null || true)"; RULES_COUNT="${RULES_COUNT:-?}"
 ok "Reglas cargadas: ${RULES_COUNT}"
 
@@ -201,8 +205,10 @@ ok "Reglas propias de escaneo saliente: ${LOCAL_COUNT} (local.rules)."
 cat > /usr/local/bin/suricata-rules-update <<'UPD'
 #!/bin/sh
 # Actualiza reglas ET Open y recarga Suricata sin reiniciar (rule-reload).
+# suricata-update VALIDA las reglas (suricata -T) al final; si el test falla sale
+# con error y NO se recarga, evitando cargar un set roto en produccion.
 set -e
-suricata-update --no-test >/tmp/suricata-update.log 2>&1 || { echo "suricata-update fallo:"; cat /tmp/suricata-update.log; exit 1; }
+suricata-update >/tmp/suricata-update.log 2>&1 || { echo "suricata-update fallo (reglas no validadas, NO se recarga):"; cat /tmp/suricata-update.log; exit 1; }
 if command -v suricatasc >/dev/null 2>&1 && systemctl is-active --quiet suricata; then
   suricatasc -c reload-rules >/dev/null 2>&1 || systemctl reload suricata || systemctl restart suricata
 fi
@@ -1210,8 +1216,35 @@ def hora_ec(ts):
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-SESSIONS = {}          # token -> epoch de expiracion
+SESSIONS = {}          # token -> {user, role, exp}
 SESSION_TTL = 12 * 3600
+
+# anti-fuerza-bruta del login: por IP de origen
+LOGIN_FAILS = {}       # ip -> [intentos, primer_ts]
+LOGIN_MAX = 8          # fallos permitidos por ventana
+LOGIN_WINDOW = 600     # ventana y duracion del bloqueo (segundos)
+
+def login_bloqueado(ip):
+    """Segundos restantes de bloqueo para esa IP, o 0 si puede intentar."""
+    r = LOGIN_FAILS.get(ip)
+    if not r:
+        return 0
+    intentos, t0 = r
+    if time.time() - t0 > LOGIN_WINDOW:
+        LOGIN_FAILS.pop(ip, None)
+        return 0
+    return int(LOGIN_WINDOW - (time.time() - t0)) if intentos >= LOGIN_MAX else 0
+
+def login_fallo(ip):
+    now = time.time()
+    r = LOGIN_FAILS.get(ip)
+    if not r or now - r[1] > LOGIN_WINDOW:
+        LOGIN_FAILS[ip] = [1, now]
+    else:
+        r[0] += 1
+    if len(LOGIN_FAILS) > 5000:   # poda de entradas viejas
+        for k in [k for k, v in LOGIN_FAILS.items() if now - v[1] > LOGIN_WINDOW]:
+            LOGIN_FAILS.pop(k, None)
 
 EVE = "/var/log/suricata/eve.json"
 
@@ -1592,6 +1625,23 @@ def _hash_pw(pw, salt=None):
     h = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), bytes.fromhex(salt), 200_000).hex()
     return salt, h
 
+def _blank_conf_pass():
+    """Deja PASS= vacio en el .conf: la clave real ya vive hasheada en users.json.
+    Evita la contrasena en texto plano en disco (y que el instalador la reimprima)."""
+    try:
+        lineas = open(CONF, encoding="utf-8").read().splitlines()
+    except OSError:
+        return
+    out = []
+    for l in lineas:
+        out.append("PASS=" if l.strip().startswith("PASS=") else l)
+    tmp = CONF + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONF)
+    CFG["PASS"] = ""
+
 def guardar_usuarios(lst):
     tmp = USERS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -1614,6 +1664,7 @@ def cargar_usuarios():
         lst = [{"user": u, "salt": salt, "hash": h, "role": "admin"}]
         try:
             guardar_usuarios(lst)
+            _blank_conf_pass()   # ya migrada y hasheada: borrar la clave en claro del .conf
         except OSError:
             pass
         return lst
@@ -2526,6 +2577,15 @@ class H(BaseHTTPRequestHandler):
             return m.value if m else None
         except Exception:
             return None
+    def _client_ip(self):
+        # detras de un proxy inverso, la IP real viene en X-Forwarded-For
+        xff = self.headers.get("X-Forwarded-For", "")
+        if xff:
+            return xff.split(",")[0].strip()
+        try:
+            return self.client_address[0]
+        except Exception:
+            return "?"
     def _sesion(self):
         return SESSIONS.get(self._sid()) or {}
     def _sesion_ok(self):
@@ -2671,14 +2731,22 @@ class H(BaseHTTPRequestHandler):
             body = ""
         q = urllib.parse.parse_qs(body)
         if ruta == "/login":
+            ip = self._client_ip()
+            espera = login_bloqueado(ip)
+            if espera > 0:
+                time.sleep(1)
+                return self._html(login_page(f"Demasiados intentos fallidos. Espera {espera//60 + 1} min e intenta de nuevo."))
             u = q.get("usuario", [""])[0]; p = q.get("clave", [""])[0]
             role = verificar_login(u, p)
             if role:
+                LOGIN_FAILS.pop(ip, None)   # login correcto: limpia el contador
                 token = secrets.token_urlsafe(24)
                 SESSIONS[token] = {"user": u, "role": role, "exp": time.time() + SESSION_TTL}
                 for k in [k for k, v in SESSIONS.items() if v.get("exp", 0) < time.time()]:
                     SESSIONS.pop(k, None)
                 return self._redirect("/", cookie=f"sid={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}")
+            login_fallo(ip)
+            time.sleep(1)   # ralentiza la fuerza bruta
             return self._html(login_page("Usuario o clave incorrectos."))
         if not self._auth_ok():
             return self._deny()
@@ -3032,10 +3100,27 @@ Formato TZSP: version(1)=1 | type(1) 0=recibido,1=tx | encap(2) 1=Ethernet |
 tags: 0x00=padding (sin longitud), 0x01=END (sin longitud), otros: len(1)+data |
 payload = trama Ethernet completa.
 """
-import os, socket, struct, sys, time
+import ipaddress, os, socket, struct, sys, time
 
 PORT = int(os.environ.get("TZSP_PORT", "37008"))
 OUT_IF = os.environ.get("TZSP_OUT_IF", "ids-in")
+# origenes autorizados del espejo (MikroTik). Vacio = aceptar de cualquiera (compat).
+ALLOW = []
+for _c in os.environ.get("TZSP_ALLOW", "").replace(" ", "").split(","):
+    if _c:
+        try:
+            ALLOW.append(ipaddress.ip_network(_c, strict=False))
+        except ValueError:
+            pass
+
+def permitido(ip):
+    if not ALLOW:
+        return True
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(a in n for n in ALLOW)
 
 def decap(d):
     if len(d) < 5 or d[0] != 1 or d[1] not in (0, 1):
@@ -3064,12 +3149,16 @@ def main():
     rx.bind(("0.0.0.0", PORT))
     tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
     tx.bind((OUT_IF, 0))
-    print(f"tzsp-decap: escuchando UDP {PORT} -> {OUT_IF}", flush=True)
-    rxn = txn = bad = big = 0
+    print(f"tzsp-decap: escuchando UDP {PORT} -> {OUT_IF}"
+          + (f" (solo desde {os.environ.get('TZSP_ALLOW')})" if ALLOW else " (cualquier origen)"), flush=True)
+    rxn = txn = bad = big = rej = 0
     last = time.time()
     while True:
         d, peer = rx.recvfrom(65535)
         rxn += 1
+        if not permitido(peer[0]):
+            rej += 1
+            continue
         f = decap(d)
         if f is None or len(f) < 14:
             bad += 1
@@ -3081,7 +3170,7 @@ def main():
                 big += 1
         now = time.time()
         if now - last >= 60:
-            print(f"tzsp-decap: rx={rxn} tx={txn} descartados={bad} muy_grandes={big} ultimo_origen={peer[0]}", flush=True)
+            print(f"tzsp-decap: rx={rxn} tx={txn} descartados={bad} muy_grandes={big} rechazados_origen={rej} ultimo_origen={peer[0]}", flush=True)
             last = now
 
 if __name__ == "__main__":
@@ -3101,6 +3190,7 @@ Before=suricata.service
 [Service]
 Environment=TZSP_PORT=${TZSP_PORT}
 Environment=TZSP_OUT_IF=${TZSP_IN}
+Environment=TZSP_ALLOW=${MIRROR_SRC}
 # crea el par veth si no existe; sin IPv6 para que no meta ruido propio
 # las tramas reinyectadas NO deben entrar a la pila IP del kernel ni reenviarse
 ExecStartPre=/bin/sh -c 'ip link show ${TZSP_MON} >/dev/null 2>&1 || ip link add ${TZSP_IN} type veth peer name ${TZSP_MON}'
@@ -3163,8 +3253,16 @@ PY
   fi
   # que Suricata no inspeccione en ${IFACE} el propio flujo TZSP (doble CPU + "truncated").
   # Los datagramas TZSP >1500 B llegan fragmentados y los fragmentos no iniciales no
-  # tienen cabecera UDP: se excluyen tambien (ip[6:2] & 0x1fff = offset de fragmento).
-  BPF="not (udp port ${TZSP_PORT} or (ip[6:2] \& 0x1fff != 0))"
+  # tienen cabecera UDP. Para NO cegar el trafico espejeado que tambien viene fragmentado,
+  # solo se excluyen los fragmentos dirigidos AL PROPIO SENSOR (destino del espejo TZSP),
+  # no todos los fragmentos IPv4. Si no se puede determinar la IP del sensor, se cae al
+  # filtro amplio anterior (mejor sin falsos "truncated" que arriesgar el reensamblado).
+  SENSOR_IP="$(ip -o -4 addr show dev "$IFACE" scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')"
+  if [ -n "$SENSOR_IP" ]; then
+    BPF="not (udp port ${TZSP_PORT} or (ip[6:2] \& 0x1fff != 0 and dst host ${SENSOR_IP}))"
+  else
+    BPF="not (udp port ${TZSP_PORT} or (ip[6:2] \& 0x1fff != 0))"
+  fi
   BPF_LINE="    bpf-filter: \"${BPF}\""
   sed -i "/^\s*bpf-filter: \"not udp port ${TZSP_PORT}\"\s*$/d; /^\s*bpf-filter: \"not (udp port ${TZSP_PORT} or/d" "$CFG"
   sed -i "0,/^  - interface: ${IFACE}\$/s//&\n${BPF_LINE}/" "$CFG"
@@ -3473,8 +3571,19 @@ PUB_IP="$(ip -o -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($
 WEB_URL="https://${PUB_IP:-<IP>}:${WEB_PORT}"
 
 if [ "$TZSP" -eq 1 ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-  if ! ufw status | grep -qE "^${TZSP_PORT}/udp\s+ALLOW"; then
-    ufw allow "${TZSP_PORT}/udp" comment 'TZSP MikroTik' >/dev/null && ok "UFW: abierto ${TZSP_PORT}/udp para TZSP."
+  if [ -n "$MIRROR_SRC" ]; then
+    # abrir 37008/udp SOLO desde el/los origenes del espejo (MikroTik)
+    OLD_IFS=$IFS; IFS=','
+    for _src in $MIRROR_SRC; do
+      _src="$(echo "$_src" | tr -d ' ')"; [ -n "$_src" ] || continue
+      ufw status | grep -qE "^${TZSP_PORT}/udp\s+ALLOW\s+IN?\s+${_src}\b" \
+        || ufw allow from "$_src" to any port "${TZSP_PORT}" proto udp comment 'TZSP MikroTik' >/dev/null \
+        && ok "UFW: ${TZSP_PORT}/udp permitido solo desde ${_src}."
+    done
+    IFS=$OLD_IFS
+  elif ! ufw status | grep -qE "^${TZSP_PORT}/udp\s+ALLOW"; then
+    ufw allow "${TZSP_PORT}/udp" comment 'TZSP MikroTik' >/dev/null \
+      && warn "UFW: ${TZSP_PORT}/udp ABIERTO A CUALQUIER ORIGEN. Pasa -m <IP_MikroTik> para restringirlo."
   fi
 fi
 
@@ -3539,6 +3648,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

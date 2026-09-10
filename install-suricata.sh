@@ -1579,28 +1579,28 @@ _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"
               ("/perfil", "Perfil"), ("/documentacion", "Documentacion")]
 _NAV_CSS = """<style>
 .nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
-padding:0 22px;font:14px system-ui,-apple-system,Segoe UI,sans-serif;display:flex;align-items:center;gap:2px;
+padding:0 22px;font:14px system-ui,-apple-system,Segoe UI,sans-serif;display:flex;align-items:center;gap:4px;
 box-shadow:0 2px 10px rgba(0,0,0,.25)}
-.nav .brand{font-weight:700;font-size:15px;margin-right:20px;display:flex;align-items:center;gap:9px;letter-spacing:.2px}
+.nav .brand{font-weight:700;font-size:15px;margin-right:22px;display:flex;align-items:center;gap:9px;letter-spacing:.2px}
 .nav .brand img{height:24px;width:auto;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.4))}
-.nav a{color:#c3ccd8;text-decoration:none;padding:15px 13px;border-bottom:2px solid transparent;
-transition:color .15s,border-color .15s}
-.nav a:hover{color:#fff}
-.nav a.on{color:#fff;border-bottom-color:#2a78d6;font-weight:600}
-.nav .sp{margin-left:auto}
-.nav .act{color:#cfe0f5}
-.nav .out{color:#f3b0b0}
+.nav a.tab{position:relative;color:#c3ccd8;text-decoration:none;padding:9px 13px;margin:8px 1px;border-radius:8px;
+font-weight:500;transition:background .15s,color .15s}
+.nav a.tab:hover{color:#fff;background:rgba(255,255,255,.08)}
+.nav a.tab.on{color:#fff;background:rgba(42,120,214,.22);font-weight:600}
+.nav a.tab.on::after{content:"";position:absolute;left:13px;right:13px;bottom:-9px;height:2px;background:#2a78d6;border-radius:2px}
+.nav .out{margin-left:auto;color:#f3b0b0;text-decoration:none;font-weight:600;padding:7px 15px;border-radius:8px;
+border:1px solid rgba(243,176,176,.35);transition:background .15s,color .15s,border-color .15s}
+.nav .out:hover{background:#e34948;color:#fff;border-color:#e34948}
 </style>"""
 
 def nav(active=""):
     parts = []
     for h, t in _NAV_LINKS:
-        cls = ' class="on"' if h == active else ""
-        parts.append(f'<a href="{h}"{cls}>{t}</a>')
+        cls = "tab on" if h == active else "tab"
+        parts.append(f'<a href="{h}" class="{cls}">{t}</a>')
     return (_NAV_CSS +
             '<div class="nav"><span class="brand"><img src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
             + "".join(parts) +
-            '<a href="/" class="sp act">&#8635; Actualizar</a>'
             '<a href="/logout" class="out">Salir</a></div>')
 
 # compat: algunas plantillas todavia interpolan {NAV} (barra sin pestana activa marcada)
@@ -2873,6 +2873,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

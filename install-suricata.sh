@@ -826,7 +826,9 @@ def timeline(by_hour):
         bars.append(
             f'<rect x="{x:.1f}" y="{H-pad-bh:.1f}" width="{max(1,bw-1.5):.1f}" height="{bh:.1f}" rx="1.5" fill="{BLUE}">'
             f'<title>{rango}  ·  {v:,} alertas</title></rect>')
-        if i % tick_every == 0:
+        # etiquetas ancladas a la DERECHA: la ultima barra (intervalo actual) siempre
+        # lleva su hora, para que se vea que el eje llega hasta "ahora" y no se corta antes
+        if (n - 1 - i) % tick_every == 0:
             ticks.append(f'<text x="{x+bw/2:.1f}" y="{H-pad+14:.0f}" text-anchor="middle" class="tick">{t0.strftime("%H:%M")}</text>')
     pico_t = datetime.fromtimestamp((lo + vals.index(mx)) * BUCKET, TZ_EC).strftime("%H:%M") if mx else ""
     return (f'<section class="card wide"><h2>Ataques por hora y minuto (ultimas {HOURS}h)</h2>'

@@ -1889,7 +1889,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<input id=lfile type=file accept=image/* onchange=\"foto(this,'l')\">"
             "<button class=cancelbtn type=button onclick=\"quitarimg('l')\">Quitar imagen</button></div>"
             "<input type=hidden name=logo id=lavatar></div></div>"
-            "<div class=actions><button class=primary type=submit>Guardar empresa</button></div>"
+            "<div class=actions><button class=primary type=submit>Guardar</button></div>"
             "</form></section>")
     # --- tarjeta: gestion de usuarios estilo tabla (solo admin) ---
     card_users = ""
@@ -3539,6 +3539,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

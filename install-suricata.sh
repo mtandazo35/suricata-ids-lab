@@ -766,6 +766,22 @@ for p in files:
 # --- helpers de render (SVG inline, sin JS) ---
 BLUE = "#2a78d6"; GRID = "#e7e6e2"; INK = "#0b0b0b"; INK2 = "#52514e"; SURF = "#fcfcfb"
 
+def heat(f):
+    """Color segun magnitud (0..1): a mas valor, mas critico -> mas rojo.
+    Escala verde (bajo) -> ambar (medio) -> naranja -> rojo (alto)."""
+    f = 0.0 if f < 0 else (1.0 if f > 1 else f)
+    stops = [(0.0, (43, 120, 214)), (0.35, (27, 175, 122)),
+             (0.65, (237, 161, 0)), (0.85, (235, 104, 52)), (1.0, (227, 73, 72))]
+    for j in range(len(stops) - 1):
+        a, ca = stops[j]; b, cb = stops[j + 1]
+        if f <= b:
+            t = (f - a) / (b - a) if b > a else 0.0
+            r = int(ca[0] + (cb[0] - ca[0]) * t)
+            g = int(ca[1] + (cb[1] - ca[1]) * t)
+            bl = int(ca[2] + (cb[2] - ca[2]) * t)
+            return f"#{r:02x}{g:02x}{bl:02x}"
+    return "#e34948"
+
 def esc(x): return html.escape(str(x))
 
 def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_class="card", label_above=False):
@@ -789,7 +805,7 @@ def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_clas
             etq = name if len(name) <= maxch else name[:maxch - 1] + "…"
             rows.append(
                 f'<text x="2" y="{top+13}" class="lbl">{esc(etq)}</text>'
-                f'<rect x="2" y="{top+labh}" width="{w}" height="{barh}" rx="4" fill="{BLUE}"/>'
+                f'<rect x="2" y="{top+labh}" width="{w}" height="{barh}" rx="4" fill="{heat(v/mx)}"/>'
                 f'<text x="{w+8}" y="{top+labh+barh*0.7:.0f}" class="val">{esc(fmt(v))}</text>')
     else:
         rowh, gap = 26, 8
@@ -802,11 +818,14 @@ def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_clas
             etq = name if len(name) <= maxch else name[:maxch - 1] + "…"
             rows.append(
                 f'<text x="{lblw-8}" y="{y+rowh*0.68:.0f}" text-anchor="end" class="lbl">{esc(etq)}</text>'
-                f'<rect x="{lblw}" y="{y}" width="{w}" height="{rowh}" rx="4" fill="{BLUE}"/>'
+                f'<rect x="{lblw}" y="{y}" width="{w}" height="{rowh}" rx="4" fill="{heat(v/mx)}"/>'
                 f'<text x="{lblw+w+6}" y="{y+rowh*0.68:.0f}" class="val">{esc(fmt(v))}</text>')
     return (f'<section class="{card_class}"><h2>{esc(titulo)}</h2>'
             f'<svg viewBox="0 0 {W} {h}" width="100%" role="img" aria-label="{esc(titulo)}">'
-            f'{"".join(rows)}</svg><p class="muted">en {unidad}</p></section>')
+            f'{"".join(rows)}</svg>'
+            f'<p class="muted">en {unidad} &middot; el color sube con la intensidad '
+            f'(<span style="color:#1baf7a">bajo</span> &rarr; <span style="color:#eda100">medio</span> '
+            f'&rarr; <span style="color:#e34948">alto</span>)</p></section>')
 
 def timeline(by_hour):
     # Ventana FIJA de 24h en intervalos de BUCKET_MIN minutos (detalle hora:minuto),
@@ -827,7 +846,7 @@ def timeline(by_hour):
         t1 = datetime.fromtimestamp((lo + i + 1) * BUCKET, TZ_EC)
         rango = t0.strftime("%H:%M") + "-" + t1.strftime("%H:%M")
         bars.append(
-            f'<rect x="{x:.1f}" y="{H-pad-bh:.1f}" width="{max(1,bw-1.5):.1f}" height="{bh:.1f}" rx="1.5" fill="{BLUE}">'
+            f'<rect x="{x:.1f}" y="{H-pad-bh:.1f}" width="{max(1,bw-1.5):.1f}" height="{bh:.1f}" rx="1.5" fill="{heat(v/mx)}">'
             f'<title>{rango}  ·  {v:,} alertas</title></rect>')
         # etiquetas ancladas a la DERECHA: la ultima barra (intervalo actual) siempre
         # lleva su hora, para que se vea que el eje llega hasta "ahora" y no se corta antes
@@ -1459,8 +1478,7 @@ def top_page():
             f"<link rel=icon type=image/png href=/favicon.ico>"
             f"<meta name=viewport content='width=device-width,initial-scale=1'>"
             f"<meta http-equiv=refresh content=60><title>Top origenes</title>{css}</head><body>"
-            + NAV.replace('<a href="/" class="on">En vivo</a>', '<a href="/">En vivo</a>')
-                 .replace('<a href="/top">Top origenes</a>', '<a href="/top" class="on">Top origenes</a>') +
+            + nav("/top") +
             f"<main><h1>Top 5 IPs origen que mas peticionan</h1>"
             f"<p class='subx'>Quien ataca mas, hacia que IP destino, desde que puerto origen y hacia que puerto destino. "
             f"{nota}</p>{cuerpo}</main></body></html>")
@@ -1538,33 +1556,55 @@ def refrescador():
                 pass
         time.sleep(30)
 
-NAV = """<style>
-.nav{position:sticky;top:0;z-index:20;background:#0b0b0b;color:#fff;padding:0 22px;
-font:14px system-ui,-apple-system,Segoe UI,sans-serif;display:flex;align-items:center;gap:6px;
-box-shadow:0 1px 6px rgba(0,0,0,.15)}
-.nav .brand{font-weight:700;font-size:15px;margin-right:18px;display:flex;align-items:center;gap:8px}
-.nav .brand .sh{width:10px;height:10px;border-radius:3px;background:#2a78d6}
-.nav a{color:#cfd8e3;text-decoration:none;padding:14px 12px;border-bottom:2px solid transparent}
+_NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
+              ("/historico", "Historico"), ("/exclusiones", "Exclusiones"),
+              ("/perfil", "Perfil"), ("/documentacion", "Documentacion")]
+_NAV_CSS = """<style>
+.nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
+padding:0 22px;font:14px system-ui,-apple-system,Segoe UI,sans-serif;display:flex;align-items:center;gap:2px;
+box-shadow:0 2px 10px rgba(0,0,0,.25)}
+.nav .brand{font-weight:700;font-size:15px;margin-right:20px;display:flex;align-items:center;gap:9px;letter-spacing:.2px}
+.nav .brand img{height:24px;width:auto;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.4))}
+.nav a{color:#c3ccd8;text-decoration:none;padding:15px 13px;border-bottom:2px solid transparent;
+transition:color .15s,border-color .15s}
 .nav a:hover{color:#fff}
-.nav a.on{color:#fff;border-bottom-color:#2a78d6}
+.nav a.on{color:#fff;border-bottom-color:#2a78d6;font-weight:600}
 .nav .sp{margin-left:auto}
-</style>
-<div class="nav"><span class="brand"><span class="sh"></span>Estadisticas Suricata</span>
-<a href="/" class="on">En vivo</a>
-<a href="/top">Top origenes</a>
-<a href="/detalle">Detalle</a>
-<a href="/historico">Historico</a>
-<a href="/exclusiones">Exclusiones</a>
-<a href="/perfil">Perfil</a>
-<a href="/documentacion">Documentacion</a>
-<a href="/" class="sp">&#8635; Actualizar</a>
-<a href="/logout">Salir</a></div>"""
+.nav .act{color:#cfe0f5}
+.nav .out{color:#f3b0b0}
+</style>"""
 
-def wrap(body_html, refresh=True):
+def nav(active=""):
+    parts = []
+    for h, t in _NAV_LINKS:
+        cls = ' class="on"' if h == active else ""
+        parts.append(f'<a href="{h}"{cls}>{t}</a>')
+    return (_NAV_CSS +
+            '<div class="nav"><span class="brand"><img src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
+            + "".join(parts) +
+            '<a href="/" class="sp act">&#8635; Actualizar</a>'
+            '<a href="/logout" class="out">Salir</a></div>')
+
+# compat: algunas plantillas todavia interpolan {NAV} (barra sin pestana activa marcada)
+NAV = nav()
+
+# cabecera de pagina (titulo con presencia + subtitulo + indicador en vivo)
+_PAGEH_CSS = """<style>
+.pageh{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:18px 28px 8px}
+.pageh h1{margin:0;font-size:21px;font-weight:700;letter-spacing:-.2px;color:#0b0b0b}
+.pageh .ph-sub{margin:4px 0 0;color:#6b6a66;font-size:13px}
+.pageh .ph-live{display:inline-flex;align-items:center;gap:7px;color:#c0392b;font-size:12px;font-weight:700;
+background:#fdecea;border:1px solid #f7c9c4;padding:5px 11px;border-radius:20px}
+.pageh .dotlive{width:8px;height:8px;border-radius:50%;background:#e34948;
+box-shadow:0 0 0 0 rgba(227,73,72,.6);animation:phpulse 1.6s infinite}
+@keyframes phpulse{0%{box-shadow:0 0 0 0 rgba(227,73,72,.5)}70%{box-shadow:0 0 0 8px rgba(227,73,72,0)}100%{box-shadow:0 0 0 0 rgba(227,73,72,0)}}
+</style>"""
+
+def wrap(body_html, refresh=True, active=""):
     meta = '<meta http-equiv="refresh" content="300">' if refresh else ""
     # inserta la barra de navegacion justo despues de <body ...>
     def ins(m):
-        return m.group(0) + NAV
+        return m.group(0) + nav(active)
     out = re.sub(r"<body[^>]*>", ins, body_html, count=1)
     if meta:
         out = re.sub(r"</head>", meta + "</head>", out, count=1)
@@ -1590,6 +1630,7 @@ def perfil_page(msg="", ok=False):
         col = "#1baf7a" if ok else "#e34948"
         banner = (f'<div style="background:{col};color:#fff;padding:10px 14px;border-radius:8px;'
                   f'margin-bottom:16px;font-size:13px">{html.escape(msg)}</div>')
+    _PERFIL_NAV = nav("/perfil")
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Perfil</title>"
             "<style>body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
@@ -1602,7 +1643,7 @@ def perfil_page(msg="", ok=False):
             "button{margin-top:20px;width:100%;padding:11px;background:#2a78d6;color:#fff;border:0;"
             "border-radius:8px;font:600 14px system-ui;cursor:pointer}button:hover{background:#1c5cab}"
             ".hint{color:#8a8a86;font-size:12px;margin-top:6px}</style></head><body>"
-            + NAV +
+            + _PERFIL_NAV +
             "<main><h1>Perfil</h1><p class=sub>Cambia el usuario y la clave de acceso al panel.</p>"
             + banner +
             "<div class=card><form method=post action='/perfil'>"
@@ -1674,7 +1715,7 @@ button.del:hover{{background:#f5d5d5}}
 a.edit{{background:#eef4fd;color:#1c5cab;border:1px solid #cfe0fb;padding:5px 12px;border-radius:8px;
 text-decoration:none;font-size:13px;font-weight:600}}a.edit:hover{{background:#dceafb}}
 a.cancel{{color:#8a8a86;text-decoration:none;font-size:13px}}a.cancel:hover{{color:#52514e}}
-@keyframes fadeout{{0%,74%{{opacity:1;transform:translateY(0)}}100%{{opacity:0;transform:translateY(-10px);visibility:hidden;margin:0;padding:0;height:0}}}}</style></head><body>{NAV}<main>
+@keyframes fadeout{{0%,74%{{opacity:1;transform:translateY(0)}}100%{{opacity:0;transform:translateY(-10px);visibility:hidden;margin:0;padding:0;height:0}}}}</style></head><body>{nav("/exclusiones")}<main>
 <h1>Exclusiones</h1><p class=sub>IPs que no quieres que aparezcan en el panel ni en los reportes
 (tus DNS, tu monitoreo SNMP, etc.). Se aplica al instante.</p>
 {banner}
@@ -1814,7 +1855,7 @@ def documentacion_page():
            "th{background:#f4f4f2}")
     body = f"""<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>
 <meta name=viewport content='width=device-width,initial-scale=1'>{refresh_meta}<title>Documentacion</title>
-<style>{css}</style></head><body>{NAV}<main>
+<style>{css}</style></head><body>{nav("/documentacion")}<main>
 <h1>Documentacion</h1>
 <p>Guia rapida del panel de estadisticas de Suricata y como ajustarlo.</p>
 
@@ -1994,7 +2035,7 @@ def historico_page():
             "<main><h1>Reportes guardados</h1><table><tbody>"
             + ("".join(rows) or "<tr><td>Sin reportes todavia.</td></tr>")
             + "</tbody></table></main></body></html>")
-    return wrap(body, refresh=False)
+    return wrap(body, refresh=False, active="/historico")
 
 class H(BaseHTTPRequestHandler):
     server_version = "suricata-dashboard"
@@ -2069,19 +2110,28 @@ class H(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             feed = live_feed_html()
             head_css, resumen_inner, _ = partes_reporte()   # resumen SIN la tabla de detalle
+            ahora_ec = datetime.now(TZ_EC).strftime("%d/%m/%Y %H:%M")
             if resumen_inner.strip():
                 mcob = re.search(r'<!--COB:([^>]*?)-->', resumen_inner)  # cobertura real del reporte
                 cob = mcob.group(1) if mcob else "ultimas 24 horas"
-                resumen = (f"<h2 style='margin:16px 28px 0'>Resumen de las {cob}</h2>"
-                           f"<main>{resumen_inner}</main>")
+                cabecera = (
+                    "<header class='pageh'><div>"
+                    f"<h1>Resumen de las {cob}</h1>"
+                    f"<p class='ph-sub'>Panel IDS Suricata &middot; alertas graves salientes &middot; "
+                    f"actualizado {ahora_ec} (hora de Ecuador)</p></div>"
+                    "<span class='ph-live'><span class='dotlive'></span>en vivo</span></header>")
+                resumen = f"{cabecera}<main>{resumen_inner}</main>"
             else:
-                resumen = ("<main style='padding:24px'><p style='color:#52514e'>El resumen de 24h se "
+                cabecera = (
+                    "<header class='pageh'><div><h1>Resumen</h1>"
+                    f"<p class='ph-sub'>Panel IDS Suricata &middot; actualizado {ahora_ec} (hora de Ecuador)</p></div></header>")
+                resumen = (cabecera + "<main style='padding:8px 28px 24px'><p style='color:#52514e'>El resumen se "
                            "esta generando en segundo plano; aparecera aqui en unos minutos. "
                            "El feed de abajo ya esta en vivo.</p></main>")
             page = (f"<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
                     f"<meta name=viewport content='width=device-width,initial-scale=1'>"
                     f"<meta http-equiv=refresh content=20><title>Estadisticas Suricata</title>"
-                    f"{head_css}</head><body>{NAV}{resumen}{feed}</body></html>")
+                    f"{_PAGEH_CSS}{head_css}</head><body>{nav('/')}{resumen}{feed}</body></html>")
             return self._html(page)
         if path == "/top":
             return self._html(top_page())
@@ -2092,7 +2142,7 @@ class H(BaseHTTPRequestHandler):
                            "esta generando; aparecera en unos minutos.</p></section>")
             page = (f"<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
                     f"<meta name=viewport content='width=device-width,initial-scale=1'>"
-                    f"<title>Detalle de ataques</title>{head_css}</head><body>{NAV}"
+                    f"<title>Detalle de ataques</title>{head_css}</head><body>{nav('/detalle')}"
                     f"<main>{detalle}</main></body></html>")
             return self._html(page)
         if path == "/historico":
@@ -2801,6 +2851,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

@@ -1625,6 +1625,25 @@ def buscar_usuario(user):
             return r
     return None
 
+# ---- datos de la empresa (nombre + logo que se muestra en la barra) ----
+EMPRESA_FILE = "/etc/suricata-dashboard-empresa.json"
+
+def cargar_empresa():
+    try:
+        d = json.load(open(EMPRESA_FILE, encoding="utf-8"))
+        if isinstance(d, dict):
+            return {"nombre": d.get("nombre", ""), "logo": d.get("logo", "")}
+    except (OSError, ValueError):
+        pass
+    return {"nombre": "", "logo": ""}
+
+def guardar_empresa(d):
+    tmp = EMPRESA_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"nombre": d.get("nombre", ""), "logo": d.get("logo", "")}, f, ensure_ascii=False)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, EMPRESA_FILE)
+
 def verificar_login(user, pw):
     """Devuelve el rol si user/clave son correctos y la cuenta esta activa; si no None."""
     r = buscar_usuario(user)
@@ -1694,7 +1713,7 @@ def refrescador():
 
 _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
               ("/historico", "Historico"), ("/exclusiones", "Exclusiones"),
-              ("/perfil", "Perfil"), ("/documentacion", "Documentacion")]
+              ("/documentacion", "Documentacion"), ("/ajustes", "Ajustes")]
 _NAV_CSS = """<style>
 .nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
 padding:0 22px;font:14px system-ui,-apple-system,Segoe UI,sans-serif;display:flex;align-items:center;gap:4px;
@@ -1706,7 +1725,11 @@ font-weight:500;transition:background .15s,color .15s}
 .nav a.tab:hover{color:#fff;background:rgba(255,255,255,.08)}
 .nav a.tab.on{color:#fff;background:rgba(42,120,214,.22);font-weight:600}
 .nav a.tab.on::after{content:"";position:absolute;left:13px;right:13px;bottom:-9px;height:2px;background:#2a78d6;border-radius:2px}
-.nav .out{margin-left:auto;color:#f3b0b0;text-decoration:none;font-weight:600;padding:7px 15px;border-radius:8px;
+.nav .push{margin-left:auto}
+.nav .emp{display:flex;align-items:center;gap:9px;padding:0 12px;border-left:1px solid rgba(255,255,255,.12);color:#dfe6ef}
+.nav .emp img{height:26px;width:auto;max-width:130px;object-fit:contain;border-radius:4px;background:#fff;padding:2px}
+.nav .emp .en{font-weight:600;font-size:13px;white-space:nowrap;max-width:190px;overflow:hidden;text-overflow:ellipsis}
+.nav .out{margin-left:8px;color:#f3b0b0;text-decoration:none;font-weight:600;padding:7px 15px;border-radius:8px;
 border:1px solid rgba(243,176,176,.35);transition:background .15s,color .15s,border-color .15s}
 .nav .out:hover{background:#e34948;color:#fff;border-color:#e34948}
 </style>"""
@@ -1719,9 +1742,15 @@ def nav(active=""):
             continue   # solo lectura no gestiona exclusiones
         cls = "tab on" if h == active else "tab"
         parts.append(f'<a href="{h}" class="{cls}">{t}</a>')
+    emp = cargar_empresa()
+    marca = ""
+    if emp.get("logo", "").startswith("data:image/") or emp.get("nombre"):
+        img = f'<img src="{html.escape(emp["logo"])}" alt="">' if emp.get("logo", "").startswith("data:image/") else ""
+        nom = f'<span class="en">{html.escape(emp.get("nombre",""))}</span>' if emp.get("nombre") else ""
+        marca = f'<span class="emp">{img}{nom}</span>'
     return (_NAV_CSS +
             '<div class="nav"><span class="brand"><img src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
-            + "".join(parts) +
+            + "".join(parts) + '<span class="push"></span>' + marca +
             '<a href="/logout" class="out">Salir</a></div>')
 
 # compat: algunas plantillas todavia interpolan {NAV} (barra sin pestana activa marcada)
@@ -1779,7 +1808,9 @@ def _iniciales(nombre, user):
         return (parts[0][:1] + parts[1][:1]).upper()
     return base[:2].upper()
 
-def _avatar(nombre, user):
+def _avatar(nombre, user, foto=None):
+    if foto and foto.startswith("data:image/"):
+        return f'<img class="av" src="{html.escape(foto)}" alt="">'
     ini = html.escape(_iniciales(nombre, user))
     col = _AV_COLORS[sum(ord(c) for c in (user or nombre or "?")) % len(_AV_COLORS)]
     return f'<span class="av" style="background:{col}">{ini}</span>'
@@ -1796,7 +1827,10 @@ def perfil_page(msg="", ok=False, edit_user=None):
     yo = getattr(CTX, "user", None)
     mirol = getattr(CTX, "role", None)
     es_admin = mirol != "lectura"
-    inicial = esc(yo[0].upper()) if yo else "?"
+    mi = buscar_usuario(yo) if yo else None
+    mi_foto = (mi or {}).get("avatar", "")
+    big_av = (f'<img class=avatar src="{esc(mi_foto)}" alt="">' if mi_foto.startswith("data:image/")
+              else f'<div class=avatar>{esc(yo[0].upper()) if yo else "?"}</div>')
     banner = ""
     if msg:
         banner = f'<div class="banner {"ok" if ok else "err"}">{esc(msg)}</div>'
@@ -1805,8 +1839,14 @@ def perfil_page(msg="", ok=False, edit_user=None):
         card_pw = (
             "<section class=card>"
             "<div class=acct>"
-            f"<div class=avatar>{inicial}</div>"
+            f"{big_av}"
             f"<div><div class=aname>{esc(yo)}</div><div class=arole>{_rol_badge(mirol)}</div></div></div>"
+            "<h3 class=ch>Mi foto</h3>"
+            "<form method=post action='/perfil' class=fotoform>"
+            "<input type=hidden name=accion value=mi_foto><input type=hidden name=avatar id=mavatar>"
+            "<input type=file accept=image/* onchange=\"foto(this,'m')\">"
+            + ("<button class=cancelbtn type=button onclick=\"document.getElementById('mavatar').value='__BORRAR__';this.form.submit();\">Quitar foto</button>" if mi_foto else "")
+            + "<button class=primary type=submit>Guardar foto</button></form>"
             "<h3 class=ch>Cambiar mi clave</h3>"
             "<form method=post action='/perfil'>"
             "<input type=hidden name=accion value=mi_clave>"
@@ -1825,6 +1865,28 @@ def perfil_page(msg="", ok=False, edit_user=None):
     else:
         card_pw = ""   # admin: cambia su clave con el lapiz de su fila
     usuarios = cargar_usuarios() if (es_admin and yo) else []
+    # --- tarjeta: gestion de empresa (nombre + logo en la barra; solo admin) ---
+    card_empresa = ""
+    if es_admin and yo:
+        emp = cargar_empresa()
+        elogo = emp.get("logo", "")
+        tiene_logo = elogo.startswith("data:image/")
+        card_empresa = (
+            "<section class=card><h2>Empresa</h2>"
+            "<p class=sub2>El nombre y el logo aparecen en la barra superior, al lado de las pestañas.</p>"
+            "<form method=post action='/empresa'>"
+            "<div class=grid2>"
+            f"<div class=field><label>Nombre de la empresa</label>"
+            f"<input type=text name=nombre maxlength=60 value=\"{esc(emp.get('nombre',''))}\"></div>"
+            "<div class=field><label>Logo</label><div class=avup>"
+            f"<img id=lpreview class='avprev logo' src=\"{esc(elogo)}\" alt=''{'' if tiene_logo else ' style=display:none'}>"
+            "<input type=file accept=image/* onchange=\"foto(this,'l')\"></div>"
+            "<input type=hidden name=logo id=lavatar></div></div>"
+            + ("<div style='margin-top:10px'><button class=cancelbtn type=button "
+               "onclick=\"document.getElementById('lavatar').value='__BORRAR__';this.form.submit();\">"
+               "Quitar logo</button></div>" if tiene_logo else "")
+            + "<div class=actions><button class=primary type=submit>Guardar empresa</button></div>"
+            "</form></section>")
     # --- tarjeta: gestion de usuarios estilo tabla (solo admin) ---
     card_users = ""
     if es_admin and yo:
@@ -1840,7 +1902,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
             correo_c = esc(correo) if correo else "<span class=dash>&mdash;</span>"
             rows.append(
                 f"<tr data-f=\"{filtro}\"><td class=idc>{i}</td>"
-                f"<td><div class=nmcell>{_avatar(nombre, uraw)}<span class=nm>{disp}</span>{tu}</div></td>"
+                f"<td><div class=nmcell>{_avatar(nombre, uraw, r.get('avatar'))}<span class=nm>{disp}</span>{tu}</div></td>"
                 f"<td class=mono>{un}</td><td class=mono cmail>{correo_c}</td>"
                 f"<td>{_rol_badge(rl)}</td>"
                 "<td><form method=post action='/perfil' class=inl>"
@@ -1867,7 +1929,12 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<div class=field><label>Rol</label><select name=nrole>"
             "<option value=lectura>Solo lectura</option><option value=admin>Administrador</option></select></div></div>"
             "<div class=field><label>Clave</label><input type=password name=npass autocomplete=new-password required>"
-            "<div class=hint>Minimo 6 caracteres. Nombre y correo son opcionales.</div></div></div>"
+            "<div class=hint>Minimo 6 caracteres. Nombre y correo son opcionales.</div></div>"
+            "<div class=field><label>Foto (opcional)</label><div class=avup>"
+            "<img id=npreview class=avprev alt='' style=display:none>"
+            "<input type=file accept=image/* onchange=\"foto(this,'n')\"></div>"
+            "<input type=hidden name=avatar id=navatar></div>"
+            "</div>"
             "<div class=mfoot><button class=cancelbtn type=button onclick=\"cerrar('ovlNew')\">Cancelar</button>"
             "<button class=primary type=submit>Crear usuario</button></div></form></div></div>")
         modal_edit = (
@@ -1883,7 +1950,13 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<option value=admin>Administrador</option><option value=lectura>Solo lectura</option></select></div>"
             "<div class=field><label>Clave nueva (opcional)</label>"
             "<input type=password name=npass autocomplete=new-password placeholder='dejar vacio para no cambiar'>"
-            "<div class=hint>Si la escribes, minimo 6 caracteres.</div></div></div>"
+            "<div class=hint>Si la escribes, minimo 6 caracteres.</div></div>"
+            "<div class=field><label>Foto (opcional)</label><div class=avup>"
+            "<img id=epreview class=avprev alt='' style=display:none>"
+            "<input type=file accept=image/* onchange=\"foto(this,'e')\"></div>"
+            "<div class=hint>Sube una imagen para cambiarla.</div>"
+            "<input type=hidden name=avatar id=eavatar></div>"
+            "</div>"
             "<div class=mfoot><button class=cancelbtn type=button onclick=\"cerrar('ovlEdit')\">Cancelar</button>"
             "<button class=primary type=submit>Guardar cambios</button></div></form></div></div>")
         card_users = (
@@ -1953,8 +2026,22 @@ def perfil_page(msg="", ok=False, edit_user=None):
         ".mbody{padding:2px 20px 16px}"
         ".mfoot{display:flex;justify-content:flex-end;gap:10px;align-items:center;padding:14px 20px;border-top:1px solid #f0efec;background:#fafafa;border-radius:0 0 14px 14px}"
         ".mfoot button.primary{margin:0}"
-        ".cancelbtn{padding:9px 16px;background:#fff;border:1px solid #d7d6d2;border-radius:9px;color:#52514e;font:600 13px system-ui;cursor:pointer}.cancelbtn:hover{background:#f4f4f2}")
+        ".cancelbtn{padding:9px 16px;background:#fff;border:1px solid #d7d6d2;border-radius:9px;color:#52514e;font:600 13px system-ui;cursor:pointer}.cancelbtn:hover{background:#f4f4f2}"
+        "img.av{object-fit:cover}img.avatar{object-fit:cover;padding:0}"
+        ".avup{display:flex;align-items:center;gap:12px;margin-top:2px;flex-wrap:wrap}"
+        ".avup input[type=file]{flex:1;min-width:150px;padding:7px}"
+        ".avprev{width:46px;height:46px;border-radius:50%;object-fit:cover;border:1px solid #e0dfda;background:#fafafa;flex:none}"
+        ".avprev.logo{width:auto;height:40px;max-width:150px;border-radius:6px;object-fit:contain;padding:2px;background:#fff}"
+        ".fotoform{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.fotoform input[type=file]{flex:1;min-width:160px}"
+        ".fotoform .primary,.fotoform .cancelbtn{margin-top:0}")
     script = ("<script>"
+              "function foto(inp,p){var f=inp.files&&inp.files[0];if(!f)return;var r=new FileReader();"
+              "r.onload=function(){var im=new Image();im.onload=function(){var mx=160,w=im.width,h=im.height;"
+              "if(w>h){if(w>mx){h=h*mx/w;w=mx;}}else{if(h>mx){w=w*mx/h;h=mx;}}"
+              "var c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(im,0,0,w,h);"
+              "var d=c.toDataURL('image/png');var hid=document.getElementById(p+'avatar');if(hid)hid.value=d;"
+              "var pv=document.getElementById(p+'preview');if(pv){pv.src=d;pv.style.display='';}};im.src=r.result;};"
+              "r.readAsDataURL(f);}"
               "function abrir(id){document.getElementById(id).hidden=false;}"
               "function cerrar(id){document.getElementById(id).hidden=true;}"
               "function abrirEdit(b){document.getElementById('eu').value=b.getAttribute('data-user');"
@@ -1968,12 +2055,12 @@ def perfil_page(msg="", ok=False, edit_user=None):
               "document.addEventListener('keydown',function(e){if(e.key==='Escape'){cerrar('ovlNew');cerrar('ovlEdit');}});"
               "</script>")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
-            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Perfil</title>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Ajustes</title>"
             f"<style>{css}</style></head><body>"
-            + nav("/perfil") +
-            "<main><h1>Perfil</h1>"
-            "<p class=psub>Tu cuenta y, si eres administrador, la gestion de usuarios del panel.</p>"
-            + banner + card_pw + card_users + script +
+            + nav("/ajustes") +
+            "<main><h1>Ajustes</h1>"
+            "<p class=psub>Tu cuenta, la gestion de usuarios y los datos de la empresa.</p>"
+            + banner + card_pw + card_empresa + card_users + script +
             "</main></body></html>")
 
 def exclusiones_page(msg="", ok=False, edit_idx=None):
@@ -2191,8 +2278,9 @@ imprimir a PDF salen todas las filas.</td></tr>
 generan cada 10 minutos y los mas viejos se borran solos.</td></tr>
 <tr><td><b>Exclusiones</b></td><td>Gestiona las IPs que NO quieres ver en el panel (tus DNS,
 tu monitoreo SNMP). Agregar, editar y eliminar; se explica mas abajo.</td></tr>
-<tr><td><b>Perfil</b></td><td>Tu cuenta: cambiar tu propia clave. Si eres <b>administrador</b>, ademas gestionas
-usuarios (crear, borrar y cambiar rol entre <b>administrador</b> y <b>solo lectura</b>).</td></tr>
+<tr><td><b>Ajustes</b></td><td>Tu cuenta (cambiar tu clave y tu foto). Si eres <b>administrador</b>, ademas gestionas
+<b>usuarios</b> (crear, editar, borrar, activar/desactivar y cambiar rol) y los <b>datos de la empresa</b>
+(nombre y logo que salen en la barra superior).</td></tr>
 <tr><td><b>Documentacion</b></td><td>Esta pagina.</td></tr>
 <tr><td><b>Salir</b></td><td>Cierra la sesion.</td></tr>
 </table>
@@ -2486,11 +2574,9 @@ class H(BaseHTTPRequestHandler):
         if path == "/historico":
             return self._html(historico_page())
         if path == "/perfil":
-            ed = None
-            if "?" in self.path and self._admin():
-                import urllib.parse
-                ed = urllib.parse.parse_qs(self.path.split("?", 1)[1]).get("edit", [None])[0]
-            return self._html(perfil_page(edit_user=ed))
+            return self._redirect("/ajustes")
+        if path == "/ajustes":
+            return self._html(perfil_page())
         if path == "/exclusiones":
             if not self._admin():
                 return self._redirect("/")   # lectura no gestiona exclusiones
@@ -2549,6 +2635,23 @@ class H(BaseHTTPRequestHandler):
             return self._post_exclusiones(q)
         if ruta == "/perfil":
             return self._post_perfil(q)
+        if ruta == "/empresa":
+            if not self._admin():
+                return self._deny()
+            nombre = (q.get("nombre", [""])[0]).strip()[:60]
+            logo = q.get("logo", [""])[0]
+            actual = cargar_empresa()
+            if logo == "__BORRAR__":
+                logo = ""
+            elif not logo:
+                logo = actual.get("logo", "")          # sin logo nuevo: conservar el actual
+            elif not logo.startswith("data:image/") or len(logo) > 400_000:
+                return self._html(perfil_page("El logo no es una imagen valida o pesa demasiado.", ok=False))
+            try:
+                guardar_empresa({"nombre": nombre, "logo": logo})
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            return self._html(perfil_page("Datos de la empresa guardados.", ok=True))
         return self._html("<h1>No encontrado</h1>", 404)
 
     def _post_perfil(self, q):
@@ -2574,6 +2677,22 @@ class H(BaseHTTPRequestHandler):
             except OSError as ex:
                 return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
             return self._html(perfil_page("Tu clave fue actualizada.", ok=True))
+        # --- cambiar MI foto (cualquier usuario) ---
+        if accion == "mi_foto":
+            foto = q.get("avatar", [""])[0]
+            if foto and foto != "__BORRAR__" and (not foto.startswith("data:image/") or len(foto) > 300_000):
+                return self._html(perfil_page("La foto no es una imagen valida o pesa demasiado.", ok=False))
+            if not foto:
+                return self._html(perfil_page("Elige una imagen primero.", ok=False))
+            us = cargar_usuarios()
+            for r in us:
+                if r.get("user") == yo:
+                    r["avatar"] = "" if foto == "__BORRAR__" else foto
+            try:
+                guardar_usuarios(us)
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            return self._html(perfil_page("Tu foto fue actualizada." if foto != "__BORRAR__" else "Foto quitada.", ok=True))
         # --- gestion de usuarios (solo admin) ---
         if not self._admin():
             return self._deny()
@@ -2583,18 +2702,21 @@ class H(BaseHTTPRequestHandler):
             nrole = q.get("nrole", ["lectura"])[0]
             nombre = (q.get("nnombre", [""])[0]).strip()[:60]
             correo = (q.get("ncorreo", [""])[0]).strip()[:80]
+            foto = q.get("avatar", [""])[0]
             if nrole not in ROLES:
                 nrole = "lectura"
             if not nu or " " in nu or len(nu) > 40:
                 return self._html(perfil_page("Usuario invalido (sin espacios, max 40).", ok=False))
             if len(npw) < 6:
                 return self._html(perfil_page("La clave del usuario debe tener al menos 6 caracteres.", ok=False))
+            if foto and (not foto.startswith("data:image/") or len(foto) > 300_000):
+                return self._html(perfil_page("La foto no es una imagen valida o pesa demasiado.", ok=False))
             us = cargar_usuarios()
             if any(r.get("user") == nu for r in us):
                 return self._html(perfil_page(f"Ya existe un usuario llamado {nu}.", ok=False))
             salt, h = _hash_pw(npw)
             us.append({"user": nu, "salt": salt, "hash": h, "role": nrole,
-                       "nombre": nombre, "correo": correo, "activo": True})
+                       "nombre": nombre, "correo": correo, "activo": True, "avatar": foto})
             try:
                 guardar_usuarios(us)
             except OSError as ex:
@@ -2652,10 +2774,17 @@ class H(BaseHTTPRequestHandler):
                 return self._html(perfil_page("Ese usuario no existe.", ok=False))
             if obj.get("role") == "admin" and nrole != "admin" and len(admins) <= 1:
                 return self._html(perfil_page("No puedes quitar el rol al unico administrador.", ok=False))
+            foto = q.get("avatar", [""])[0]
             if npw:
                 if len(npw) < 6:
-                    return self._html(perfil_page("La clave nueva debe tener al menos 6 caracteres.", ok=False, edit_user=objetivo))
+                    return self._html(perfil_page("La clave nueva debe tener al menos 6 caracteres.", ok=False))
                 obj["salt"], obj["hash"] = _hash_pw(npw)
+            if foto == "__BORRAR__":
+                obj["avatar"] = ""
+            elif foto:
+                if not foto.startswith("data:image/") or len(foto) > 300_000:
+                    return self._html(perfil_page("La foto no es una imagen valida o pesa demasiado.", ok=False))
+                obj["avatar"] = foto
             obj["nombre"] = nombre; obj["correo"] = correo; obj["role"] = nrole
             try:
                 guardar_usuarios(us)
@@ -3349,6 +3478,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

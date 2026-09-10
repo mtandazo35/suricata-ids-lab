@@ -790,12 +790,17 @@ def heat(f):
 
 def esc(x): return html.escape(str(x))
 
-def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_class="card", label_above=False):
+def _cardq(tip):
+    """Badge '?' con tooltip explicativo para la cabecera de un cuadro."""
+    return f'<span class="chq">?<span class="chtip">{esc(tip)}</span></span>' if tip else ""
+
+def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_class="card", label_above=False, tip=""):
     """Barras horizontales rankeadas, un solo tono, etiqueta de valor directa.
     label_above=True: el nombre va ENCIMA de la barra (a todo el ancho), no en una
     columna a la izquierda; asi los nombres largos (firmas) no se recortan nunca."""
+    q = _cardq(tip)
     if not pares:
-        return f'<section class="{card_class}"><h2>{esc(titulo)}</h2><p class="muted">Sin datos.</p></section>'
+        return f'<section class="{card_class}"><h2>{esc(titulo)}{q}</h2><p class="muted">Sin datos.</p></section>'
     mx = max(v for _, v in pares) or 1
     rows = []
     if label_above:
@@ -826,7 +831,7 @@ def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_clas
                 f'<text x="{lblw-8}" y="{y+rowh*0.68:.0f}" text-anchor="end" class="lbl">{esc(etq)}</text>'
                 f'<rect x="{lblw}" y="{y}" width="{w}" height="{rowh}" rx="4" fill="{heat(v/mx)}"/>'
                 f'<text x="{lblw+w+6}" y="{y+rowh*0.68:.0f}" class="val">{esc(fmt(v))}</text>')
-    return (f'<section class="{card_class}"><h2>{esc(titulo)}</h2>'
+    return (f'<section class="{card_class}"><h2>{esc(titulo)}{q}</h2>'
             f'<svg viewBox="0 0 {W} {h}" width="100%" role="img" aria-label="{esc(titulo)}">'
             f'{"".join(rows)}</svg>'
             f'<p class="muted">en {unidad} &middot; el color sube con la intensidad '
@@ -862,7 +867,9 @@ def timeline(by_hour):
         if (n - 1 - i) % tick_every == 0:
             ticks.append(f'<text x="{x+bw/2:.1f}" y="{H-pad+14:.0f}" text-anchor="middle" class="tick">{t0.strftime("%H:%M")}</text>')
     pico_t = datetime.fromtimestamp((lo + vals.index(mx)) * BUCKET, TZ_EC).strftime("%H:%M") if mx else ""
-    return (f'<section class="card wide"><h2>Ataques por hora y minuto ({COB})</h2>'
+    _tl_tip = ("Numero de alertas en cada intervalo de 30 minutos a lo largo de la ventana. "
+               "La altura y el color suben con la intensidad; pasa el raton por una barra para el conteo exacto.")
+    return (f'<section class="card wide"><h2>Ataques por hora y minuto ({COB}){_cardq(_tl_tip)}</h2>'
             f'<div class="tlwrap"><div class="tltip"></div>'
             f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" aria-label="alertas por intervalo" style="cursor:default">'
             f'<line x1="{pad}" y1="{H-pad}" x2="{W-pad}" y2="{H-pad}" stroke="{GRID}"/>'
@@ -1013,6 +1020,15 @@ padding:10px 12px;border-radius:9px;box-shadow:0 6px 18px rgba(0,0,0,.25);transi
 .tile .tip::before{{content:"";position:absolute;left:18px;top:-6px;border:6px solid transparent;border-bottom-color:#0b0b0b;border-top:0}}
 .tile:hover .tip{{visibility:visible;opacity:1}}
 @media print{{.tile .q,.tile .tip{{display:none}}}}
+.chq{{position:relative;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
+border-radius:50%;border:1px solid {GRID};color:{INK2};font:700 11px system-ui;margin-left:8px;cursor:help;vertical-align:middle}}
+.chq .chtip{{visibility:hidden;opacity:0;position:absolute;left:0;top:135%;z-index:50;width:max-content;max-width:300px;
+background:#0b0b0b;color:#fff;font:400 12px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;padding:9px 11px;border-radius:8px;
+box-shadow:0 6px 18px rgba(0,0,0,.25);transition:opacity .12s;white-space:normal;text-align:left;font-weight:400}}
+.chq .chtip::before{{content:"";position:absolute;left:5px;top:-6px;border:6px solid transparent;border-bottom-color:#0b0b0b;border-top:0}}
+.chq:hover .chtip{{visibility:visible;opacity:1}}
+h2{{position:relative}}
+@media print{{.chq{{display:none}}}}
 .tile .big{{font-size:30px;font-weight:700;line-height:1}}
 .tile .lab{{font-size:12px;color:{INK2};margin-top:6px;display:flex;align-items:center;gap:6px}}
 .dot{{width:11px;height:11px;border-radius:3px;display:inline-block}}
@@ -1067,10 +1083,10 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
   </div>
   {timeline(by_hour)}
   <div class="grid">
-    {hbar("Puertos de destino mas atacados", top(by_dport), "alertas")}
-    {hbar("IPs origen (atacantes)", top(by_src), "alertas")}
-    {hbar("IPs destino (objetivos)", top(by_dst), "alertas")}
-    {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas")}
+    {hbar("Puertos de destino mas atacados", top(by_dport), "alertas", tip="Puertos de destino con mas alertas (443 HTTPS, 80 HTTP, 53 DNS, 22 SSH...). Muestra a que servicios apunta el trafico sospechoso. Solo el top; el total de puertos distintos esta en el recuadro de arriba.")}
+    {hbar("IPs origen (atacantes)", top(by_src), "alertas", tip="IPs de ORIGEN que mas alertas dispararon (los equipos/CPE que generan el trafico). Ojo: muchas pueden ser solo consultas DNS sospechosas, no ataque real. Solo el top; el total esta arriba.")}
+    {hbar("IPs destino (objetivos)", top(by_dst), "alertas", tip="IPs de DESTINO mas frecuentes: hacia donde va el trafico alertado (el objetivo). Suele ser tu DNS y unos pocos servidores.")}
+    {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas", tip="Tipos de ataque (firmas de Suricata) mas frecuentes, agrupados y traducidos al espanol. Indica que clase de amenaza predomina.")}
   </div>
   {top_sec}
   <section class="card">
@@ -1245,6 +1261,47 @@ def login_fallo(ip):
     if len(LOGIN_FAILS) > 5000:   # poda de entradas viejas
         for k in [k for k, v in LOGIN_FAILS.items() if now - v[1] > LOGIN_WINDOW]:
             LOGIN_FAILS.pop(k, None)
+
+LOGIN_LOG = "/var/log/suricata-dashboard-login.log"
+
+def login_registrar(ip, user, estado):
+    """Deja constancia de cada intento: fecha, IP, usuario y estado (OK/FAIL/BLOQUEADO)."""
+    user = (user or "")[:40].replace("\t", " ").replace("\n", " ").replace("\r", " ")
+    ts = datetime.now(TZ_EC).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        # tope de tamano: si pasa de ~1 MB, conserva solo las ultimas 1000 lineas
+        if os.path.exists(LOGIN_LOG) and os.path.getsize(LOGIN_LOG) > 1_000_000:
+            with open(LOGIN_LOG, encoding="utf-8", errors="replace") as f:
+                ult = f.readlines()[-1000:]
+            with open(LOGIN_LOG, "w", encoding="utf-8") as f:
+                f.writelines(ult)
+        with open(LOGIN_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{ts}\t{(ip or '?')[:45]}\t{user}\t{estado}\n")
+    except OSError:
+        pass
+
+def login_recientes(n=40):
+    """Ultimos n intentos de login (mas reciente primero)."""
+    try:
+        with open(LOGIN_LOG, "rb") as f:
+            f.seek(0, 2); size = f.tell(); f.seek(max(0, size - 80000)); data = f.read()
+    except OSError:
+        return []
+    filas = []
+    for l in reversed(data.decode("utf-8", "replace").splitlines()[-n:]):
+        p = l.split("\t")
+        if len(p) >= 4:
+            filas.append(p[:4])
+    return filas
+
+def ips_bloqueadas():
+    """IPs actualmente bloqueadas: (ip, segundos_restantes, intentos)."""
+    res = []
+    for ip in list(LOGIN_FAILS.keys()):
+        s = login_bloqueado(ip)
+        if s > 0:
+            res.append((ip, s, LOGIN_FAILS[ip][0]))
+    return sorted(res, key=lambda x: -x[1])
 
 EVE = "/var/log/suricata/eve.json"
 
@@ -2028,6 +2085,43 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<th>ID</th><th>Nombre</th><th>Usuario</th><th>Correo</th><th>Rol</th><th>Estado</th><th></th>"
             f"</tr></thead><tbody id=ubody>{''.join(rows)}</tbody></table></div>"
             "</section>" + modal_new + modal_edit)
+    # --- tarjeta: accesos y seguridad (log de login + desbloqueo; solo admin) ---
+    card_acceso = ""
+    if es_admin and yo:
+        _col = {"OK": "#12b886", "FAIL": "#e34948", "BLOQUEADO": "#eb6834"}
+        def _estb(e):
+            c = _col.get(e, "#8a8a86" if not e.startswith("DESBLOQUEO") else "#2a78d6")
+            return f'<span style="background:{c};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px">{esc(e)}</span>'
+        bloq = ips_bloqueadas()
+        if bloq:
+            brows = "".join(
+                f"<tr><td class=mono>{esc(ip)}</td><td>{intentos} fallos</td><td>{seg//60 + 1} min</td>"
+                "<td class=acts><form method=post action='/perfil' class=inl>"
+                "<input type=hidden name=accion value=unlock_ip>"
+                f"<input type=hidden name=ip value='{esc(ip)}'>"
+                "<button class=mini type=submit>Desbloquear</button></form></td></tr>"
+                for ip, seg, intentos in bloq)
+            blq = ("<div class=twrap><table class=ut><thead><tr><th>IP bloqueada</th><th>Motivo</th>"
+                   f"<th>Expira en</th><th></th></tr></thead><tbody>{brows}</tbody></table></div>")
+        else:
+            blq = "<p class=sub2>No hay IPs bloqueadas ahora.</p>"
+        rec = login_recientes(30)
+        if rec:
+            rrows = "".join(
+                f"<tr><td class=mono>{esc(ts)}</td><td class=mono>{esc(ip)}</td>"
+                f"<td>{esc(us) or '<span class=dash>&mdash;</span>'}</td><td>{_estb(est)}</td></tr>"
+                for ts, ip, us, est in rec)
+            rtab = ("<div class=twrap><table class=ut><thead><tr><th>Fecha (Ecuador)</th><th>IP</th>"
+                    f"<th>Usuario</th><th>Resultado</th></tr></thead><tbody>{rrows}</tbody></table></div>")
+        else:
+            rtab = "<p class=sub2>Sin intentos registrados todavia.</p>"
+        card_acceso = (
+            "<section class=card><h2>Accesos y seguridad</h2>"
+            "<p class=sub2>Tras 8 fallos, una IP se bloquea 10 min. Aqui ves y desbloqueas falsos positivos, "
+            "y el historial de intentos (IP + usuario).</p>"
+            "<h3 class=ch>IPs bloqueadas ahora</h3>" + blq +
+            "<h3 class=ch>Ultimos intentos de acceso</h3>" + rtab +
+            "</section>")
     css = (
         "body{margin:0;background:#f6f6f4;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
         "main{max-width:900px;margin:0 auto;padding:26px 20px 40px}"
@@ -2123,7 +2217,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
             + nav("/ajustes") +
             "<main><h1>Ajustes</h1>"
             "<p class=psub>Tu cuenta, la gestion de usuarios y los datos de la empresa.</p>"
-            + banner + card_pw + card_empresa + card_users + script +
+            + banner + card_pw + card_empresa + card_users + card_acceso + script +
             "</main></body></html>")
 
 def exclusiones_page(msg="", ok=False, edit_idx=None):
@@ -2732,20 +2826,23 @@ class H(BaseHTTPRequestHandler):
         q = urllib.parse.parse_qs(body)
         if ruta == "/login":
             ip = self._client_ip()
+            u = q.get("usuario", [""])[0]; p = q.get("clave", [""])[0]
             espera = login_bloqueado(ip)
             if espera > 0:
+                login_registrar(ip, u, "BLOQUEADO")
                 time.sleep(1)
                 return self._html(login_page(f"Demasiados intentos fallidos. Espera {espera//60 + 1} min e intenta de nuevo."))
-            u = q.get("usuario", [""])[0]; p = q.get("clave", [""])[0]
             role = verificar_login(u, p)
             if role:
                 LOGIN_FAILS.pop(ip, None)   # login correcto: limpia el contador
+                login_registrar(ip, u, "OK")
                 token = secrets.token_urlsafe(24)
                 SESSIONS[token] = {"user": u, "role": role, "exp": time.time() + SESSION_TTL}
                 for k in [k for k, v in SESSIONS.items() if v.get("exp", 0) < time.time()]:
                     SESSIONS.pop(k, None)
                 return self._redirect("/", cookie=f"sid={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}")
             login_fallo(ip)
+            login_registrar(ip, u, "FAIL")
             time.sleep(1)   # ralentiza la fuerza bruta
             return self._html(login_page("Usuario o clave incorrectos."))
         if not self._auth_ok():
@@ -2825,6 +2922,11 @@ class H(BaseHTTPRequestHandler):
         # --- gestion de usuarios (solo admin) ---
         if not self._admin():
             return self._deny()
+        if accion == "unlock_ip":
+            ip = q.get("ip", [""])[0].strip()
+            existia = LOGIN_FAILS.pop(ip, None)
+            login_registrar(self._client_ip(), CTX.user or "?", f"DESBLOQUEO {ip}")
+            return self._html(perfil_page(f"IP {ip} desbloqueada." if existia else f"La IP {ip} no estaba bloqueada.", ok=bool(existia)))
         if accion == "add_user":
             nu = (q.get("nuser", [""])[0]).strip()
             npw = q.get("npass", [""])[0]
@@ -3648,6 +3750,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

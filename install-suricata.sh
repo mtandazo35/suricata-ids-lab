@@ -3853,6 +3853,18 @@ cat <<EOF
     Si hay firewall externo (nube/Proxmox), abre ${WEB_PORT}/tcp.
 EOF
 fi
+if systemctl is-active --quiet suricata-dashboard 2>/dev/null; then
+cat <<EOF
+
+  ${c_g}Panel de estadisticas (dashboard propio)${c_0}
+    URL        : http://${DASH_IP:-<IP>}:${DASH_PORT}
+    Usuario    : admin
+    Clave      : ${DASH_PASS_SHOWN:-<ya configurada; cambiala en Ajustes>}
+    Servicio   : suricata-dashboard   (systemctl status suricata-dashboard)
+    Nota       : HTTP plano; publicalo detras de tu proxy (NPM) o por VPN. La clave
+                 ya no queda en texto plano en el .conf (esta hasheada). Guardala.
+EOF
+fi
 if [ "$TZSP" -eq 1 ]; then
 cat <<EOF
 

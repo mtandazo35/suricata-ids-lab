@@ -2293,8 +2293,41 @@ class H(BaseHTTPRequestHandler):
                 puertos.append(int(p))
         nueva = {"tipo": tipo, "ip": ip, "motivo": motivo, "puertos": puertos}
         editar = q.get("editar", [""])[0]
-        if editar.isdigit() and int(editar) < len(propias):
-            propias[int(editar)] = nueva
+        edit_idx = int(editar) if (editar.isdigit() and int(editar) < len(propias)) else None
+        tlabel = "origen" if tipo == "src" else "destino"
+
+        def _redundante(ex_ports):
+            # ¿la exclusion existente ya cubre lo que pide la nueva? (una exclusion puede ser por puerto)
+            ex_ports = ex_ports or []
+            if not ex_ports:
+                return True, "todos los puertos"          # la existente cubre todo
+            if not puertos:
+                return False, ""                           # la nueva pide todos; la existente solo algunos
+            inter = sorted(set(ex_ports) & set(puertos))
+            if inter:
+                que = "el puerto " if len(inter) == 1 else "los puertos "
+                return True, que + ", ".join(str(x) for x in inter)
+            return False, ""                               # misma IP pero puertos distintos: se permite
+
+        # duplicado: misma IP + mismo tipo + puerto que se solapa (ignora la fila que se edita)
+        for j, r in enumerate(propias):
+            if j == edit_idx:
+                continue
+            if r.get("ip") == ip and r.get("tipo") == tipo:
+                dup, txt = _redundante(r.get("puertos"))
+                if dup:
+                    return self._html(exclusiones_page(
+                        f"Esa IP ya esta excluida como {tlabel} en {txt}: {ip}. No se agrego para no duplicar.",
+                        ok=False, edit_idx=edit_idx))
+        # tambien si ya viene excluida por el archivo .conf (legacy, no editable aqui)
+        for r in cargar_exclusiones():
+            if r.get("motivo") == "(conf)" and r.get("ip") == ip and r.get("tipo") == tipo:
+                dup, txt = _redundante(r.get("puertos"))
+                if dup:
+                    return self._html(exclusiones_page(
+                        f"Esa IP ya esta excluida por configuracion (.conf) como {tlabel} en {txt}: {ip}.", ok=False))
+        if edit_idx is not None:
+            propias[edit_idx] = nueva
             msg_ok = f"Exclusion actualizada: {ip}."
         else:
             propias.append(nueva)
@@ -2887,6 +2920,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

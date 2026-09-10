@@ -848,16 +848,33 @@ def dur(a, b):
 host = os.uname().nodename if hasattr(os, "uname") else "suricata"
 gen = datetime.now(TZ_EC).strftime("%Y-%m-%d %H:%M")
 
+def ipnum(s):
+    # convierte una IPv4 en entero para ordenar bien (10 antes que 9 no; 9<10 numerico)
+    p = s.split(".")
+    if len(p) == 4 and all(x.isdigit() for x in p):
+        try:
+            return (int(p[0]) << 24) + (int(p[1]) << 16) + (int(p[2]) << 8) + int(p[3])
+        except ValueError:
+            return 0
+    return 0
+
 top_flujos = sorted(flujos.items(), key=lambda kv: kv[1][0], reverse=True)[:150]
 filas = []
 for (src, sport, dst, dport, proto, sig), (cnt, first, last) in top_flujos:
     hp = datetime.fromtimestamp(first, TZ_EC).strftime("%d/%m %H:%M") if first else "-"
     hu = datetime.fromtimestamp(last, TZ_EC).strftime("%H:%M") if last else "-"
+    dursec = int((last - first)) if (first and last) else 0
+    sig_es = traducir(sig)
     filas.append(
-        f"<tr><td class='mono'>{esc(src)}</td><td class='mono num'>{esc(sport)}</td>"
-        f"<td class='mono dst'>{esc(dst)}</td><td class='mono num'>{esc(dport)}</td>"
-        f"<td>{esc(proto)}</td><td title='{esc(sig)}'>{esc(traducir(sig))}</td>"
-        f"<td class='num'>{cnt}</td><td class='mono'>{hp} &rarr; {hu}</td><td>{dur(first,last)}</td></tr>")
+        f"<tr><td class='mono' data-s='{ipnum(src)}'>{esc(src)}</td>"
+        f"<td class='mono num' data-s='{int(sport) if str(sport).isdigit() else -1}'>{esc(sport)}</td>"
+        f"<td class='mono dst' data-s='{ipnum(dst)}'>{esc(dst)}</td>"
+        f"<td class='mono num' data-s='{int(dport) if str(dport).isdigit() else -1}'>{esc(dport)}</td>"
+        f"<td data-s='{esc(proto)}'>{esc(proto)}</td>"
+        f"<td title='{esc(sig)}' data-s='{esc(sig_es)}'>{esc(sig_es)}</td>"
+        f"<td class='num' data-s='{cnt}'>{cnt}</td>"
+        f"<td class='mono' data-s='{int(first or 0)}'>{hp} &rarr; {hu}</td>"
+        f"<td data-s='{dursec}'>{dur(first,last)}</td></tr>")
 
 def top(counter, n=12, fmt=str):
     return [(fmt(k), v) for k, v in counter.most_common(n)]
@@ -866,6 +883,57 @@ by_sig = Counter()
 for _k, _v in flujos.items():
     by_sig[traducir(_k[5])] += _v[0]   # agrupar por descripcion en espanol (sin duplicados)
 firmas_top = [(s[:60], n) for s, n in by_sig.most_common(10)]
+
+def top_origenes_section(n_src=5, n_sub=8):
+    """Top de IPs origen que mas peticionan, con el desglose de cada una:
+    desde que puerto origen, hacia que IP destino y hacia que puerto destino.
+    Se arma con by_src (totales reales) + flujos (ya trae sport/dport/proto)."""
+    tops = by_src.most_common(n_src)
+    if not tops:
+        return ("<!--TOP_INI--><section class=\"card\"><h2>Top 5 IPs origen que mas peticionan</h2>"
+                "<p class=\"muted\">Sin ataques en la ventana.</p></section><!--TOP_FIN-->")
+    cards = []
+    for i, (src, tot) in enumerate(tops, 1):
+        agg = {}                       # (sport,dst,dport,proto) -> veces
+        dsts, dports = set(), set()
+        for (s, sp, dst, dp, pr, sig), v in flujos.items():
+            if s != src:
+                continue
+            agg[(sp, dst, dp, pr)] = agg.get((sp, dst, dp, pr), 0) + v[0]
+            dsts.add(dst); dports.add(dp)
+        sub = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:n_sub]
+        rows = "".join(
+            f"<tr><td class='mono'>{esc(sp or '-')}</td>"
+            f"<td class='mono' style='color:#184f95'>{esc(dst or '-')}</td>"
+            f"<td class='mono'>{esc(dp or '-')}</td>"
+            f"<td class='mono'>{esc((pr or '-').upper())}</td>"
+            f"<td class='num'>{c:,}</td></tr>" for (sp, dst, dp, pr), c in sub)
+        cards.append(
+            f"<div class='tcard'>"
+            f"<div class='thd'><span class='rank'>#{i}</span>"
+            f"<span class='ipx mono'>{esc(src)}</span>"
+            f"<span class='tot'>{tot:,} alertas</span>"
+            f"<span class='meta'>&rarr; {len(dsts):,} IP destino &middot; {len(dports):,} puertos destino</span></div>"
+            f"<div class='tablewrap'><table><thead><tr>"
+            f"<th>Puerto origen</th><th>IP destino (a donde)</th><th class='num'>Puerto destino</th>"
+            f"<th>Protocolo</th><th class='num'>Peticiones</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></div></div>")
+    return (
+        "<!--TOP_INI-->"
+        "<style>"
+        ".topwrap .tcard{border:1px solid #e7e6e2;border-radius:12px;background:#fff;margin:0 0 14px;overflow:hidden}"
+        ".topwrap .thd{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 15px;background:#f4f4f2;border-bottom:1px solid #e7e6e2}"
+        ".topwrap .rank{font-weight:800;color:#2a78d6;font-size:15px}"
+        ".topwrap .ipx{font-weight:700;font-size:15px}"
+        ".topwrap .tot{background:#e34948;color:#fff;font-size:12px;font-weight:700;padding:3px 9px;border-radius:20px}"
+        ".topwrap .meta{color:#52514e;font-size:12px;margin-left:auto}"
+        "</style>"
+        "<section class=\"card\"><h2>Top 5 IPs origen que mas peticionan</h2>"
+        "<p class=\"muted\" style=\"margin:0 0 12px\">Quien ataca mas, hacia que IP destino, desde que puerto origen y hacia que puerto destino.</p>"
+        f"<div class=\"topwrap\">{''.join(cards)}</div></section>"
+        "<!--TOP_FIN-->")
+
+top_sec = top_origenes_section()
 
 doc = f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -892,6 +960,10 @@ main{{padding:20px 28px;max-width:1200px;margin:0 auto}}
 table{{width:100%;border-collapse:collapse;font-size:12.5px}}
 th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid {GRID};vertical-align:top}}
 th{{color:{INK2};font-weight:600;position:sticky;top:0;background:#fff}}
+th.sortable{{cursor:pointer;user-select:none;white-space:nowrap}}
+th.sortable:hover{{color:{BLUE}}}
+th.sortable .ar{{opacity:.35;font-size:10px;margin-left:3px}}
+th.sortable.asc .ar,th.sortable.desc .ar{{opacity:1;color:{BLUE}}}
 td.num,td.mono{{white-space:nowrap}} .mono{{font-family:ui-monospace,Consolas,monospace}}
 td.num{{text-align:right;font-variant-numeric:tabular-nums}}
 .tablewrap{{overflow-x:auto}}
@@ -923,11 +995,20 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
     {hbar("IPs destino (objetivos)", top(by_dst), "alertas")}
     {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas")}
   </div>
+  {top_sec}
   <section class="card">
     <h2>Detalle: quien ataca, a donde, por que puerto, cuando y por cuanto tiempo</h2>
     <div class="tablewrap"><table id="detalle">
-      <thead><tr><th>IP origen</th><th class="num">Puerto</th><th>IP destino (atacada)</th><th class="num">Puerto</th>
-      <th>Protocolo</th><th>Firma (tipo de ataque)</th><th class="num">Veces</th><th>Primera &rarr; ultima</th><th>Duracion</th></tr></thead>
+      <thead><tr>
+      <th class="sortable" data-col="0">IP origen<span class="ar">&#8597;</span></th>
+      <th class="num sortable" data-col="1">Puerto<span class="ar">&#8597;</span></th>
+      <th class="sortable" data-col="2">IP destino (atacada)<span class="ar">&#8597;</span></th>
+      <th class="num sortable" data-col="3">Puerto<span class="ar">&#8597;</span></th>
+      <th class="sortable" data-col="4">Protocolo<span class="ar">&#8597;</span></th>
+      <th class="sortable" data-col="5">Firma (tipo de ataque)<span class="ar">&#8597;</span></th>
+      <th class="num sortable" data-col="6">Veces<span class="ar">&#8597;</span></th>
+      <th class="sortable" data-col="7">Primera &rarr; ultima<span class="ar">&#8597;</span></th>
+      <th class="sortable" data-col="8">Duracion<span class="ar">&#8597;</span></th></tr></thead>
       <tbody>{"".join(filas) if filas else '<tr><td colspan="9" class="muted">Sin ataques en la ventana.</td></tr>'}</tbody>
     </table></div>
     <div class="pager" id="pager">
@@ -938,21 +1019,47 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
     </div>
     <script>
     (function(){{
-      var rows=[].slice.call(document.querySelectorAll('#detalle tbody tr'));
-      if(rows.length<=20){{var pg=document.getElementById('pager'); if(pg) pg.style.display='none'; return;}}
+      var tbody=document.querySelector('#detalle tbody');
+      var rows=[].slice.call(tbody.querySelectorAll('tr'));
       var per=20, n=Math.max(1,Math.ceil(rows.length/per)), p=1;
+      var pager=document.getElementById('pager');
+      var small=rows.length<=per;
+      if(small && pager) pager.style.display='none';
       function rd(){{var m=(location.hash||'').match(/p=(\\d+)/); return m?Math.min(n,Math.max(1,+m[1])):1;}}
       function draw(){{
+        if(small){{for(var i=0;i<rows.length;i++) rows[i].style.display=''; return;}}
         for(var i=0;i<rows.length;i++) rows[i].style.display=(i>=(p-1)*per&&i<p*per)?'':'none';
         document.getElementById('pgi').textContent='Pagina '+p+' de '+n;
         document.getElementById('prev').disabled=(p<=1);
         document.getElementById('next').disabled=(p>=n);
       }}
       function go(x){{p=Math.min(n,Math.max(1,x)); try{{location.hash='p='+p;}}catch(e){{}} draw();}}
-      p=rd();
-      document.getElementById('prev').onclick=function(){{go(p-1);}};
-      document.getElementById('next').onclick=function(){{go(p+1);}};
-      window.addEventListener('hashchange',function(){{p=rd();draw();}});
+      // ordenar al pulsar un encabezado: 1er clic ascendente, 2do descendente
+      var ths=[].slice.call(document.querySelectorAll('#detalle thead th.sortable'));
+      function val(tr,i){{
+        var td=tr.children[i]; if(!td) return '';
+        var s=td.getAttribute('data-s'); if(s===null) s=td.textContent;
+        if(s!=='' && /^-?\\d/.test(s) && !isNaN(parseFloat(s))) return parseFloat(s);
+        return String(s).toLowerCase();
+      }}
+      ths.forEach(function(th){{
+        th.onclick=function(){{
+          var col=+th.getAttribute('data-col');
+          var asc=!th.classList.contains('asc');
+          ths.forEach(function(o){{o.classList.remove('asc','desc'); var a=o.querySelector('.ar'); if(a) a.innerHTML='&#8597;';}});
+          th.classList.add(asc?'asc':'desc');
+          var ar=th.querySelector('.ar'); if(ar) ar.innerHTML=asc?'&#8593;':'&#8595;';
+          rows.sort(function(a,b){{var x=val(a,col),y=val(b,col); if(x<y)return asc?-1:1; if(x>y)return asc?1:-1; return 0;}});
+          rows.forEach(function(r){{tbody.appendChild(r);}});
+          p=1; draw();
+        }};
+      }});
+      if(!small){{
+        p=rd();
+        document.getElementById('prev').onclick=function(){{go(p-1);}};
+        document.getElementById('next').onclick=function(){{go(p+1);}};
+        window.addEventListener('hashchange',function(){{p=rd();draw();}});
+      }}
       draw();
     }})();
     </script>
@@ -1232,6 +1339,115 @@ def live_feed_html():
         f'<p class="muted" style="margin:8px 2px">Agrupado por equipo y tipo &middot; &times;N = veces repetido</p>'
         f'</section>')
 
+def top_origenes(path=EVE, maxbytes=12_000_000, topn=5, subn=8):
+    """Top de IPs origen que mas alertan, con el desglose de cada una:
+    desde que puerto origen, hacia que IP destino y hacia que puerto destino."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2); size = f.tell(); start = max(0, size - maxbytes)
+            f.seek(start); data = f.read()
+    except OSError:
+        return [], 0
+    lines = data.decode("utf-8", "replace").split("\n")
+    if start > 0 and lines:
+        lines = lines[1:]              # descarta la primera linea, casi seguro cortada
+    reglas = cargar_exclusiones()
+    total, combos, dst_set, dp_set = {}, {}, {}, {}
+    procesados = 0
+    for line in lines:
+        if '"event_type":"alert"' not in line:
+            continue
+        get = lambda k: (_RE[k].search(line).group(1) if _RE[k].search(line) else "")
+        sig = get("sig")
+        if sig.startswith("ET INFO"):
+            continue
+        src = get("src_ip"); dst = get("dest_ip")
+        sp = get("src_port"); dp = get("dest_port"); pr = get("proto")
+        if not src:
+            continue
+        if _excluido(reglas, src, dst, int(dp) if dp else None):
+            continue
+        procesados += 1
+        total[src] = total.get(src, 0) + 1
+        k = (src, sp, dst, dp, pr)
+        combos[k] = combos.get(k, 0) + 1
+        dst_set.setdefault(src, set()).add(dst)
+        dp_set.setdefault(src, set()).add(dp)
+    tops = sorted(total.items(), key=lambda x: x[1], reverse=True)[:topn]
+    filas = []
+    for src, cnt in tops:
+        sub = [(sp, dst, dp, pr, c) for (s, sp, dst, dp, pr), c in combos.items() if s == src]
+        sub.sort(key=lambda x: x[4], reverse=True)
+        filas.append({"src": src, "total": cnt,
+                      "n_dst": len(dst_set.get(src, ())),
+                      "n_dp": len(dp_set.get(src, ())),
+                      "sub": sub[:subn]})
+    return filas, procesados
+
+def _top_cards_tail():
+    """Respaldo: arma las tarjetas del Top con la cola en vivo (mientras no hay reporte 24h)."""
+    filas, procesados = top_origenes()
+    if not filas:
+        return ("<div class='topwrap'><div class='tcard'><p class='muted' style='margin:0;padding:12px'>"
+                "Sin ataques recientes todavia; en cuanto entre trafico apareceran aqui.</p></div></div>", procesados)
+    cards = []
+    for i, r in enumerate(filas, 1):
+        trs = "".join(
+            f"<tr><td class='mono'>{html.escape(sp or '-')}</td>"
+            f"<td class='mono' style='color:#184f95'>{html.escape(dst or '-')}</td>"
+            f"<td class='mono'>{html.escape(dp or '-')}</td>"
+            f"<td class='mono'>{html.escape((pr or '-').upper())}</td>"
+            f"<td class='num'>{c:,}</td></tr>" for sp, dst, dp, pr, c in r["sub"])
+        cards.append(
+            f"<div class='tcard'>"
+            f"<div class='thd'><span class='rank'>#{i}</span>"
+            f"<span class='ipx mono'>{html.escape(r['src'])}</span>"
+            f"<span class='tot'>{r['total']:,} alertas</span>"
+            f"<span class='meta'>&rarr; {r['n_dst']} IP destino &middot; {r['n_dp']} puertos destino</span></div>"
+            f"<div class='tablewrap'><table><thead><tr>"
+            f"<th>Puerto origen</th><th>IP destino (a donde)</th>"
+            f"<th class='num'>Puerto destino</th><th>Protocolo</th><th class='num'>Peticiones</th>"
+            f"</tr></thead><tbody>{trs}</tbody></table></div></div>")
+    return "<div class='topwrap'>" + "".join(cards) + "</div>", procesados
+
+def top_page():
+    css_rep, top_html = partes_top()
+    if top_html.strip():
+        cuerpo, nota = top_html, "Ultimas 24h &middot; se actualiza junto con el reporte (cada ~5 min)."
+    else:
+        cuerpo, procesados = _top_cards_tail()
+        nota = (f"Muestra reciente ({procesados:,} alertas) mientras se genera el reporte de 24h; "
+                "recarga en unos minutos para el ranking completo.")
+    css = (css_rep +
+           "<style>"
+           "body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
+           "main{max-width:1000px;margin:0 auto;padding:18px 22px}"
+           "h1{font-size:20px;margin:0 0 2px}.subx{color:#52514e;font-size:13px;margin:0 0 18px}"
+           ".topwrap .tcard{border:1px solid #e7e6e2;border-radius:12px;background:#fff;margin:0 0 14px;overflow:hidden}"
+           ".topwrap .thd{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 15px;background:#f4f4f2;border-bottom:1px solid #e7e6e2}"
+           ".topwrap .rank{font-weight:800;color:#2a78d6;font-size:15px}"
+           ".topwrap .ipx{font-weight:700;font-size:15px;font-family:ui-monospace,Consolas,monospace}"
+           ".topwrap .tot{background:#e34948;color:#fff;font-size:12px;font-weight:700;padding:3px 9px;border-radius:20px}"
+           ".topwrap .meta{color:#52514e;font-size:12px;margin-left:auto}"
+           ".topwrap table{width:100%;border-collapse:collapse;font-size:13px}"
+           ".topwrap thead th{text-align:left;color:#52514e;font-weight:600;padding:8px 14px;border-bottom:1px solid #eee;background:#fbfbfa}"
+           ".topwrap tbody td{padding:7px 14px;border-bottom:1px solid #f2f1ee}"
+           ".topwrap tbody tr:hover{background:#eef4fd}"
+           ".topwrap .num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}"
+           ".topwrap .mono{font-family:ui-monospace,Consolas,monospace}"
+           ".topwrap .tablewrap{overflow-x:auto}"
+           "</style>")
+    body = (f"<!doctype html><html lang=es><head><meta charset=utf-8>"
+            f"<link rel=icon type=image/png href=/favicon.ico>"
+            f"<meta name=viewport content='width=device-width,initial-scale=1'>"
+            f"<meta http-equiv=refresh content=60><title>Top origenes</title>{css}</head><body>"
+            + NAV.replace('<a href="/" class="on">En vivo</a>', '<a href="/">En vivo</a>')
+                 .replace('<a href="/top">Top origenes</a>', '<a href="/top" class="on">Top origenes</a>') +
+            f"<main><h1>Top 5 IPs origen que mas peticionan</h1>"
+            f"<p class='subx'>Quien ataca mas, hacia que IP destino, desde que puerto origen y hacia que puerto destino. "
+            f"{nota}</p>{cuerpo}</main></body></html>")
+    return body
+
 LOGDIR = "/var/log/suricata"
 GEN = "/usr/local/bin/suricata-html-report"
 CONF = "/etc/suricata-dashboard.conf"
@@ -1255,9 +1471,10 @@ def newest_report():
     return fs[0] if fs else None
 
 _DETALLE_RE = re.compile(r'<section class="card">\s*<h2>Detalle:.*?</section>', re.S)
+_TOP_RE = re.compile(r'<!--TOP_INI-->.*?<!--TOP_FIN-->', re.S)
 
 def partes_reporte():
-    """Divide el ultimo reporte en (estilos, resumen-sin-detalle, seccion-detalle)."""
+    """Divide el ultimo reporte en (estilos, resumen-sin-detalle-ni-top, seccion-detalle)."""
     f = newest_report()
     if not f:
         return "", "", ""
@@ -1271,8 +1488,23 @@ def partes_reporte():
     inner = mm.group(1) if mm else ""
     md = _DETALLE_RE.search(inner)
     detalle = md.group(0) if md else ""
-    resumen = _DETALLE_RE.sub("", inner)
+    # el resumen de "En vivo" no lleva ni la tabla de detalle ni el Top (van en sus pestanas)
+    resumen = _TOP_RE.sub("", _DETALLE_RE.sub("", inner))
     return css, resumen, detalle
+
+def partes_top():
+    """(estilos, seccion Top-origenes) del ultimo reporte, para la pestana /top (24h)."""
+    f = newest_report()
+    if not f:
+        return "", ""
+    try:
+        doc = open(f, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return "", ""
+    mh = re.search(r"<style>(.*?)</style>", doc, re.S)
+    css = f"<style>{mh.group(1)}</style>" if mh else ""
+    mt = _TOP_RE.search(doc)
+    return css, (mt.group(0) if mt else "")
 
 def refrescador():
     """Hilo de fondo: regenera el reporte periodicamente, NUNCA en el request.
@@ -1301,6 +1533,7 @@ box-shadow:0 1px 6px rgba(0,0,0,.15)}
 </style>
 <div class="nav"><span class="brand"><span class="sh"></span>Estadisticas Suricata</span>
 <a href="/" class="on">En vivo</a>
+<a href="/top">Top origenes</a>
 <a href="/detalle">Detalle</a>
 <a href="/historico">Historico</a>
 <a href="/exclusiones">Exclusiones</a>
@@ -1720,6 +1953,8 @@ class H(BaseHTTPRequestHandler):
                     f"<meta http-equiv=refresh content=20><title>Estadisticas Suricata</title>"
                     f"{head_css}</head><body>{NAV}{resumen}{feed}</body></html>")
             return self._html(page)
+        if path == "/top":
+            return self._html(top_page())
         if path == "/detalle":
             head_css, _, detalle = partes_reporte()
             if not detalle.strip():
@@ -2431,3 +2666,4 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+

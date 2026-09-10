@@ -994,7 +994,17 @@ h1{{margin:0;font-size:20px}} h2{{margin:0 0 10px;font-size:15px}}
 .sub{{color:{INK2};font-size:13px}}
 main{{padding:20px 28px;max-width:1200px;margin:0 auto}}
 .tiles{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}}
-.tile{{border:1px solid {GRID};border-radius:10px;padding:14px 16px;background:#fff}}
+.tile{{border:1px solid {GRID};border-radius:10px;padding:14px 16px;background:#fff;position:relative;cursor:help}}
+.tile:hover{{border-color:#c9d4e3;box-shadow:0 2px 10px rgba(0,0,0,.06)}}
+.tile .q{{position:absolute;right:11px;top:11px;width:16px;height:16px;border-radius:50%;border:1px solid {GRID};
+color:{INK2};font:700 11px system-ui;text-align:center;line-height:15px}}
+.tile .tip{{visibility:hidden;opacity:0;position:absolute;left:0;top:100%;margin-top:8px;z-index:40;
+width:max-content;max-width:290px;background:#0b0b0b;color:#fff;font:400 12px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;
+padding:10px 12px;border-radius:9px;box-shadow:0 6px 18px rgba(0,0,0,.25);transition:opacity .12s;white-space:normal;text-align:left}}
+.tile .tip b{{color:#8fc0ff}}
+.tile .tip::before{{content:"";position:absolute;left:18px;top:-6px;border:6px solid transparent;border-bottom-color:#0b0b0b;border-top:0}}
+.tile:hover .tip{{visibility:visible;opacity:1}}
+@media print{{.tile .q,.tile .tip{{display:none}}}}
 .tile .big{{font-size:30px;font-weight:700;line-height:1}}
 .tile .lab{{font-size:12px;color:{INK2};margin-top:6px;display:flex;align-items:center;gap:6px}}
 .dot{{width:11px;height:11px;border-radius:3px;display:inline-block}}
@@ -1038,10 +1048,14 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
 </header>
 <main><!--COB:{COB}-->
   <div class="tiles">
-    <div class="tile"><div class="big">{total:,}</div><div class="lab">alertas graves</div></div>
-    <div class="tile"><div class="big">{len(by_src):,}</div><div class="lab"><span class="dot" style="background:#e34948"></span>IPs origen (atacantes)</div></div>
-    <div class="tile"><div class="big">{len(by_dst):,}</div><div class="lab"><span class="dot" style="background:#eb6834"></span>IPs destino (objetivos)</div></div>
-    <div class="tile"><div class="big">{len(by_dport):,}</div><div class="lab"><span class="dot" style="background:#eda100"></span>puertos destino distintos</div></div>
+    <div class="tile"><span class="q">?</span><div class="big">{total:,}</div><div class="lab">alertas graves</div>
+      <span class="tip"><b>Total de alertas en {COB}</b>, ya sin el ruido informativo (ET INFO). Es la suma de todas las barras de la linea de tiempo de abajo.</span></div>
+    <div class="tile"><span class="q">?</span><div class="big">{len(by_src):,}</div><div class="lab"><span class="dot" style="background:#e34948"></span>IPs origen (atacantes)</div>
+      <span class="tip"><b>IPs de ORIGEN distintas</b> que dispararon al menos una alerta en {COB}. Ojo: muchas son equipos que solo hicieron una consulta DNS sospechosa, no ataque real. La grafica de abajo muestra solo el top.</span></div>
+    <div class="tile"><span class="q">?</span><div class="big">{len(by_dst):,}</div><div class="lab"><span class="dot" style="background:#eb6834"></span>IPs destino (objetivos)</div>
+      <span class="tip"><b>IPs de DESTINO distintas</b> hacia donde se dirigio el trafico alertado en {COB} (el objetivo). Suele ser tu propio DNS y unos pocos servidores.</span></div>
+    <div class="tile"><span class="q">?</span><div class="big">{len(by_dport):,}</div><div class="lab"><span class="dot" style="background:#eda100"></span>puertos destino distintos</div>
+      <span class="tip"><b>Puertos de destino distintos</b> que aparecieron en las alertas de {COB} (443, 80, 53, 22...). El top esta en la grafica "Puertos de destino mas atacados".</span></div>
   </div>
   {timeline(by_hour)}
   <div class="grid">
@@ -2873,6 +2887,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

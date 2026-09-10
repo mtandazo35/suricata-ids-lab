@@ -711,6 +711,7 @@ by_hour = Counter()
 flujos = {}            # (src,sport,dst,dport,proto,sig) -> [count, first, last]
 total = 0
 seen = 0
+ts_min = None          # timestamp del evento mas antiguo dentro de la ventana (cobertura real)
 
 files = sorted(glob.glob(f"{LOGDIR}/eve.json*"), key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
 for p in files:
@@ -744,6 +745,8 @@ for p in files:
                 by_dport[f"{dport}/{proto}"] += 1
             if ts:
                 by_hour[int(ts // BUCKET)] += 1
+                if ts_min is None or ts < ts_min:
+                    ts_min = ts
             k = (src, sport, dst, dport, proto, sig)
             f = flujos.get(k)
             if f is None:
@@ -831,7 +834,7 @@ def timeline(by_hour):
         if (n - 1 - i) % tick_every == 0:
             ticks.append(f'<text x="{x+bw/2:.1f}" y="{H-pad+14:.0f}" text-anchor="middle" class="tick">{t0.strftime("%H:%M")}</text>')
     pico_t = datetime.fromtimestamp((lo + vals.index(mx)) * BUCKET, TZ_EC).strftime("%H:%M") if mx else ""
-    return (f'<section class="card wide"><h2>Ataques por hora y minuto (ultimas {HOURS}h)</h2>'
+    return (f'<section class="card wide"><h2>Ataques por hora y minuto ({COB})</h2>'
             f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" aria-label="alertas por intervalo" style="cursor:default">'
             f'<line x1="{pad}" y1="{H-pad}" x2="{W-pad}" y2="{H-pad}" stroke="{GRID}"/>'
             f'{"".join(bars)}{"".join(ticks)}</svg>'
@@ -847,6 +850,21 @@ def dur(a, b):
 
 host = os.uname().nodename if hasattr(os, "uname") else "suricata"
 gen = datetime.now(TZ_EC).strftime("%Y-%m-%d %H:%M")
+
+def cobertura_label():
+    """Cuanto tiempo cubren realmente los datos. Si no llega a las HORAS pedidas
+    (p.ej. Suricata lleva poco capturando), muestra la cobertura real en vez de mentir."""
+    if ts_min is None:
+        return f"ultimas {HOURS} horas"
+    cob = time.time() - ts_min
+    if cob >= (HOURS - 0.5) * 3600:      # cubre practicamente la ventana completa
+        return f"ultimas {HOURS} horas"
+    h = int(cob // 3600); m = int((cob % 3600) // 60)
+    if h >= 1:
+        return f"ultimas {h} h" + (f" {m} min" if m else "")
+    return f"ultimos {max(1, m)} min"
+
+COB = cobertura_label()
 
 def ipnum(s):
     # convierte una IPv4 en entero para ordenar bien (10 antes que 9 no; 9<10 numerico)
@@ -979,9 +997,9 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
 </style></head><body>
 <header>
   <div><h1>Reporte de ataques - IDS {esc(host)}</h1>
-  <div class="sub">Ultimas {HOURS} horas &middot; {total:,} alertas graves &middot; generado {gen}</div></div>
+  <div class="sub">{COB[0].upper() + COB[1:]} &middot; {total:,} alertas graves &middot; generado {gen}</div></div>
 </header>
-<main>
+<main><!--COB:{COB}-->
   <div class="tiles">
     <div class="tile"><div class="big">{total:,}</div><div class="lab">alertas graves</div></div>
     <div class="tile"><div class="big">{len(by_src):,}</div><div class="lab"><span class="dot" style="background:#e34948"></span>IPs origen (atacantes)</div></div>
@@ -2052,7 +2070,9 @@ class H(BaseHTTPRequestHandler):
             feed = live_feed_html()
             head_css, resumen_inner, _ = partes_reporte()   # resumen SIN la tabla de detalle
             if resumen_inner.strip():
-                resumen = ("<h2 style='margin:16px 28px 0'>Resumen de las ultimas 24h</h2>"
+                mcob = re.search(r'<!--COB:([^>]*?)-->', resumen_inner)  # cobertura real del reporte
+                cob = mcob.group(1) if mcob else "ultimas 24 horas"
+                resumen = (f"<h2 style='margin:16px 28px 0'>Resumen de las {cob}</h2>"
                            f"<main>{resumen_inner}</main>")
             else:
                 resumen = ("<main style='padding:24px'><p style='color:#52514e'>El resumen de 24h se "
@@ -2781,6 +2801,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

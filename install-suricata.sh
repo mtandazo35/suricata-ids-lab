@@ -974,6 +974,8 @@ def top_origenes_section(n_src=5, n_sub=8):
         ".topwrap .ipx{font-weight:700;font-size:15px}"
         ".topwrap .tot{background:#e34948;color:#fff;font-size:12px;font-weight:700;padding:3px 9px;border-radius:20px}"
         ".topwrap .meta{color:#52514e;font-size:12px;margin-left:auto}"
+        ".topwrap table{table-layout:fixed}"
+        ".topwrap table th,.topwrap table td{text-align:center!important;padding-left:6px;padding-right:6px}"
         "</style>"
         "<section class=\"card\"><h2>Top 5 IPs origen que mas peticionan</h2>"
         "<p class=\"muted\" style=\"margin:0 0 12px\">Quien ataca mas, hacia que IP destino, desde que puerto origen y hacia que puerto destino.</p>"
@@ -1543,10 +1545,11 @@ def top_page():
            ".topwrap .tot{background:#e34948;color:#fff;font-size:12px;font-weight:700;padding:3px 9px;border-radius:20px}"
            ".topwrap .meta{color:#52514e;font-size:12px;margin-left:auto}"
            ".topwrap table{width:100%;border-collapse:collapse;font-size:13px}"
-           ".topwrap thead th{text-align:left;color:#52514e;font-weight:600;padding:8px 14px;border-bottom:1px solid #eee;background:#fbfbfa}"
-           ".topwrap tbody td{padding:7px 14px;border-bottom:1px solid #f2f1ee}"
+           ".topwrap table{table-layout:fixed}"
+           ".topwrap thead th{text-align:center;color:#52514e;font-weight:600;padding:8px 14px;border-bottom:1px solid #eee;background:#fbfbfa}"
+           ".topwrap tbody td{padding:7px 14px;border-bottom:1px solid #f2f1ee;text-align:center}"
            ".topwrap tbody tr:hover{background:#eef4fd}"
-           ".topwrap .num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}"
+           ".topwrap .num{text-align:center;white-space:nowrap;font-variant-numeric:tabular-nums}"
            ".topwrap .mono{font-family:ui-monospace,Consolas,monospace}"
            ".topwrap .tablewrap{overflow-x:auto}"
            "</style>")
@@ -3346,6 +3349,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

@@ -1279,6 +1279,18 @@ def sev(sig):
             return color, etq
     return "#8a8a86", "OTRO"
 
+_SEVRANK = {"INFECTADO": 3, "ATAQUE": 2, "SOSPECHOSO": 1, "OTRO": 0}
+
+def _ipnum(s):
+    """IPv4 -> entero para ordenar bien (9 antes que 10). No-IP -> 0."""
+    p = s.split(".")
+    if len(p) == 4 and all(x.isdigit() for x in p):
+        try:
+            return (int(p[0]) << 24) + (int(p[1]) << 16) + (int(p[2]) << 8) + int(p[3])
+        except ValueError:
+            return 0
+    return 0
+
 # Traduccion de las firmas ET (ingles) a una descripcion en espanol. Se evalua en orden;
 # lo especifico antes que lo generico. Si no casa, se deja la firma original.
 _TRAD = [
@@ -1368,14 +1380,17 @@ def live_feed_html():
         for hh, src, dst, puerto, sig, cnt in filas:
             color, etq = sev(sig)
             veces = f'<span class="veces">&times;{cnt}</span>' if cnt > 1 else ""
+            pnum = puerto.split("/", 1)[0]
+            pnum = int(pnum) if pnum.isdigit() else -1
+            sig_es = traducir(sig)
             tr.append(
-                f'<tr style="border-left:4px solid {color}">'
-                f'<td class="mono t">{html.escape(hh)}</td>'
-                f'<td><span class="badge" style="background:{color}">{etq}</span></td>'
-                f'<td class="mono">{html.escape(src)}</td>'
-                f'<td class="mono dst">{html.escape(dst)}</td>'
-                f'<td class="mono">{html.escape(puerto)}</td>'
-                f'<td title="{html.escape(sig)}">{html.escape(traducir(sig))} {veces}</td></tr>')
+                f'<tr data-r style="border-left:4px solid {color}">'
+                f'<td class="mono t" data-s="{html.escape(hh)}">{html.escape(hh)}</td>'
+                f'<td data-s="{_SEVRANK.get(etq, 0)}"><span class="badge" style="background:{color}">{etq}</span></td>'
+                f'<td class="mono" data-s="{_ipnum(src)}">{html.escape(src)}</td>'
+                f'<td class="mono dst" data-s="{_ipnum(dst)}">{html.escape(dst)}</td>'
+                f'<td class="mono" data-s="{pnum}">{html.escape(puerto)}</td>'
+                f'<td title="{html.escape(sig)}" data-s="{html.escape(sig_es)}">{html.escape(sig_es)} {veces}</td></tr>')
         cuerpo = "".join(tr)
     ahora = datetime.now(TZ_EC).strftime("%H:%M:%S")
     return (
@@ -1389,6 +1404,10 @@ def live_feed_html():
         '.feed table{width:100%;border-collapse:collapse;font-size:12.5px}'
         '.feed thead th{position:sticky;top:0;background:#f4f4f2;color:#52514e;text-align:left;'
         'padding:9px 10px;font-weight:600;border-bottom:1px solid #e7e6e2;z-index:1}'
+        '.feed thead th.sortable{cursor:pointer;user-select:none;white-space:nowrap}'
+        '.feed thead th.sortable:hover{color:#2a78d6}'
+        '.feed thead th .ar{opacity:.35;font-size:10px;margin-left:3px}'
+        '.feed thead th.asc .ar,.feed thead th.desc .ar{opacity:1;color:#2a78d6}'
         '.feed tbody td{padding:7px 10px;border-bottom:1px solid #f0efec;vertical-align:middle}'
         '.feed tbody tr:nth-child(even){background:#fbfbfa}'
         '.feed tbody tr:hover{background:#eef4fd}'
@@ -1402,10 +1421,35 @@ def live_feed_html():
         f'<section class="feed">'
         f'<h2><span class="pulse"></span>Ultimos ataques en vivo'
         f'<span style="font-weight:400;color:#52514e;font-size:12px">se actualiza solo &middot; {ahora}</span></h2>'
-        f'<div class="feedwrap"><table>'
-        f'<thead><tr><th>Hora</th><th>Tipo</th><th>Origen (equipo)</th><th>Destino</th><th>Puerto</th><th>Ataque</th></tr></thead>'
+        f'<div class="feedwrap"><table id="feedtbl">'
+        f'<thead><tr>'
+        f'<th class="sortable" data-col="0">Hora<span class="ar">&#8597;</span></th>'
+        f'<th class="sortable" data-col="1">Tipo<span class="ar">&#8597;</span></th>'
+        f'<th class="sortable" data-col="2">Origen (equipo)<span class="ar">&#8597;</span></th>'
+        f'<th class="sortable" data-col="3">Destino<span class="ar">&#8597;</span></th>'
+        f'<th class="sortable" data-col="4">Puerto<span class="ar">&#8597;</span></th>'
+        f'<th class="sortable" data-col="5">Ataque<span class="ar">&#8597;</span></th></tr></thead>'
         f'<tbody>{cuerpo}</tbody></table></div>'
-        f'<p class="muted" style="margin:8px 2px">Agrupado por equipo y tipo &middot; &times;N = veces repetido</p>'
+        f'<p class="muted" style="margin:8px 2px">Agrupado por equipo y tipo &middot; &times;N = veces repetido '
+        f'&middot; pulsa un encabezado para ordenar</p>'
+        '<script>(function(){'
+        'var tb=document.getElementById("feedtbl");if(!tb)return;'
+        'var tbody=tb.querySelector("tbody");'
+        'var ths=[].slice.call(tb.querySelectorAll("thead th.sortable"));'
+        'function val(tr,i){var td=tr.children[i];if(!td)return"";var s=td.getAttribute("data-s");'
+        'if(s===null)s=td.textContent;if(s!==""&&/^-?\\d/.test(s)&&!isNaN(parseFloat(s)))return parseFloat(s);'
+        'return String(s).toLowerCase();}'
+        'function apply(col,asc){var rows=[].slice.call(tbody.querySelectorAll("tr[data-r]"));if(!rows.length)return;'
+        'rows.sort(function(a,b){var x=val(a,col),y=val(b,col);if(x<y)return asc?-1:1;if(x>y)return asc?1:-1;return 0;});'
+        'rows.forEach(function(r){tbody.appendChild(r);});'
+        'ths.forEach(function(o){o.classList.remove("asc","desc");var a=o.querySelector(".ar");if(a)a.innerHTML="&#8597;";});'
+        'var th=ths.filter(function(o){return +o.getAttribute("data-col")===col;})[0];'
+        'if(th){th.classList.add(asc?"asc":"desc");var a=th.querySelector(".ar");if(a)a.innerHTML=asc?"&#8593;":"&#8595;";}}'
+        'ths.forEach(function(th){th.onclick=function(){var col=+th.getAttribute("data-col");'
+        'var asc=!th.classList.contains("asc");apply(col,asc);'
+        'try{sessionStorage.setItem("feedsort",col+","+(asc?1:0));}catch(e){}};});'
+        'try{var s=sessionStorage.getItem("feedsort");if(s){var p=s.split(",");apply(+p[0],p[1]==="1");}}catch(e){}'
+        '})();</script>'
         f'</section>')
 
 def top_origenes(path=EVE, maxbytes=12_000_000, topn=5, subn=8):
@@ -2920,6 +2964,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

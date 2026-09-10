@@ -1192,7 +1192,7 @@ reportes diarios, con login basico. Solo biblioteca estandar. Corre como servici
 
 Config: /etc/suricata-dashboard.conf  (PORT, USER, PASS)
 """
-import base64, glob, html, json, os, re, secrets, subprocess, threading, time
+import base64, glob, hashlib, html, json, os, re, secrets, subprocess, threading, time
 from datetime import datetime, timezone, timedelta
 
 TZ_EC = timezone(timedelta(hours=-5))   # hora de Ecuador (America/Guayaquil)
@@ -1578,6 +1578,63 @@ def conf():
 
 CFG = conf()
 
+# ---------------------------------------------------------------- usuarios y roles
+USERS_FILE = "/etc/suricata-dashboard-users.json"
+CTX = threading.local()   # contexto por peticion: user/role del que la hace
+ROLES = ("admin", "lectura")
+
+def _hash_pw(pw, salt=None):
+    if not salt:
+        salt = secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), bytes.fromhex(salt), 200_000).hex()
+    return salt, h
+
+def guardar_usuarios(lst):
+    tmp = USERS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(lst, f, ensure_ascii=False, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, USERS_FILE)
+
+def cargar_usuarios():
+    """Lista de {user, salt, hash, role}. Si no existe, migra el usuario del .conf
+    (USER/PASS) como admin, hasheando su clave. Si el .conf no tiene PASS -> [] (sin auth)."""
+    try:
+        data = json.load(open(USERS_FILE, encoding="utf-8"))
+        if isinstance(data, list) and data:
+            return data
+    except (OSError, ValueError):
+        pass
+    u = CFG.get("USER", "admin"); p = CFG.get("PASS", "")
+    if p:
+        salt, h = _hash_pw(p)
+        lst = [{"user": u, "salt": salt, "hash": h, "role": "admin"}]
+        try:
+            guardar_usuarios(lst)
+        except OSError:
+            pass
+        return lst
+    return []
+
+def buscar_usuario(user):
+    for r in cargar_usuarios():
+        if r.get("user") == user:
+            return r
+    return None
+
+def verificar_login(user, pw):
+    """Devuelve el rol si user/clave son correctos, si no None."""
+    r = buscar_usuario(user)
+    if not r:
+        return None
+    try:
+        _, h = _hash_pw(pw, r.get("salt", ""))
+    except ValueError:
+        return None
+    if secrets.compare_digest(h, r.get("hash", "")):
+        return r.get("role", "admin")
+    return None
+
 def newest_report():
     fs = sorted(glob.glob(f"{LOGDIR}/report-*.html"), key=os.path.getmtime, reverse=True)
     return fs[0] if fs else None
@@ -1652,8 +1709,11 @@ border:1px solid rgba(243,176,176,.35);transition:background .15s,color .15s,bor
 </style>"""
 
 def nav(active=""):
+    es_lectura = getattr(CTX, "role", None) == "lectura"
     parts = []
     for h, t in _NAV_LINKS:
+        if h == "/exclusiones" and es_lectura:
+            continue   # solo lectura no gestiona exclusiones
         cls = "tab on" if h == active else "tab"
         parts.append(f'<a href="{h}" class="{cls}">{t}</a>')
     return (_NAV_CSS +
@@ -1700,38 +1760,95 @@ def save_conf(user, pw):
     CFG["USER"], CFG["PASS"], CFG["PORT"] = user, pw, port
 
 def perfil_page(msg="", ok=False):
-    u = html.escape(CFG.get("USER", "admin"))
+    esc = html.escape
+    yo = getattr(CTX, "user", None)
+    mirol = getattr(CTX, "role", None)
+    es_admin = mirol != "lectura"
+    rolh = {"admin": "Administrador", "lectura": "Solo lectura"}.get(mirol, "—")
     banner = ""
     if msg:
         col = "#1baf7a" if ok else "#e34948"
         banner = (f'<div style="background:{col};color:#fff;padding:10px 14px;border-radius:8px;'
-                  f'margin-bottom:16px;font-size:13px">{html.escape(msg)}</div>')
-    _PERFIL_NAV = nav("/perfil")
-    body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
-            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Perfil</title>"
-            "<style>body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
-            "main{max-width:460px;margin:0 auto;padding:26px 20px}h1{font-size:20px;margin:0 0 4px}"
-            ".sub{color:#52514e;font-size:13px;margin:0 0 20px}"
-            ".card{border:1px solid #e7e6e2;border-radius:12px;padding:22px;background:#fff}"
-            "label{display:block;font-size:13px;color:#52514e;margin:14px 0 5px;font-weight:600}"
-            "input{width:100%;padding:9px 11px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui;box-sizing:border-box}"
-            "input:focus{outline:none;border-color:#2a78d6;box-shadow:0 0 0 3px rgba(42,120,214,.15)}"
-            "button{margin-top:20px;width:100%;padding:11px;background:#2a78d6;color:#fff;border:0;"
-            "border-radius:8px;font:600 14px system-ui;cursor:pointer}button:hover{background:#1c5cab}"
-            ".hint{color:#8a8a86;font-size:12px;margin-top:6px}</style></head><body>"
-            + _PERFIL_NAV +
-            "<main><h1>Perfil</h1><p class=sub>Cambia el usuario y la clave de acceso al panel.</p>"
-            + banner +
-            "<div class=card><form method=post action='/perfil'>"
+                  f'margin-bottom:16px;font-size:13px">{esc(msg)}</div>')
+    # --- tarjeta: cambiar mi clave ---
+    if yo:
+        card_pw = (
+            "<div class=card><h2>Cambiar mi clave</h2>"
+            f"<p class=sub2>Sesion iniciada como <b>{esc(yo)}</b> &middot; {rolh}</p>"
+            "<form method=post action='/perfil'>"
+            "<input type=hidden name=accion value=mi_clave>"
             "<label>Clave actual</label><input type=password name=actual autocomplete=current-password required>"
-            f"<label>Usuario</label><input type=text name=usuario value='{u}' autocomplete=username required>"
             "<label>Clave nueva</label><input type=password name=nueva autocomplete=new-password required>"
             "<div class=hint>Minimo 6 caracteres.</div>"
             "<label>Repetir clave nueva</label><input type=password name=nueva2 autocomplete=new-password required>"
-            "<button type=submit>Guardar cambios</button></form></div>"
-            "<p class=sub style='margin-top:16px'>Al guardar se cierra la sesion y tendras que entrar de nuevo con las credenciales nuevas.</p>"
+            "<button type=submit>Actualizar mi clave</button></form></div>")
+    else:
+        card_pw = "<div class=card><p>Autenticacion desactivada (sin usuarios configurados en el servidor).</p></div>"
+    # --- tarjeta: gestion de usuarios (solo admin) ---
+    card_users = ""
+    if es_admin and yo:
+        rows = []
+        for r in cargar_usuarios():
+            un = esc(r.get("user", "")); rl = r.get("role", "admin")
+            sa = " selected" if rl == "admin" else ""
+            sl = " selected" if rl == "lectura" else ""
+            rows.append(
+                f"<tr><td class=mono>{un}{' <span class=me>(tu)</span>' if r.get('user')==yo else ''}</td>"
+                "<td><form method=post action='/perfil' class=inl>"
+                "<input type=hidden name=accion value=rol_user>"
+                f"<input type=hidden name=user value='{un}'>"
+                f"<select name=role><option value=admin{sa}>admin</option><option value=lectura{sl}>lectura</option></select>"
+                "<button class=mini type=submit>Cambiar</button></form></td>"
+                "<td style='text-align:right'><form method=post action='/perfil' class=inl "
+                f"onsubmit=\"return confirm('Eliminar al usuario {un}?')\">"
+                "<input type=hidden name=accion value=del_user>"
+                f"<input type=hidden name=user value='{un}'>"
+                "<button class='mini danger' type=submit>Eliminar</button></form></td></tr>")
+        card_users = (
+            "<div class=card><h2>Usuarios</h2>"
+            "<p class=sub2>Los de <b>solo lectura</b> ven los paneles y reportes pero no pueden editar "
+            "exclusiones, actualizar reglas ni gestionar usuarios.</p>"
+            "<table class=ut><thead><tr><th>Usuario</th><th>Rol</th><th></th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+            "<h3>Agregar usuario</h3>"
+            "<form method=post action='/perfil'>"
+            "<input type=hidden name=accion value=add_user>"
+            "<label>Usuario</label><input type=text name=nuser autocomplete=off required>"
+            "<label>Clave</label><input type=password name=npass autocomplete=new-password required>"
+            "<div class=hint>Minimo 6 caracteres.</div>"
+            "<label>Rol</label><select name=nrole class=full>"
+            "<option value=lectura>Solo lectura</option><option value=admin>Administrador</option></select>"
+            "<button type=submit>Crear usuario</button></form></div>")
+    css = (
+        "body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
+        "main{max-width:640px;margin:0 auto;padding:26px 20px}h1{font-size:20px;margin:0 0 4px}"
+        "h2{font-size:16px;margin:0 0 6px}h3{font-size:14px;margin:22px 0 2px}"
+        ".sub{color:#52514e;font-size:13px;margin:0 0 20px}.sub2{color:#52514e;font-size:13px;margin:0 0 14px}"
+        ".card{border:1px solid #e7e6e2;border-radius:12px;padding:22px;background:#fff;margin-bottom:16px}"
+        "label{display:block;font-size:13px;color:#52514e;margin:14px 0 5px;font-weight:600}"
+        "input,select{width:100%;padding:9px 11px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui;box-sizing:border-box;background:#fff}"
+        "input:focus,select:focus{outline:none;border-color:#2a78d6;box-shadow:0 0 0 3px rgba(42,120,214,.15)}"
+        "button{margin-top:20px;width:100%;padding:11px;background:#2a78d6;color:#fff;border:0;"
+        "border-radius:8px;font:600 14px system-ui;cursor:pointer}button:hover{background:#1c5cab}"
+        ".hint{color:#8a8a86;font-size:12px;margin-top:6px}"
+        ".ut{width:100%;border-collapse:collapse;font-size:13px;margin:6px 0}"
+        ".ut th{text-align:left;color:#52514e;font-weight:600;padding:6px 8px;border-bottom:1px solid #eee}"
+        ".ut td{padding:6px 8px;border-bottom:1px solid #f2f1ee;vertical-align:middle}"
+        ".ut .mono{font-family:ui-monospace,Consolas,monospace}.me{color:#2a78d6;font-size:11px}"
+        ".inl{display:inline-flex;gap:6px;align-items:center;margin:0}"
+        ".inl select{width:auto;padding:5px 8px}"
+        "button.mini{margin:0;width:auto;padding:6px 12px;font-size:12px;background:#eef2f7;color:#0b0b0b;border:1px solid #d7d6d2}"
+        "button.mini:hover{background:#e2eaf4}"
+        "button.mini.danger{background:#fdecea;color:#c0392b;border-color:#f3c9c4}"
+        "button.mini.danger:hover{background:#e34948;color:#fff;border-color:#e34948}")
+    return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Perfil</title>"
+            f"<style>{css}</style></head><body>"
+            + nav("/perfil") +
+            "<main><h1>Perfil</h1>"
+            "<p class=sub>Tu cuenta y, si eres administrador, la gestion de usuarios del panel.</p>"
+            + banner + card_pw + card_users +
             "</main></body></html>")
-    return body
 
 def exclusiones_page(msg="", ok=False, edit_idx=None):
     reglas = cargar_exclusiones()
@@ -1948,7 +2065,8 @@ imprimir a PDF salen todas las filas.</td></tr>
 generan cada 10 minutos y los mas viejos se borran solos.</td></tr>
 <tr><td><b>Exclusiones</b></td><td>Gestiona las IPs que NO quieres ver en el panel (tus DNS,
 tu monitoreo SNMP). Agregar, editar y eliminar; se explica mas abajo.</td></tr>
-<tr><td><b>Perfil</b></td><td>Cambiar el usuario y la clave de acceso a este panel.</td></tr>
+<tr><td><b>Perfil</b></td><td>Tu cuenta: cambiar tu propia clave. Si eres <b>administrador</b>, ademas gestionas
+usuarios (crear, borrar y cambiar rol entre <b>administrador</b> y <b>solo lectura</b>).</td></tr>
 <tr><td><b>Documentacion</b></td><td>Esta pagina.</td></tr>
 <tr><td><b>Salir</b></td><td>Cierra la sesion.</td></tr>
 </table>
@@ -2064,11 +2182,17 @@ antiguas <code>IGNORAR_DESTINOS=</code>/<code>IGNORAR_ORIGENES=</code> del
 consulto un dominio malicioso. Esa senal sigue disponible en EveBox filtrando por IP de
 origen, si quieres cazar clientes infectados por sus consultas.</p>
 
-<h2>Cambiar la clave del panel</h2>
-<p>Lo mas facil es el apartado <b>Perfil</b> de este mismo panel. Tambien se puede en la VM
-editando <code>USER</code> y <code>PASS</code>:</p>
-<pre><code>nano /etc/suricata-dashboard.conf
-systemctl restart suricata-dashboard</code></pre>
+<h2>Usuarios, roles y clave</h2>
+<p>El panel soporta <b>varios usuarios</b> con dos roles:</p>
+<ul>
+<li><b>Administrador</b>: acceso total (exclusiones, actualizar reglas, gestionar usuarios).</li>
+<li><b>Solo lectura</b>: ve los paneles y reportes y puede cambiar su propia clave, pero
+no edita exclusiones, ni actualiza reglas, ni gestiona usuarios (ni ve esa pestana).</li>
+</ul>
+<p>Todo se maneja en el apartado <b>Perfil</b>: cualquiera cambia su clave; un administrador
+ademas crea/borra usuarios y cambia roles. Las claves se guardan <b>hasheadas</b> (PBKDF2 con sal)
+en <code>/etc/suricata-dashboard-users.json</code>; nunca en texto plano. El primer admin sale del
+<code>USER</code>/<code>PASS</code> de <code>/etc/suricata-dashboard.conf</code> la primera vez.</p>
 
 <h2>Reportes e informe diario</h2>
 <ul>
@@ -2129,15 +2253,22 @@ class H(BaseHTTPRequestHandler):
             return m.value if m else None
         except Exception:
             return None
+    def _sesion(self):
+        return SESSIONS.get(self._sid()) or {}
     def _sesion_ok(self):
-        sid = self._sid()
-        if sid and SESSIONS.get(sid, 0) > time.time():
-            return True
-        return False
+        s = self._sesion()
+        return bool(s and s.get("exp", 0) > time.time())
+    def _rol(self):
+        return self._sesion().get("role")
+    def _admin(self):
+        # admin real, o modo sin-auth (sin usuarios configurados). 'lectura' -> False.
+        return self._rol() != "lectura"
+    def _set_ctx(self):
+        s = self._sesion()
+        CTX.user = s.get("user"); CTX.role = s.get("role")
     def _auth_ok(self):
-        pw = CFG.get("PASS", "")
-        if not pw:
-            return True  # sin PASS configurada, sin auth (solo detras de VPN/proxy)
+        if not cargar_usuarios():
+            return True  # sin usuarios (PASS vacia en .conf): sin auth, solo tras VPN/proxy
         # Solo sesion (cookie del formulario). NO se acepta auth basica del navegador:
         # el navegador la cachea de por vida y anularia el boton Salir. Para scripts,
         # hacer login por POST /login y reutilizar la cookie sid.
@@ -2183,6 +2314,7 @@ class H(BaseHTTPRequestHandler):
             return self._redirect("/login", cookie="sid=; Path=/; Max-Age=0")
         if not self._auth_ok():
             return self._deny()
+        self._set_ctx()
         if path in ("/", "/index.html"):
             feed = live_feed_html()
             head_css, resumen_inner, _ = partes_reporte()   # resumen SIN la tabla de detalle
@@ -2230,6 +2362,8 @@ class H(BaseHTTPRequestHandler):
         if path == "/perfil":
             return self._html(perfil_page())
         if path == "/exclusiones":
+            if not self._admin():
+                return self._redirect("/")   # lectura no gestiona exclusiones
             edit = None
             if "?" in self.path:
                 import urllib.parse
@@ -2261,44 +2395,116 @@ class H(BaseHTTPRequestHandler):
         q = urllib.parse.parse_qs(body)
         if ruta == "/login":
             u = q.get("usuario", [""])[0]; p = q.get("clave", [""])[0]
-            if u == CFG.get("USER", "admin") and p == CFG.get("PASS", ""):
+            role = verificar_login(u, p)
+            if role:
                 token = secrets.token_urlsafe(24)
-                SESSIONS[token] = time.time() + SESSION_TTL
-                for k in [k for k, v in SESSIONS.items() if v < time.time()]:
+                SESSIONS[token] = {"user": u, "role": role, "exp": time.time() + SESSION_TTL}
+                for k in [k for k, v in SESSIONS.items() if v.get("exp", 0) < time.time()]:
                     SESSIONS.pop(k, None)
                 return self._redirect("/", cookie=f"sid={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}")
             return self._html(login_page("Usuario o clave incorrectos."))
         if not self._auth_ok():
             return self._deny()
+        self._set_ctx()
         if ruta == "/update-reglas":
+            if not self._admin():
+                return self._deny()   # accion de admin
             if not UPDATE["running"]:
                 UPDATE["running"] = True; UPDATE["started"] = time.time(); UPDATE["msg"] = ""
                 threading.Thread(target=_run_rules_update, daemon=True).start()
             return self._redirect("/documentacion#reglas")
-        if ruta not in ("/perfil", "/exclusiones"):
-            return self._html("<h1>No encontrado</h1>", 404)
         if ruta == "/exclusiones":
+            if not self._admin():
+                return self._deny()   # lectura no gestiona exclusiones
             return self._post_exclusiones(q)
-        actual = (q.get("actual", [""])[0])
-        usuario = (q.get("usuario", [""])[0]).strip()
-        nueva = (q.get("nueva", [""])[0])
-        nueva2 = (q.get("nueva2", [""])[0])
-        cur = CFG.get("PASS", "")
-        if cur and actual != cur:
-            return self._html(perfil_page("La clave actual no es correcta.", ok=False))
-        if not usuario or " " in usuario or len(usuario) > 40:
-            return self._html(perfil_page("Usuario invalido (sin espacios, max 40).", ok=False))
-        if len(nueva) < 6:
-            return self._html(perfil_page("La clave nueva debe tener al menos 6 caracteres.", ok=False))
-        if nueva != nueva2:
-            return self._html(perfil_page("Las dos claves nuevas no coinciden.", ok=False))
-        try:
-            save_conf(usuario, nueva)
-        except OSError as ex:
-            return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
-        # las credenciales nuevas ya rigen; el navegador reintentara con las viejas -> 401 y re-login
-        SESSIONS.clear()   # cerrar sesiones abiertas; hay que entrar con las nuevas
-        return self._redirect("/login", cookie="sid=; Path=/; Max-Age=0")
+        if ruta == "/perfil":
+            return self._post_perfil(q)
+        return self._html("<h1>No encontrado</h1>", 404)
+
+    def _post_perfil(self, q):
+        accion = q.get("accion", ["mi_clave"])[0]
+        yo = CTX.user
+        # --- cambiar MI clave (cualquier usuario) ---
+        if accion == "mi_clave":
+            actual = q.get("actual", [""])[0]
+            nueva = q.get("nueva", [""])[0]
+            nueva2 = q.get("nueva2", [""])[0]
+            if not yo or not verificar_login(yo, actual):
+                return self._html(perfil_page("La clave actual no es correcta.", ok=False))
+            if len(nueva) < 6:
+                return self._html(perfil_page("La clave nueva debe tener al menos 6 caracteres.", ok=False))
+            if nueva != nueva2:
+                return self._html(perfil_page("Las dos claves nuevas no coinciden.", ok=False))
+            us = cargar_usuarios()
+            for r in us:
+                if r.get("user") == yo:
+                    r["salt"], r["hash"] = _hash_pw(nueva)
+            try:
+                guardar_usuarios(us)
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            return self._html(perfil_page("Tu clave fue actualizada.", ok=True))
+        # --- gestion de usuarios (solo admin) ---
+        if not self._admin():
+            return self._deny()
+        if accion == "add_user":
+            nu = (q.get("nuser", [""])[0]).strip()
+            npw = q.get("npass", [""])[0]
+            nrole = q.get("nrole", ["lectura"])[0]
+            if nrole not in ROLES:
+                nrole = "lectura"
+            if not nu or " " in nu or len(nu) > 40:
+                return self._html(perfil_page("Usuario invalido (sin espacios, max 40).", ok=False))
+            if len(npw) < 6:
+                return self._html(perfil_page("La clave del usuario debe tener al menos 6 caracteres.", ok=False))
+            us = cargar_usuarios()
+            if any(r.get("user") == nu for r in us):
+                return self._html(perfil_page(f"Ya existe un usuario llamado {nu}.", ok=False))
+            salt, h = _hash_pw(npw)
+            us.append({"user": nu, "salt": salt, "hash": h, "role": nrole})
+            try:
+                guardar_usuarios(us)
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            return self._html(perfil_page(f"Usuario '{nu}' creado como {nrole}.", ok=True))
+        if accion == "del_user":
+            objetivo = q.get("user", [""])[0]
+            us = cargar_usuarios()
+            admins = [r for r in us if r.get("role") == "admin"]
+            obj = next((r for r in us if r.get("user") == objetivo), None)
+            if not obj:
+                return self._html(perfil_page("Ese usuario no existe.", ok=False))
+            if obj.get("role") == "admin" and len(admins) <= 1:
+                return self._html(perfil_page("No puedes borrar el unico administrador.", ok=False))
+            us = [r for r in us if r.get("user") != objetivo]
+            try:
+                guardar_usuarios(us)
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            # si borra su propia cuenta, cerrar su sesion
+            if objetivo == yo:
+                SESSIONS.pop(self._sid(), None)
+                return self._redirect("/login", cookie="sid=; Path=/; Max-Age=0")
+            return self._html(perfil_page(f"Usuario '{objetivo}' eliminado.", ok=True))
+        if accion == "rol_user":
+            objetivo = q.get("user", [""])[0]
+            nrole = q.get("role", ["lectura"])[0]
+            if nrole not in ROLES:
+                return self._html(perfil_page("Rol invalido.", ok=False))
+            us = cargar_usuarios()
+            admins = [r for r in us if r.get("role") == "admin"]
+            obj = next((r for r in us if r.get("user") == objetivo), None)
+            if not obj:
+                return self._html(perfil_page("Ese usuario no existe.", ok=False))
+            if obj.get("role") == "admin" and nrole != "admin" and len(admins) <= 1:
+                return self._html(perfil_page("No puedes quitar el rol al unico administrador.", ok=False))
+            obj["role"] = nrole
+            try:
+                guardar_usuarios(us)
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            return self._html(perfil_page(f"'{objetivo}' ahora es {nrole}.", ok=True))
+        return self._html(perfil_page("Accion no reconocida.", ok=False))
 
     def _post_exclusiones(self, q):
         import ipaddress
@@ -2393,6 +2599,7 @@ class H(BaseHTTPRequestHandler):
 
 def main():
     port = int(CFG.get("PORT", "5637"))
+    cargar_usuarios()   # migra el usuario del .conf al almacen hasheado si aun no existe
     threading.Thread(target=refrescador, daemon=True).start()
     httpd = ThreadingHTTPServer(("0.0.0.0", port), H)
     httpd.serve_forever()
@@ -2964,6 +3171,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

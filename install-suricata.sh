@@ -845,7 +845,8 @@ def timeline(by_hour):
     ahora_b = int(time.time() // BUCKET)
     lo = ahora_b - (n - 1)
     vals = [by_hour.get(lo + i, 0) for i in range(n)]
-    mx = max(vals) or 1
+    mxreal = max(vals)      # maximo real (0 si no hay alertas aun; NO usar para index)
+    mx = mxreal or 1        # escala para alturas/color (evita division por 0)
     W, H, pad = 1120, 190, 30
     bw = (W - 2 * pad) / n
     tick_every = max(1, (60 // BUCKET_MIN) * 2)     # una etiqueta cada 2 horas
@@ -866,7 +867,7 @@ def timeline(by_hour):
         # lleva su hora, para que se vea que el eje llega hasta "ahora" y no se corta antes
         if (n - 1 - i) % tick_every == 0:
             ticks.append(f'<text x="{x+bw/2:.1f}" y="{H-pad+14:.0f}" text-anchor="middle" class="tick">{t0.strftime("%H:%M")}</text>')
-    pico_t = datetime.fromtimestamp((lo + vals.index(mx)) * BUCKET, TZ_EC).strftime("%H:%M") if mx else ""
+    pico_t = datetime.fromtimestamp((lo + vals.index(mxreal)) * BUCKET, TZ_EC).strftime("%H:%M") if mxreal else "-"
     _tl_tip = ("Numero de alertas en cada intervalo de 30 minutos a lo largo de la ventana. "
                "La altura y el color suben con la intensidad; pasa el raton por una barra para el conteo exacto.")
     return (f'<section class="card wide"><h2>Ataques por hora y minuto ({COB}){_cardq(_tl_tip)}</h2>'
@@ -880,7 +881,7 @@ def timeline(by_hour):
             'p.textContent=t;p.style.left=(e.clientX-r.left)+"px";p.style.top=(e.clientY-r.top)+"px";p.style.opacity=1;}'
             'function tlHide(e){var c=e.currentTarget.closest(".tlwrap");if(c){var p=c.querySelector(".tltip");if(p)p.style.opacity=0;}}'
             '</script>'
-            f'<p class="muted">1 barra cada {BUCKET_MIN} min &middot; pasa el raton por una barra para ver el rango y el numero de peticiones &middot; pico: {mx:,} alertas a las {pico_t}</p></section>')
+            f'<p class="muted">1 barra cada {BUCKET_MIN} min &middot; pasa el raton por una barra para ver el rango y el numero de peticiones &middot; pico: {mxreal:,} alertas a las {pico_t}</p></section>')
 
 def dur(a, b):
     if not a or not b or b < a:
@@ -2332,6 +2333,21 @@ a.cancel{{color:#8a8a86;text-decoration:none;font-size:13px}}a.cancel:hover{{col
 {banner}
 <div class=card><table><thead><tr><th>Tipo</th><th>IP</th><th>Puertos</th><th>Motivo</th><th></th></tr></thead>
 <tbody>{tabla}</tbody></table></div>
+<h2>Exportar / Importar</h2>
+<div class=card>
+<p class=sub style="margin:0 0 10px">Guarda tus exclusiones en un archivo <code>.json</code> o cargalas desde uno.
+Al importar, <b>reemplazan</b> las exclusiones actuales.</p>
+<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+<a class=edit href="/exclusiones/export" download="exclusiones.json">&#8681; Exportar JSON</a>
+<form method=post action="/exclusiones" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0"
+ onsubmit="if(!document.getElementById('impjson').value){{alert('Elige un archivo JSON primero.');return false;}}">
+<input type=hidden name=accion value=import>
+<input type=hidden name=json id=impjson>
+<input type=file accept="application/json,.json" onchange="leerJSON(this)">
+<button type=submit class=primary style="margin:0">&#8679; Importar</button>
+</form></div>
+<script>function leerJSON(i){{var f=i.files&&i.files[0];if(!f)return;var r=new FileReader();r.onload=function(){{document.getElementById('impjson').value=r.result;}};r.readAsText(f);}}</script>
+</div>
 <h2>{titulo_form}</h2>
 <div class=card><form class=add method=post action="/exclusiones">
 <input type=hidden name=accion value=add>{hid_edit}
@@ -2893,6 +2909,18 @@ class H(BaseHTTPRequestHandler):
             return self._redirect("/ajustes")
         if path == "/ajustes":
             return self._html(perfil_page())
+        if path == "/exclusiones/export":
+            if not self._admin():
+                return self._redirect("/")
+            propias = [r for r in cargar_exclusiones() if r.get("motivo") != "(conf)"]
+            data = json.dumps(propias, ensure_ascii=False, indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition", "attachment; filename=exclusiones.json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if path == "/exclusiones":
             if not self._admin():
                 return self._redirect("/")   # lectura no gestiona exclusiones
@@ -3186,6 +3214,38 @@ class H(BaseHTTPRequestHandler):
         accion = q.get("accion", [""])[0]
         # trabajar solo con las reglas propias (no las legacy del .conf)
         propias = [r for r in cargar_exclusiones() if r.get("motivo") != "(conf)"]
+        if accion == "import":
+            try:
+                data = json.loads(q.get("json", [""])[0])
+            except Exception:
+                return self._html(exclusiones_page("El archivo no es JSON valido.", ok=False))
+            if not isinstance(data, list):
+                return self._html(exclusiones_page("El JSON debe ser una lista de exclusiones.", ok=False))
+            limpio = []
+            for r in data:
+                if not isinstance(r, dict):
+                    continue
+                ip = str(r.get("ip", "")).strip()
+                try:
+                    ipaddress.ip_address(ip)
+                except ValueError:
+                    continue
+                tipo = r.get("tipo", "dst"); tipo = tipo if tipo in ("src", "dst") else "dst"
+                pts = []
+                for p in (r.get("puertos") or []):
+                    try:
+                        p = int(p)
+                        if 0 < p < 65536:
+                            pts.append(p)
+                    except (ValueError, TypeError):
+                        pass
+                limpio.append({"tipo": tipo, "ip": ip, "motivo": str(r.get("motivo", ""))[:80], "puertos": pts})
+            try:
+                guardar_exclusiones(limpio)
+            except OSError as ex:
+                return self._html(exclusiones_page(f"No se pudo guardar: {ex}", ok=False))
+            return self._html(exclusiones_page(
+                f"Importadas {len(limpio)} exclusiones (reemplazaron las anteriores).", ok=True))
         if accion == "del":
             try:
                 idx = int(q.get("idx", ["-1"])[0])
@@ -3899,6 +3959,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

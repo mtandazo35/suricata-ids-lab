@@ -1011,7 +1011,7 @@ padding:10px 12px;border-radius:9px;box-shadow:0 6px 18px rgba(0,0,0,.25);transi
 .grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
 .card{{border:1px solid {GRID};border-radius:10px;padding:16px;background:#fff;margin-bottom:16px}}
 .card.wide{{grid-column:1/-1}}
-.lbl{{font-size:12px;fill:{INK2}}} .val{{font-size:12px;fill:{INK};font-weight:600}}
+.lbl{{font-size:12.5px;fill:#2b2a27;font-weight:600}} .val{{font-size:12px;fill:{INK};font-weight:600}}
 .tick{{font-size:11px;fill:{INK2}}}
 .tlwrap{{position:relative}}
 .tl-bar{{transform-box:fill-box;transform-origin:bottom;animation:tlgrow .6s cubic-bezier(.2,.75,.3,1) both;transition:filter .12s}}
@@ -2887,6 +2887,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

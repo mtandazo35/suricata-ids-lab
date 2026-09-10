@@ -2159,7 +2159,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
         addc = (
             "<form method=post action='/perfil' class=fotoform style='margin-top:4px'>"
             "<input type=hidden name=accion value=add_trust>"
-            f"<input type=text name=ip placeholder='IP o CIDR (ej. {esc(myip)} o 10.0.0.0/24)' style='flex:1;min-width:200px'>"
+            "<input type=text name=ip placeholder='IP o CIDR (ej. 200.10.20.30 o 192.168.1.0/24)' style='flex:1;min-width:200px'>"
             "<button class=primary type=submit>Agregar</button></form>"
             f"<p class=sub2>Tu IP actual es <b class=mono>{esc(myip)}</b>. "
             "Agregala (o un rango que la incluya) antes de restringir, o quedarias fuera.</p>")
@@ -3887,6 +3887,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

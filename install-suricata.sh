@@ -721,6 +721,8 @@ by_src = Counter()
 by_dst = Counter()
 by_hour = Counter()
 flujos = {}            # (src,sport,dst,dport,proto,sig) -> [count, first, last]
+ips_vistas = set()     # TODAS las IPs vistas en la ventana (cualquier evento, no solo alertas)
+MAX_IPS = 300000       # tope de cardinalidad del set (proteje la RAM en flotas grandes)
 total = 0
 seen = 0
 ts_min = None          # timestamp del evento mas antiguo dentro de la ventana (cobertura real)
@@ -737,6 +739,16 @@ for p in files:
             seen += 1
             if seen > MAX_LINES:
                 break
+            # contar TODAS las IPs vistas (cualquier evento: tls, http, snmp, alert...),
+            # no solo las que atacan. Solo lineas con src_ip y dentro de la ventana.
+            if len(ips_vistas) < MAX_IPS and '"src_ip":"' in line:
+                _mt = _RE["ts"].search(line)
+                _tv = parse_ts(_mt.group(1)) if _mt else None
+                if _tv is None or _tv >= cutoff:
+                    _ms = _RE["src_ip"].search(line)
+                    _md = _RE["dest_ip"].search(line)
+                    if _ms: ips_vistas.add(_ms.group(1))
+                    if _md: ips_vistas.add(_md.group(1))
             if '"event_type":"alert"' not in line:
                 continue
             g = campos(line)
@@ -1193,8 +1205,8 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
       <span class="tip"><b>IPs de ORIGEN distintas</b> que dispararon al menos una alerta en {COB}. Ojo: muchas son equipos que solo hicieron una consulta DNS sospechosa, no ataque real. La grafica de abajo muestra solo el top.</span></div>
     <div class="tile"><span class="q">?</span><div class="big">{len(by_dst):,}</div><div class="lab"><span class="dot" style="background:#eb6834"></span>IPs destino (objetivos)</div>
       <span class="tip"><b>IPs de DESTINO distintas</b> hacia donde se dirigio el trafico alertado en {COB} (el objetivo). Suele ser tu propio DNS y unos pocos servidores.</span></div>
-    <div class="tile"><span class="q">?</span><div class="big">{len(set(by_src)|set(by_dst)):,}</div><div class="lab"><span class="dot" style="background:#2a78d6"></span>IPs unicas vistas</div>
-      <span class="tip"><b>IPs distintas en total</b> que el sensor observo en {COB}, contando origen y destino sin duplicar (una IP que es origen y destino cuenta una vez). Es el alcance real de lo que esta sensando.</span></div>
+    <div class="tile"><span class="q">?</span><div class="big">{len(ips_vistas):,}{'+' if len(ips_vistas) >= MAX_IPS else ''}</div><div class="lab"><span class="dot" style="background:#2a78d6"></span>IPs unicas vistas (todo el trafico)</div>
+      <span class="tip"><b>Todas las IPs distintas</b> que el MikroTik le envio al sensor en {COB}, no solo las que atacan: cuenta cualquier evento (TLS, HTTP, DNS, SNMP, alertas...), origen y destino, sin duplicar. Es el alcance real de lo que esta sensando.</span></div>
     <div class="tile"><span class="q">?</span><div class="big">{len(by_dport):,}</div><div class="lab"><span class="dot" style="background:#eda100"></span>puertos destino distintos</div>
       <span class="tip"><b>Puertos de destino distintos</b> que aparecieron en las alertas de {COB} (443, 80, 53, 22...). El top esta en la grafica "Puertos de destino mas atacados".</span></div>
   </div>

@@ -3256,13 +3256,46 @@ class H(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             return self._html(
-                "<!doctype html><meta charset=utf-8><title>Actualizando panel</title>"
-                "<meta http-equiv=refresh content='45;url=/ajustes'>"
-                "<div style='font:15px system-ui;max-width:560px;margin:70px auto;padding:26px;text-align:center'>"
+                "<!doctype html><html lang=es><head><meta charset=utf-8><title>Actualizando panel</title>"
+                "<meta http-equiv=refresh content='50;url=/ajustes'>"
+                "<link rel=icon type=image/png href=/favicon.ico>"
+                "<style>"
+                "body{margin:0;background:#fcfcfb;font:15px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
+                ".wrap{max-width:560px;margin:64px auto;padding:30px 28px;text-align:center;"
+                "border:1px solid #e7e6e2;border-radius:14px;background:#fff}"
+                ".wrap h2{margin:0 0 6px;font-size:21px}"
+                ".spin{width:34px;height:34px;margin:2px auto 14px;border:3px solid #e7e6e2;"
+                "border-top-color:#2a78d6;border-radius:50%;animation:sp .8s linear infinite}"
+                "@keyframes sp{to{transform:rotate(360deg)}}"
+                ".sub{color:#52514e;margin:0 0 20px;line-height:1.5}"
+                ".track{height:14px;background:#ecebe7;border-radius:20px;overflow:hidden}"
+                ".fill{height:100%;width:0;border-radius:20px;"
+                "background:linear-gradient(90deg,#2a78d6,#4c9bf0);transition:width .25s linear}"
+                ".row{display:flex;justify-content:space-between;margin-top:9px;font-size:13px;color:#52514e}"
+                ".pct{font-weight:800;color:#2a78d6}"
+                "</style></head><body>"
+                "<div class='wrap'>"
+                "<div class='spin'></div>"
                 "<h2>Actualizando el panel&hellip;</h2>"
-                "<p style='color:#52514e'>Bajando la ultima version desde GitHub. El panel se "
-                "reiniciara en unos segundos (tu configuracion no se toca). Esta pagina volvera "
-                "a Ajustes sola; si no, recarga en ~1 minuto.</p></div>")
+                "<p class='sub'>Bajando la ultima version desde GitHub y reiniciando el panel. "
+                "Tu configuracion no se toca. Al terminar volveras a Ajustes solo.</p>"
+                "<div class='track'><div class='fill' id='f'></div></div>"
+                "<div class='row'><span class='pct' id='p'>0%</span>"
+                "<span id='t'>faltan ~50 s</span></div>"
+                "</div>"
+                "<script>"
+                "var T=50,ini=Date.now(),f=document.getElementById('f'),"
+                "p=document.getElementById('p'),t=document.getElementById('t');"
+                "var iv=setInterval(function(){"
+                " var s=(Date.now()-ini)/1000, r=Math.max(0,T-s);"
+                " var pc=Math.min(96,s/T*100);"          # tope 96%: el 100% real es cuando recarga
+                " f.style.width=pc.toFixed(1)+'%';"
+                " p.textContent=Math.round(pc)+'%';"
+                " t.textContent = r>1 ? ('faltan ~'+Math.ceil(r)+' s') : 'casi listo, recargando';"
+                " if(s>=T){clearInterval(iv);f.style.width='100%';p.textContent='100%';"
+                "  location.href='/ajustes';}"
+                "},250);"
+                "</script></body></html>")
         if ruta == "/exclusiones":
             if not self._admin():
                 return self._deny()   # lectura no gestiona exclusiones

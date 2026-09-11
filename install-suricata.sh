@@ -571,7 +571,7 @@ IP:puerto con firma, protocolo, primera/ultima hora y duracion. Autocontenido
 Uso: suricata-html-report [horas]   (default 24)
 Salida: /var/log/suricata/report-AAAAMMDD-HHMM.html
 """
-import glob, gzip, io, json, os, re, sys, html, time
+import glob, gzip, io, json, os, re, sys, html, time, socket
 from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 
@@ -949,6 +949,100 @@ for _k, _v in flujos.items():
     by_sig[traducir(_k[5])] += _v[0]   # agrupar por descripcion en espanol (sin duplicados)
 firmas_top = [(s[:60], n) for s, n in by_sig.most_common(10)]
 
+# ---- Dueno de cada IP destino (DNS inverso PTR -> marca conocida), cacheado ----
+_IPINFO_CACHE = os.path.join(LOGDIR, "ipinfo-cache.json")
+_IPINFO_TTL = 7 * 24 * 3600          # 7 dias: pasado eso se vuelve a resolver
+_IPINFO_MAX_NUEVOS = 60              # tope de PTR nuevos por corrida (no colgar la generacion)
+# dominio PTR conocido -> nombre humano de la empresa (trafico casi siempre legitimo)
+_ORG_DOM = {
+    "fbcdn.net": "Facebook", "facebook.com": "Facebook", "tfbnw.net": "Facebook",
+    "instagram.com": "Instagram", "whatsapp.net": "WhatsApp",
+    "1e100.net": "Google", "google.com": "Google", "googlevideo.com": "Google/YouTube",
+    "googleusercontent.com": "Google", "gvt1.com": "Google",
+    "amazonaws.com": "Amazon AWS", "amazon.com": "Amazon", "cloudfront.net": "Amazon CloudFront",
+    "cloudflare.com": "Cloudflare", "cloudflare-dns.com": "Cloudflare",
+    "akamaitechnologies.com": "Akamai", "akamai.net": "Akamai", "akamaiedge.net": "Akamai",
+    "microsoft.com": "Microsoft", "azure.com": "Microsoft Azure", "windows.net": "Microsoft",
+    "apple.com": "Apple", "icloud.com": "Apple", "aaplimg.com": "Apple",
+    "netflix.com": "Netflix", "nflxvideo.net": "Netflix", "nflxso.net": "Netflix",
+    "tiktokcdn.com": "TikTok", "tiktokv.com": "TikTok", "ttlivecdn.com": "TikTok",
+    "twitter.com": "Twitter/X", "twimg.com": "Twitter/X", "fastly.net": "Fastly",
+    "edgecastcdn.net": "Edgecast", "level3.net": "Lumen/Level3",
+}
+
+def _reg_dom(host):
+    """Dominio registrable aproximado (2 ultimas etiquetas; 3 si es tipo co.uk)."""
+    p = host.lower().rstrip(".").split(".")
+    if len(p) < 2:
+        return host.lower()
+    if len(p) >= 3 and p[-2] in ("co", "com", "net", "org", "gov", "edu") and len(p[-1]) == 2:
+        return ".".join(p[-3:])
+    return ".".join(p[-2:])
+
+def _cargar_ipinfo():
+    try:
+        with open(_IPINFO_CACHE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+_ipinfo = _cargar_ipinfo()
+_ipinfo_nuevos = 0
+_ipinfo_sucio = False
+
+def duenio(ip):
+    """(etiqueta, legitimo) del dueno de una IP: PTR -> dominio -> marca conocida.
+    Cachea a disco con TTL. Los CDN/grandes se marcan legitimo=True (verde)."""
+    global _ipinfo_nuevos, _ipinfo_sucio
+    if not ip or ip in ("?", "-"):
+        return ("-", False)
+    ent = _ipinfo.get(ip)
+    now = time.time()
+    if ent and now - ent.get("ts", 0) < _IPINFO_TTL:
+        return (ent.get("org", "-"), ent.get("legit", False))
+    if _ipinfo_nuevos >= _IPINFO_MAX_NUEVOS:
+        return ("-", False)          # se resolvera en la proxima corrida
+    _ipinfo_nuevos += 1
+    org, legit = "sin PTR", False
+    try:
+        socket.setdefaulttimeout(1.5)
+        host = socket.gethostbyaddr(ip)[0]
+        dom = _reg_dom(host)
+        org, legit = (_ORG_DOM[dom], True) if dom in _ORG_DOM else (dom, False)
+    except Exception:
+        org, legit = "sin PTR", False
+    finally:
+        socket.setdefaulttimeout(None)
+    _ipinfo[ip] = {"org": org, "legit": legit, "ts": now}
+    _ipinfo_sucio = True
+    return (org, legit)
+
+def _guardar_ipinfo():
+    if not _ipinfo_sucio:
+        return
+    try:
+        lim = time.time() - _IPINFO_TTL
+        data = {k: v for k, v in _ipinfo.items() if v.get("ts", 0) >= lim}
+        tmp = _IPINFO_CACHE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, _IPINFO_CACHE)
+    except Exception:
+        pass
+
+def _org_celda(dst):
+    org, legit = duenio(dst)
+    if org == "-":
+        return "<td class='org'>-</td>"
+    if legit:
+        return (f"<td class='org'><span class='obadge ok' title='Servicio conocido "
+                f"(CDN/gran empresa): trafico casi siempre legitimo'>{esc(org)}</span></td>")
+    if org == "sin PTR":
+        return "<td class='org'><span class='obadge none' title='Sin DNS inverso: IP sin nombre publico'>sin PTR</span></td>"
+    return (f"<td class='org'><span class='obadge unk' title='Dominio del dueno segun DNS inverso; "
+            f"no es un servicio grande conocido'>{esc(org)}</span></td>")
+
+
 def top_origenes_section(n_src=5, n_sub=8):
     """Top de IPs origen que mas peticionan, con el desglose de cada una:
     desde que puerto origen, hacia que IP destino y hacia que puerto destino.
@@ -970,6 +1064,7 @@ def top_origenes_section(n_src=5, n_sub=8):
         rows = "".join(
             f"<tr><td class='mono'>{esc(sp or '-')}</td>"
             f"<td class='mono' style='color:#184f95'>{esc(dst or '-')}</td>"
+            f"{_org_celda(dst)}"
             f"<td class='mono'>{esc(dp or '-')}</td>"
             f"<td class='mono'>{esc((pr or '-').upper())}</td>"
             f"<td class='num'>{c:,}</td></tr>" for (sp, dst, dp, pr), c in sub)
@@ -980,9 +1075,11 @@ def top_origenes_section(n_src=5, n_sub=8):
             f"<span class='tot'>{tot:,} alertas</span>"
             f"<span class='meta'>&rarr; {len(dsts):,} IP destino &middot; {len(dports):,} puertos destino</span></div>"
             f"<div class='tablewrap'><table><thead><tr>"
-            f"<th>Puerto origen</th><th>IP destino (a donde)</th><th class='num'>Puerto destino</th>"
+            f"<th>Puerto origen</th><th>IP destino (a donde)</th><th>Dueno / organizacion</th>"
+            f"<th class='num'>Puerto destino</th>"
             f"<th>Protocolo</th><th class='num'>Peticiones</th></tr></thead>"
             f"<tbody>{rows}</tbody></table></div></div>")
+    _guardar_ipinfo()
     return (
         "<!--TOP_INI-->"
         "<style>"
@@ -994,9 +1091,18 @@ def top_origenes_section(n_src=5, n_sub=8):
         ".topwrap .meta{color:#52514e;font-size:12px;margin-left:auto}"
         ".topwrap table{table-layout:fixed}"
         ".topwrap table th,.topwrap table td{text-align:center!important;padding-left:6px;padding-right:6px}"
+        ".topwrap .org{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+        ".topwrap .obadge{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}"
+        ".topwrap .obadge.ok{background:#e6f4ea;color:#1a7f37;border:1px solid #b7e0c2}"
+        ".topwrap .obadge.unk{background:#fdf0e6;color:#a15c12;border:1px solid #f2d3ad}"
+        ".topwrap .obadge.none{background:#f1f1ef;color:#6b6a66;border:1px solid #e0dfda}"
         "</style>"
         "<section class=\"card\"><h2>Top 5 IPs origen que mas peticionan</h2>"
-        "<p class=\"muted\" style=\"margin:0 0 12px\">Quien ataca mas, hacia que IP destino, desde que puerto origen y hacia que puerto destino.</p>"
+        "<p class=\"muted\" style=\"margin:0 0 12px\">Quien ataca mas, hacia que IP destino, desde que puerto origen y hacia que puerto destino. "
+        "La columna <b>Dueno / organizacion</b> viene del DNS inverso (PTR) de la IP destino: "
+        "<span style='color:#1a7f37;font-weight:700'>verde</span> = servicio conocido (Facebook, Google, Cloudflare, etc., casi siempre legitimo); "
+        "<span style='color:#a15c12;font-weight:700'>naranja</span> = dominio del dueno pero no es un gran servicio; "
+        "<b>sin PTR</b> = IP sin nombre publico (frecuente en botnets/hosting sucio).</p>"
         f"<div class=\"topwrap\">{''.join(cards)}</div></section>"
         "<!--TOP_FIN-->")
 
@@ -1645,7 +1751,7 @@ def top_page():
         # el titulo/intro ya lo pone la pestana; quitar el h2+intro internos para no duplicar
         top_html = re.sub(r'<h2>Top 5 IPs origen que mas peticionan</h2>\s*<p class="muted"[^>]*>.*?</p>',
                           '', top_html, count=1, flags=re.S)
-        cuerpo, nota = top_html, "Se actualiza junto con el resumen, cada 30 min (misma ventana que los cuadros)."
+        cuerpo, nota = top_html, "Se actualiza junto con el resumen, cada 5 min (misma ventana que los cuadros)."
     else:
         cuerpo, procesados = _top_cards_tail()
         nota = (f"Muestra reciente ({procesados:,} alertas) mientras se genera el reporte de 24h; "
@@ -1683,7 +1789,7 @@ def top_page():
 LOGDIR = "/var/log/suricata"
 GEN = "/usr/local/bin/suricata-html-report"
 CONF = "/etc/suricata-dashboard.conf"
-REFRESH_SECS = 1800   # regeneracion del resumen en segundo plano: cada 30 min (tiles, graficos y linea de tiempo)
+REFRESH_SECS = 300    # regeneracion del resumen en segundo plano: cada 5 min (tiles, graficos, linea de tiempo y Top 5)
 FORCE_REGEN = False   # el selector de ventana lo pone True para regenerar el resumen ya
 
 def conf():
@@ -3026,7 +3132,7 @@ class H(BaseHTTPRequestHandler):
                            "esta generando; aparecera en unos minutos.</p></section>")
             page = (f"<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
                     f"<meta name=viewport content='width=device-width,initial-scale=1'>"
-                    # se recarga solo cada 2 min para tomar el reporte nuevo (cada 30 min);
+                    # se recarga solo cada 2 min para tomar el reporte nuevo (cada 5 min);
                     # el filtro de busqueda persiste en sessionStorage, no se pierde al recargar
                     f"<meta http-equiv=refresh content=120>"
                     f"<title>Detalle de ataques</title>{head_css}</head><body>{nav('/detalle')}"

@@ -3277,7 +3277,7 @@ class H(BaseHTTPRequestHandler):
                 "<div class='wrap'>"
                 "<div class='spin'></div>"
                 "<h2>Actualizando el panel&hellip;</h2>"
-                "<p class='sub'>Bajando la ultima version desde GitHub y reiniciando el panel. "
+                "<p class='sub'>Bajando la ultima version y reiniciando el panel. "
                 "Tu configuracion no se toca. Al terminar volveras a Ajustes solo.</p>"
                 "<div class='track'><div class='fill' id='f'></div></div>"
                 "<div class='row'><span class='pct' id='p'>0%</span>"

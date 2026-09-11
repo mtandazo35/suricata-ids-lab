@@ -596,9 +596,15 @@ def campos(line):
     return g
 
 LOGDIR = "/var/log/suricata"
-HOURS = int(sys.argv[1]) if len(sys.argv) > 1 else 24
-cutoff = time.time() - HOURS * 3600
-BUCKET_MIN = 30                 # resolucion de la linea de tiempo (minutos por barra)
+# Ventana del resumen en MINUTOS (argv[1]); por defecto 24h. Con una ventana corta
+# (p.ej. 30 min) los cuadros muestran solo la actividad reciente: una IP atendida hace
+# rato se cae sola del top al no tener alertas nuevas.
+VENTANA_MIN = int(sys.argv[1]) if len(sys.argv) > 1 else 1440
+if VENTANA_MIN < 5:
+    VENTANA_MIN = 5
+cutoff = time.time() - VENTANA_MIN * 60
+# la linea de tiempo apunta a ~48 barras: el bucket se adapta a la ventana (min 1 min)
+BUCKET_MIN = max(1, round(VENTANA_MIN / 48))
 BUCKET = BUCKET_MIN * 60
 MAX_LINES = 20_000_000
 MAX_FLUJOS = 200_000     # tope de flujos unicos guardados (evita agotar la RAM en espejos de ISP)
@@ -841,7 +847,7 @@ def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_clas
 def timeline(by_hour):
     # Ventana FIJA de 24h en intervalos de BUCKET_MIN minutos (detalle hora:minuto),
     # terminando en el intervalo actual, rellenando con 0 los vacios. Tooltip por barra.
-    n = HOURS * 3600 // BUCKET                      # p.ej. 48 barras de 30 min
+    n = int(VENTANA_MIN * 60 // BUCKET)             # nº de barras (~48) segun la ventana
     ahora_b = int(time.time() // BUCKET)
     lo = ahora_b - (n - 1)
     vals = [by_hour.get(lo + i, 0) for i in range(n)]
@@ -849,7 +855,7 @@ def timeline(by_hour):
     mx = mxreal or 1        # escala para alturas/color (evita division por 0)
     W, H, pad = 1120, 190, 30
     bw = (W - 2 * pad) / n
-    tick_every = max(1, (60 // BUCKET_MIN) * 2)     # una etiqueta cada 2 horas
+    tick_every = max(1, n // 8)     # ~8 etiquetas de hora repartidas en la ventana
     bars, ticks = [], []
     for i, v in enumerate(vals):
         x = pad + i * bw
@@ -898,7 +904,12 @@ gen = datetime.now(TZ_EC).strftime("%Y-%m-%d %H:%M")
 # tiene 48 barras de 30 min terminando "ahora", rellenando con 0 los intervalos sin
 # alertas. Por eso la etiqueta es fija; que aun no haya datos en las primeras horas
 # no cambia el tamano de la ventana.
-COB = f"ultimas {HOURS} horas"
+if VENTANA_MIN < 60:
+    COB = f"ultimos {VENTANA_MIN} min"
+elif VENTANA_MIN % 60 == 0:
+    COB = f"ultimas {VENTANA_MIN // 60} horas"
+else:
+    COB = f"ultimas {VENTANA_MIN / 60:.1f} horas"
 
 def ipnum(s):
     # convierte una IPv4 en entero para ordenar bien (10 antes que 9 no; 9<10 numerico)
@@ -1632,7 +1643,7 @@ def top_page():
         # el titulo/intro ya lo pone la pestana; quitar el h2+intro internos para no duplicar
         top_html = re.sub(r'<h2>Top 5 IPs origen que mas peticionan</h2>\s*<p class="muted"[^>]*>.*?</p>',
                           '', top_html, count=1, flags=re.S)
-        cuerpo, nota = top_html, "Ultimas 24h &middot; se actualiza junto con el reporte (cada 30 min)."
+        cuerpo, nota = top_html, "Se actualiza junto con el resumen, cada 30 min (misma ventana que los cuadros)."
     else:
         cuerpo, procesados = _top_cards_tail()
         nota = (f"Muestra reciente ({procesados:,} alertas) mientras se genera el reporte de 24h; "
@@ -1872,7 +1883,9 @@ def refrescador():
         stale = (nr is None) or (time.time() - os.path.getmtime(nr) >= REFRESH_SECS)
         if stale:
             try:
-                subprocess.run(["nice", "-n", "15", GEN], timeout=600,
+                # ventana del resumen en minutos (config VENTANA_MIN; por defecto 24h)
+                vmin = str(int(CFG.get("VENTANA_MIN", "1440") or "1440"))
+                subprocess.run(["nice", "-n", "15", GEN, vmin], timeout=600,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
                 pass
@@ -2537,9 +2550,13 @@ tu monitoreo SNMP). Agregar, editar y eliminar; se explica mas abajo.</td></tr>
 <h2>Cada cuanto se actualiza</h2>
 <ul>
 <li><b>Feed de ultimos ataques</b> (En vivo, abajo): cada <b>20 segundos</b>.</li>
-<li><b>Resumen de 24h (tiles, graficos y linea de tiempo), Detalle e Historico</b>: se
-regeneran en segundo plano cada <b>30 minutos</b>. Por eso los graficos casi no cambian
-entre recargas y el feed de abajo si (ese es en vivo).</li>
+<li><b>Resumen (tiles, graficos y linea de tiempo), Detalle e Historico</b>: se regeneran
+en segundo plano cada <b>30 minutos</b>. Por eso los graficos casi no cambian entre
+recargas y el feed de abajo si (ese es en vivo).</li>
+<li><b>Ventana del resumen</b>: por defecto <b>24 h</b>. Se puede acortar para ver solo la
+<b>actividad reciente</b> (asi una IP ya atendida se cae sola del top al no tener alertas
+nuevas). Se ajusta con <code>VENTANA_MIN</code> en <code>/etc/suricata-dashboard.conf</code>
+(en minutos; p.ej. <code>VENTANA_MIN=30</code> = ultimos 30 min) y <code>systemctl restart suricata-dashboard</code>.</li>
 <li><b>Reglas ET</b>: se actualizan solas cada dia a las 04:30. <b>Informe por Telegram</b>: 07:30.</li>
 <li>Todas las horas del panel estan en <b>hora de Ecuador</b> (UTC-5).</li>
 </ul>
@@ -3458,9 +3475,10 @@ mv /usr/local/bin/suricata-html-report.new   /usr/local/bin/suricata-html-report
 chmod 755 /usr/local/bin/suricata-dashboard /usr/local/bin/suricata-html-report /usr/local/bin/suricata-panel-update
 date '+%Y-%m-%d %H:%M:%S' > /etc/suricata-dashboard.updated
 log "actualizado OK; regenerando reporte y reiniciando panel"
-# regenerar el reporte YA con el codigo nuevo, para que los cambios (tablas/graficos) se
-# vean sin esperar los 30 min del ciclo normal
-/usr/local/bin/suricata-html-report >/dev/null 2>&1 || true
+# regenerar el reporte YA con el codigo nuevo (respetando la ventana VENTANA_MIN), para
+# que los cambios (tablas/graficos) se vean sin esperar los 30 min del ciclo normal
+VMIN=$(awk -F= '/^VENTANA_MIN=/{print $2}' /etc/suricata-dashboard.conf 2>/dev/null); [ -n "$VMIN" ] || VMIN=1440
+/usr/local/bin/suricata-html-report "$VMIN" >/dev/null 2>&1 || true
 systemctl restart suricata-dashboard
 UPDSH
 chmod 755 /usr/local/bin/suricata-panel-update
@@ -4081,6 +4099,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

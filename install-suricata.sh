@@ -1810,6 +1810,17 @@ def panel_actualizado():
     except OSError:
         return None
 
+def firma_panel():
+    """Firma corta del codigo instalado (hash del panel + generador de reportes).
+    Si cambia tras 'Actualizar panel', es prueba de que se aplico codigo nuevo."""
+    h = hashlib.md5()
+    for f in ("/usr/local/bin/suricata-dashboard", "/usr/local/bin/suricata-html-report"):
+        try:
+            h.update(open(f, "rb").read())
+        except OSError:
+            pass
+    return h.hexdigest()[:10]
+
 TRUST_FILE = "/etc/suricata-dashboard-trust.json"
 
 def cargar_confianza():
@@ -2114,13 +2125,14 @@ def perfil_page(msg="", ok=False, edit_user=None):
     card_update = ""
     if es_admin and yo:
         ult = panel_actualizado()
-        ult_txt = f"Ultima actualizacion del panel: <b>{esc(ult)}</b>." if ult else "El panel aun no se ha actualizado desde aqui."
+        ult_txt = f"Ultima actualizacion: <b>{esc(ult)}</b> &middot; " if ult else ""
         card_update = (
             "<section class=card><h2>Actualizar panel</h2>"
             "<p class=sub2>Descarga la ultima version del panel desde GitHub. <b>Solo actualiza el codigo</b> "
             "del panel y de los reportes; <b>no toca tu configuracion</b> (usuarios, exclusiones, empresa, "
             "IPs de confianza, clave, ni HOME_NET/Suricata).</p>"
-            f"<p class=sub2>{ult_txt}</p>"
+            f"<p class=sub2>{ult_txt}Firma del codigo instalado: <b class=mono>{firma_panel()}</b> "
+            "<span style='color:#8a8a86'>(si cambia despues de actualizar, se aplico codigo nuevo)</span></p>"
             "<form method=post action='/update-panel' onsubmit=\"return confirm('Actualizar el panel a la ultima version de GitHub? Se reiniciara en unos segundos.')\">"
             "<div class=actions><button class=primary type=submit>&#8681; Buscar y aplicar actualizaciones</button></div>"
             "</form></section>")
@@ -4158,6 +4170,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

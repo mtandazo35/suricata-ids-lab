@@ -3518,12 +3518,24 @@ chmod 755 /usr/local/bin/suricata-dashboard
 cat > /usr/local/bin/suricata-panel-update <<'UPDSH'
 #!/bin/sh
 set -e
-REPO="https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh"
+REPO_USER="mtandazo35"; REPO_NAME="suricata-ids-lab"; REPO_BRANCH="main"
 TMP="$(mktemp)"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> /tmp/suricata-panel-update.log; }
 trap 'rm -f "$TMP"' EXIT
-log "descargando $REPO"
-curl -fsSL "$REPO" -o "$TMP" || { log "descarga fallo"; exit 1; }
+# raw.githubusercontent tiene cache CDN (~5 min): recien pusheado servia la version VIEJA.
+# Se pide el SHA del ultimo commit por la API (sin ese cache) y se baja ESE commit exacto
+# (URL inmutable => siempre lo ultimo). Si la API falla, se cae a main con nocache.
+SHA="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
+  "https://api.github.com/repos/${REPO_USER}/${REPO_NAME}/commits/${REPO_BRANCH}" 2>/dev/null \
+  | grep -m1 '"sha"' | cut -d'"' -f4)"
+if [ -n "$SHA" ]; then
+  URL="https://raw.githubusercontent.com/${REPO_USER}/${REPO_NAME}/${SHA}/install-suricata.sh"
+  log "descargando commit ${SHA}"
+else
+  URL="https://raw.githubusercontent.com/${REPO_USER}/${REPO_NAME}/${REPO_BRANCH}/install-suricata.sh?nc=$(date +%s)"
+  log "API sin SHA; bajando ${REPO_BRANCH} con nocache"
+fi
+curl -fsSL "$URL" -o "$TMP" || { log "descarga fallo"; exit 1; }
 extraer() { # $1=linea-inicio (substr)  $2=marcador-fin  $3=destino  $4=validador(py|sh)
   # !f: solo marca el inicio la PRIMERA vez, asi las lineas del cuerpo que contengan el
   # marcador (p.ej. el propio actualizador) no rompen la extraccion.

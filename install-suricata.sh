@@ -1119,7 +1119,7 @@ header{{padding:22px 28px;border-bottom:2px solid {INK};display:flex;justify-con
 h1{{margin:0;font-size:20px}} h2{{margin:0 0 10px;font-size:15px}}
 .sub{{color:{INK2};font-size:13px}}
 main{{padding:20px 28px;max-width:1200px;margin:0 auto}}
-.tiles{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}}
+.tiles{{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:20px}}
 .tile{{border:1px solid {GRID};border-radius:10px;padding:14px 16px;background:#fff;position:relative;cursor:help}}
 .tile:hover{{border-color:#c9d4e3;box-shadow:0 2px 10px rgba(0,0,0,.06)}}
 .tile .q{{position:absolute;right:11px;top:11px;width:16px;height:16px;border-radius:50%;border:1px solid {GRID};
@@ -1193,6 +1193,8 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
       <span class="tip"><b>IPs de ORIGEN distintas</b> que dispararon al menos una alerta en {COB}. Ojo: muchas son equipos que solo hicieron una consulta DNS sospechosa, no ataque real. La grafica de abajo muestra solo el top.</span></div>
     <div class="tile"><span class="q">?</span><div class="big">{len(by_dst):,}</div><div class="lab"><span class="dot" style="background:#eb6834"></span>IPs destino (objetivos)</div>
       <span class="tip"><b>IPs de DESTINO distintas</b> hacia donde se dirigio el trafico alertado en {COB} (el objetivo). Suele ser tu propio DNS y unos pocos servidores.</span></div>
+    <div class="tile"><span class="q">?</span><div class="big">{len(set(by_src)|set(by_dst)):,}</div><div class="lab"><span class="dot" style="background:#2a78d6"></span>IPs unicas vistas</div>
+      <span class="tip"><b>IPs distintas en total</b> que el sensor observo en {COB}, contando origen y destino sin duplicar (una IP que es origen y destino cuenta una vez). Es el alcance real de lo que esta sensando.</span></div>
     <div class="tile"><span class="q">?</span><div class="big">{len(by_dport):,}</div><div class="lab"><span class="dot" style="background:#eda100"></span>puertos destino distintos</div>
       <span class="tip"><b>Puertos de destino distintos</b> que aparecieron en las alertas de {COB} (443, 80, 53, 22...). El top esta en la grafica "Puertos de destino mas atacados".</span></div>
   </div>

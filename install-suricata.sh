@@ -906,6 +906,8 @@ gen = datetime.now(TZ_EC).strftime("%Y-%m-%d %H:%M")
 # no cambia el tamano de la ventana.
 if VENTANA_MIN < 60:
     COB = f"ultimos {VENTANA_MIN} min"
+elif VENTANA_MIN == 60:
+    COB = "ultima hora"
 elif VENTANA_MIN % 60 == 0:
     COB = f"ultimas {VENTANA_MIN // 60} horas"
 else:
@@ -1682,6 +1684,7 @@ LOGDIR = "/var/log/suricata"
 GEN = "/usr/local/bin/suricata-html-report"
 CONF = "/etc/suricata-dashboard.conf"
 REFRESH_SECS = 1800   # regeneracion del resumen en segundo plano: cada 30 min (tiles, graficos y linea de tiempo)
+FORCE_REGEN = False   # el selector de ventana lo pone True para regenerar el resumen ya
 
 def conf():
     d = {"PORT": "5637", "USER": "admin", "PASS": ""}
@@ -1723,6 +1726,36 @@ def _blank_conf_pass():
     os.chmod(tmp, 0o600)
     os.replace(tmp, CONF)
     CFG["PASS"] = ""
+
+VENTANAS = [(30, "30 min"), (60, "1 hora"), (180, "3 horas"),
+            (360, "6 horas"), (720, "12 horas"), (1440, "24 horas")]
+
+def ventana_actual():
+    try:
+        return int(CFG.get("VENTANA_MIN", "1440") or "1440")
+    except ValueError:
+        return 1440
+
+def set_ventana(minutos):
+    """Persiste VENTANA_MIN en el .conf (agrega la linea si no existe) y actualiza CFG."""
+    try:
+        lineas = open(CONF, encoding="utf-8").read().splitlines()
+    except OSError:
+        lineas = []
+    out, hecho = [], False
+    for l in lineas:
+        if l.strip().startswith("VENTANA_MIN="):
+            out.append(f"VENTANA_MIN={minutos}"); hecho = True
+        else:
+            out.append(l)
+    if not hecho:
+        out.append(f"VENTANA_MIN={minutos}")
+    tmp = CONF + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONF)
+    CFG["VENTANA_MIN"] = str(minutos)
 
 def guardar_usuarios(lst):
     tmp = USERS_FILE + ".tmp"
@@ -1879,17 +1912,19 @@ def refrescador():
     """Hilo de fondo: regenera el reporte periodicamente, NUNCA en el request.
     Asi 'En vivo' sirve siempre el ultimo archivo al instante aunque generar tarde."""
     while True:
+        global FORCE_REGEN
         nr = newest_report()
-        stale = (nr is None) or (time.time() - os.path.getmtime(nr) >= REFRESH_SECS)
+        stale = FORCE_REGEN or (nr is None) or (time.time() - os.path.getmtime(nr) >= REFRESH_SECS)
         if stale:
+            FORCE_REGEN = False
             try:
                 # ventana del resumen en minutos (config VENTANA_MIN; por defecto 24h)
-                vmin = str(int(CFG.get("VENTANA_MIN", "1440") or "1440"))
+                vmin = str(ventana_actual())
                 subprocess.run(["nice", "-n", "15", GEN, vmin], timeout=600,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
                 pass
-        time.sleep(30)
+        time.sleep(10)   # poll corto para atender un cambio de ventana casi al instante
 
 _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
               ("/historico", "Historico"), ("/exclusiones", "Exclusiones"),
@@ -1952,6 +1987,10 @@ background:#fdecea;border:1px solid #f7c9c4;padding:4px 10px;border-radius:20px;
 .pageh .dotlive{width:8px;height:8px;border-radius:50%;background:#e34948;
 box-shadow:0 0 0 0 rgba(227,73,72,.6);animation:phpulse 1.6s infinite}
 @keyframes phpulse{0%{box-shadow:0 0 0 0 rgba(227,73,72,.5)}70%{box-shadow:0 0 0 8px rgba(227,73,72,0)}100%{box-shadow:0 0 0 0 rgba(227,73,72,0)}}
+.pageh .wsel{display:flex;align-items:center;gap:8px;margin:0}
+.pageh .wsel .wlbl{color:#6b6a66;font-size:12.5px;font-weight:600}
+.pageh .wsel select{padding:7px 11px;border:1px solid #d7d6d2;border-radius:8px;font:13px system-ui;background:#fff;cursor:pointer}
+.pageh .wsel select:focus{outline:none;border-color:#2a78d6;box-shadow:0 0 0 3px rgba(42,120,214,.15)}
 </style>"""
 
 def wrap(body_html, refresh=True, active=""):
@@ -2931,21 +2970,28 @@ class H(BaseHTTPRequestHandler):
             feed = live_feed_html()
             head_css, resumen_inner, _ = partes_reporte()   # resumen SIN la tabla de detalle
             ahora_ec = datetime.now(TZ_EC).strftime("%d/%m/%Y %H:%M")
+            # selector de ventana (solo admin): elegir cuanto tiempo abarca el resumen
+            wsel = ""
+            if getattr(CTX, "role", None) != "lectura":
+                va = ventana_actual()
+                opts = "".join(f"<option value={v}{' selected' if v == va else ''}>{t}</option>"
+                               for v, t in VENTANAS)
+                wsel = ("<form method=post action='/ventana' class='wsel'>"
+                        "<span class='wlbl'>Ventana</span>"
+                        f"<select name='min' onchange='this.form.submit()'>{opts}</select></form>")
             if resumen_inner.strip():
-                mcob = re.search(r'<!--COB:([^>]*?)-->', resumen_inner)  # cobertura real del reporte
-                cob = mcob.group(1) if mcob else "ultimas 24 horas"
                 cabecera = (
                     "<header class='pageh'><div>"
                     "<h1>Resumen</h1>"
                     "<p class='ph-sub'>Panel IDS Suricata &middot; alertas graves salientes &middot; "
                     f"actualizado {ahora_ec} (hora de Ecuador) "
                     "<span class='ph-live'><span class='dotlive'></span>en vivo &middot; "
-                    "refresca en <span id='cd'>20</span>s</span></p></div></header>")
+                    f"refresca en <span id='cd'>20</span>s</span></p></div>{wsel}</header>")
                 resumen = f"{cabecera}<main>{resumen_inner}</main>"
             else:
                 cabecera = (
                     "<header class='pageh'><div><h1>Resumen</h1>"
-                    f"<p class='ph-sub'>Panel IDS Suricata &middot; actualizado {ahora_ec} (hora de Ecuador)</p></div></header>")
+                    f"<p class='ph-sub'>Panel IDS Suricata &middot; actualizado {ahora_ec} (hora de Ecuador)</p></div>{wsel}</header>")
                 resumen = (cabecera + "<main style='padding:8px 28px 24px'><p style='color:#52514e'>El resumen se "
                            "esta generando en segundo plano; aparecera aqui en unos minutos. "
                            "El feed de abajo ya esta en vivo.</p></main>")
@@ -3064,6 +3110,19 @@ class H(BaseHTTPRequestHandler):
                 UPDATE["running"] = True; UPDATE["started"] = time.time(); UPDATE["msg"] = ""
                 threading.Thread(target=_run_rules_update, daemon=True).start()
             return self._redirect("/documentacion#reglas")
+        if ruta == "/ventana":
+            if not self._admin():
+                return self._deny()
+            try:
+                m = int(q.get("min", ["1440"])[0])
+            except ValueError:
+                m = 1440
+            if m not in [v for v, _ in VENTANAS]:
+                m = 1440
+            set_ventana(m)
+            global FORCE_REGEN
+            FORCE_REGEN = True   # el refrescador regenera el resumen con la nueva ventana en <=10 s
+            return self._redirect("/")
         if ruta == "/update-panel":
             if not self._admin():
                 return self._deny()
@@ -4099,6 +4158,7 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+
 
 
 

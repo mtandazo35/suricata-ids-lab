@@ -1728,6 +1728,32 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SESSIONS = {}          # token -> {user, role, exp}
 SESSION_TTL = 12 * 3600
+SESSIONS_FILE = "/etc/suricata-dashboard-sessions.json"   # persistir para no cerrar sesion al reiniciar
+
+def _cargar_sesiones():
+    """Carga las sesiones vigentes del disco (para que un reinicio del panel -p.ej. al
+    actualizar- no eche a todos al login)."""
+    try:
+        d = json.load(open(SESSIONS_FILE, encoding="utf-8"))
+        ahora = time.time()
+        return {t: v for t, v in d.items() if isinstance(v, dict) and v.get("exp", 0) > ahora}
+    except Exception:
+        return {}
+
+def _guardar_sesiones():
+    try:
+        ahora = time.time()
+        data = {t: v for t, v in SESSIONS.items() if v.get("exp", 0) > ahora}
+        tmp = SESSIONS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, SESSIONS_FILE)
+        try: os.chmod(SESSIONS_FILE, 0o600)
+        except OSError: pass
+    except OSError:
+        pass
+
+SESSIONS = _cargar_sesiones()
 
 # anti-fuerza-bruta del login: por IP de origen
 LOGIN_FAILS = {}       # ip -> [intentos, primer_ts]
@@ -4276,7 +4302,7 @@ class H(BaseHTTPRequestHandler):
         if path == "/logout":
             sid = self._sid()
             if sid:
-                SESSIONS.pop(sid, None)
+                SESSIONS.pop(sid, None); _guardar_sesiones()
             return self._redirect("/login", cookie="sid=; Path=/; Max-Age=0")
         if not self._auth_ok():
             return self._deny()
@@ -4413,6 +4439,7 @@ class H(BaseHTTPRequestHandler):
                 SESSIONS[token] = {"user": u, "role": role, "exp": time.time() + SESSION_TTL}
                 for k in [k for k, v in SESSIONS.items() if v.get("exp", 0) < time.time()]:
                     SESSIONS.pop(k, None)
+                _guardar_sesiones()   # persistir: sobrevive al reinicio del panel (no re-login)
                 return self._redirect("/", cookie=f"sid={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}{self._cookie_secure()}")
             if not cargar_confianza():
                 login_fallo(ip)   # solo se cuenta para bloquear si no hay lista de confianza
@@ -4909,7 +4936,7 @@ class H(BaseHTTPRequestHandler):
             except OSError as ex:
                 return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
             if not obj["activo"] and objetivo == yo:
-                SESSIONS.pop(self._sid(), None)
+                SESSIONS.pop(self._sid(), None); _guardar_sesiones()
                 return self._redirect("/login", cookie="sid=; Path=/; Max-Age=0")
             estado = "activado" if obj["activo"] else "desactivado"
             return self._html(perfil_page(f"Usuario '{objetivo}' {estado}.", ok=True))

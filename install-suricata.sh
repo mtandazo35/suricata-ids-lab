@@ -2454,6 +2454,50 @@ def reconciliar_cuarentena():
         if cambiado:
             guardar_enviados(env, sent_path)
 
+def mk_list_ips(lista):
+    """Devuelve el conjunto de direcciones que estan AHORA en esa address-list del MikroTik."""
+    d = cargar_mk()
+    s = mk_conectar(d)
+    try:
+        _mk_send(s, ["/ip/firewall/address-list/print", "=.proplist=address", f"?list={lista}"])
+        ok, frases, err = _mk_reply(s)
+        ips = set()
+        for f in frases:
+            if f and f[0] == "!re":
+                for a in f:
+                    if a.startswith("=address="):
+                        ips.add(a[len("=address="):])
+        return ips
+    finally:
+        try: s.close()
+        except Exception: pass
+
+def mk_sync_enviados():
+    """Sincroniza el registro del panel con lo que REALMENTE hay en el MikroTik, para que el
+    indicador 'En cuarentena' sea fiable y no se reintente enviar algo que ya esta. Agrega los
+    que estan en el router y faltan (marcados manual), y quita los que ya no estan."""
+    m = cargar_mk()
+    if not (mk_configurado() and m.get("ENABLED") == "1"):
+        return
+    for list_key, sent_path in (("LIST", MK_SENT), ("LIST_DNS", MK_SENT_DNS)):
+        lst = m.get(list_key, "")
+        if not lst:
+            continue
+        try:
+            reales = mk_list_ips(lst)
+        except Exception:
+            continue                       # router no responde -> no tocar el registro
+        env = cargar_enviados(sent_path); cambiado = False
+        for ip in reales:
+            if ip not in env:              # esta en el router pero no en el panel -> registrarlo
+                env[ip] = {"cuando": int(time.time()), "score": "", "por": "mikrotik", "manual": True}
+                cambiado = True
+        for ip in list(env.keys()):
+            if ip not in reales:           # ya no esta en el router (lo quitaron o expiro) -> soltar
+                env.pop(ip, None); cambiado = True
+        if cambiado:
+            guardar_enviados(env, sent_path)
+
 # --- log de actividad unificado (accesos + acciones de cuarentena) + retencion ---
 LOG_RETENCION_DIAS = 15   # los registros mas viejos que esto se borran solos
 
@@ -2754,6 +2798,10 @@ def refrescador():
         stale = FORCE_REGEN or (nr is None) or (time.time() - os.path.getmtime(nr) >= REFRESH_SECS)
         if stale:
             FORCE_REGEN = False
+            try:
+                mk_sync_enviados()   # el registro del panel refleja la lista real del MikroTik
+            except Exception:
+                pass
             try:
                 # ventana del resumen en minutos (config VENTANA_MIN; por defecto 24h)
                 vmin = str(ventana_actual())

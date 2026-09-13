@@ -2924,6 +2924,8 @@ def perfil_page(msg="", ok=False, edit_user=None):
         ".rbadge.adm{background:#e7f0fb;color:#1c5cab}.rbadge.lec{background:#eceae6;color:#6b6a66}"
         ".field{margin:12px 0 0}label{display:block;font-size:12.5px;color:#52514e;margin:0 0 5px;font-weight:600}"
         "input,select{width:100%;padding:9px 11px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui;box-sizing:border-box;background:#fff}"
+        "label.chk{display:flex;align-items:center;gap:9px;font-weight:500;color:#33322f;margin:0;cursor:pointer}"
+        "label.chk input{width:auto;flex:0 0 auto;margin:0;padding:0;box-shadow:none}"
         "input:focus,select:focus{outline:none;border-color:#2a78d6;box-shadow:0 0 0 3px rgba(42,120,214,.15)}"
         ".grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}"
         ".addgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}"
@@ -3403,6 +3405,50 @@ sed -i 's#^\\s*HOME_NET:.*#    HOME_NET: "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/
 suricata -T -c /etc/suricata/suricata.yaml   # validar
 systemctl restart suricata</code></pre>
 <p><code>EXTERNAL_NET</code> se ajusta solo (<code>!$HOME_NET</code>).</p>
+
+<h2>Cuarentena: enviar CPEs infectados al MikroTik (API v6 y v7)</h2>
+<p>La pestana <b>Cuarentena</b> lista los CPE con <b>infeccion confirmada</b> (por repeticion y
+contexto, no por una sola firma). Desde ahi, con un boton, el panel empuja la IP a una
+<b>address-list</b> del MikroTik por su <b>API</b>. El panel <b>solo mete y saca IPs de la lista</b>;
+<b>que se hace con esa lista lo decides tu</b> con una regla de firewall. Es compatible con
+<b>RouterOS v6</b> (incluye login antiguo &lt;6.43 por reto MD5) y <b>v7</b>, en API plano (8728) o
+API-SSL (8729).</p>
+
+<h3>1) Habilitar el servicio API (igual en v6 y v7)</h3>
+<pre><code># API plano (puerto 8728)
+/ip service enable api
+# o API-SSL (puerto 8729) si vas a usar TLS
+/ip service enable api-ssl
+# recomendado: limitar desde donde se conecta (IP del servidor Suricata)
+/ip service set api address=IP_DEL_SERVIDOR_SURICATA</code></pre>
+
+<h3>2) Usuario API dedicado con permisos minimos (igual en v6 y v7)</h3>
+<pre><code>/user group add name=suricata policy=api,read,write,test
+/user add name=suricata-api group=suricata password=UNA_CLAVE_FUERTE</code></pre>
+<p>Ese <b>usuario</b> y <b>clave</b> son los que pones en <b>Ajustes &rarr; MikroTik</b>. La clave se
+guarda solo en este servidor, en <code>/etc/suricata-mikrotik.conf</code> con permisos 600.</p>
+
+<h3>3) La regla que DECIDE que hacer con la lista (tu la defines)</h3>
+<p>Ejemplo: cortar el trafico saliente de los CPE en cuarentena (misma sintaxis en v6 y v7):</p>
+<pre><code>/ip firewall filter add chain=forward src-address-list=suricata-cuarentena action=drop comment="Suricata: CPE en cuarentena"</code></pre>
+<p>Alternativas segun tu politica: en vez de <code>action=drop</code> puedes redirigir a un portal,
+marcar en <code>mangle</code> para limitar velocidad, o registrar. La <b>address-list</b> por defecto
+es <code>suricata-cuarentena</code> (cambiala en Ajustes si usas otro nombre). Las entradas entran con
+un <b>TTL</b> (timeout, ej. <code>1h</code>) y se <b>auto-liberan</b>; tambien puedes quitarlas a mano
+con el boton <b>Quitar</b> de la pestana.</p>
+
+<h3>4) Configurar y probar en el panel</h3>
+<ol>
+<li><b>Ajustes &rarr; MikroTik</b>: host, puerto (8728 / 8729 si TLS), usuario, clave, nombre de la
+address-list y TTL. Marca <b>Habilitar</b>.</li>
+<li>Pulsa <b>Probar conexion</b>: si conecta, muestra el nombre (identity) del router.</li>
+<li>En <b>Cuarentena</b>, cada CPE infectado confirmado muestra <b>Enviar a cuarentena</b>
+(lo agrega a la lista) y luego <b>Quitar</b> (lo saca). Todo queda en
+<code>/var/log/suricata-cuarentena.log</code>.</li>
+</ol>
+<p><b>Seguridad:</b> usa un usuario API solo con <code>api,read,write,test</code> (no full), limita el
+servicio API a la IP del servidor Suricata, y si el enlace no es de confianza usa <b>API-SSL</b>. Si
+dejas el envio <b>deshabilitado</b>, la pestana Cuarentena solo <b>sugiere</b> (no toca el router).</p>
 
 <h2>Reinstalar o actualizar</h2>
 <p>Todo esta en un instalador idempotente. Para actualizar a la ultima version

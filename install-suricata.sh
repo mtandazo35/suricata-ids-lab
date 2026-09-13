@@ -582,6 +582,83 @@ fi
 # archivo de exclusiones (lo gestiona el apartado Exclusiones del panel)
 [ -f /etc/suricata-exclusiones.json ] || echo '[]' > /etc/suricata-exclusiones.json
 chmod 644 /etc/suricata-exclusiones.json
+
+# --- feeds de reputacion IP (abuse.ch Feodo, CINS Army, Spamhaus DROP/EDROP) ---
+# Alimentan la senal de "reputacion" del puntaje de riesgo por CPE. Falla suave.
+cat > /usr/local/bin/suricata-feeds-update <<'FEEDS'
+#!/usr/bin/env python3
+"""Baja feeds de reputacion IP y arma /var/lib/suricata-feeds/reputation.lst + .meta
+con version (fecha) y caducidad (ttl_days). Sin dependencias externas; un feed caido
+no rompe a los demas. Fuentes gratis, orientadas a ISP (IPs de C2/botnet/atacantes)."""
+import ipaddress, json, os, sys, time, urllib.request
+
+DIR = "/var/lib/suricata-feeds"
+TTL_DAYS = 7
+FEEDS = [
+    ("feodo",          "https://feodotracker.abuse.ch/downloads/ipblocklist.txt"),
+    ("cins",           "https://cinsscore.com/list/ci-badguys.txt"),
+    ("spamhaus-drop",  "https://www.spamhaus.org/drop/drop.txt"),
+    ("spamhaus-edrop", "https://www.spamhaus.org/drop/edrop.txt"),
+]
+os.makedirs(DIR, exist_ok=True)
+
+def bajar(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "suricata-feeds/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8", "replace")
+
+entradas = set()
+sources = {}
+for name, url in FEEDS:
+    ok = False; n = 0
+    try:
+        for line in bajar(url).splitlines():
+            line = line.strip()
+            if not line or line[0] in "#;":
+                continue
+            tok = line.split(";")[0].split()[0].strip()   # spamhaus: "1.2.3.0/24 ; SBL.."
+            try:
+                if "/" in tok:
+                    net = ipaddress.ip_network(tok, strict=False)
+                    if net.version != 4:
+                        continue
+                    entradas.add(str(net)); n += 1
+                else:
+                    ip = ipaddress.ip_address(tok)
+                    if ip.version != 4:
+                        continue
+                    entradas.add(str(ip)); n += 1
+            except Exception:
+                continue
+        ok = True
+    except Exception as e:
+        sys.stderr.write(f"{name}: fallo {e}\n")
+    sources[name] = {"ok": ok, "count": n, "url": url, "fetched": int(time.time()) if ok else 0}
+
+if not entradas:
+    sys.stderr.write("ningun feed dio datos; no se sobrescribe lo existente\n")
+    sys.exit(1)
+
+tmp = os.path.join(DIR, "reputation.lst.tmp")
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write("\n".join(sorted(entradas)) + "\n")
+os.replace(tmp, os.path.join(DIR, "reputation.lst"))
+with open(os.path.join(DIR, "reputation.meta"), "w", encoding="utf-8") as f:
+    json.dump({"generated": int(time.time()), "ttl_days": TTL_DAYS,
+               "total": len(entradas), "sources": sources}, f, indent=2)
+oks = sum(1 for s in sources.values() if s["ok"])
+print(f"reputation.lst: {len(entradas)} IOCs de {oks}/{len(FEEDS)} feeds")
+FEEDS
+chmod 755 /usr/local/bin/suricata-feeds-update
+# cron diario (04:17) para refrescar los feeds
+cat > /etc/cron.d/suricata-feeds <<'CRON'
+# Refresca los feeds de reputacion IP del panel Suricata (falla suave)
+17 4 * * * root /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1
+CRON
+chmod 644 /etc/cron.d/suricata-feeds
+# primera carga ya (best-effort; si no hay internet, el score corre con reputacion=0)
+/usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1 || true
+
 # --- reporte HTML grafico (puertos, IPs origen/destino, linea de tiempo, tabla) ---
 cat > /usr/local/bin/suricata-html-report <<'HREP'
 #!/usr/bin/env python3
@@ -1103,6 +1180,76 @@ def _org_celda(dst):
             f"no es un servicio grande conocido'>{esc(org)}</span></td>")
 
 
+# --- Reputacion: feeds de IPs/CIDR malos (suricata-feeds-update), con caducidad ---
+FEEDS_DIR = "/var/lib/suricata-feeds"
+REP_IPS = set()                 # IPs sueltas malas -> membresia O(1)
+REP_CIDR = defaultdict(list)    # primer octeto -> [(net_int, mask_int)] (prefijo >=8)
+REP_WIDE = []                   # CIDRs con prefijo <8 (raros) -> se revisan siempre
+REP_OK = False                  # hay al menos un feed vigente?
+REP_INFO = "feeds no instalados"
+
+def _ip4_int(ip):
+    try:
+        a, b, c, d = ip.split(".")
+        return (int(a) << 24) | (int(b) << 16) | (int(c) << 8) | int(d)
+    except Exception:
+        return None
+
+def _cargar_reputacion():
+    global REP_OK, REP_INFO
+    try:
+        meta = json.load(open(os.path.join(FEEDS_DIR, "reputation.meta"), encoding="utf-8"))
+    except Exception:
+        REP_INFO = "feeds no instalados"; return
+    ttl = meta.get("ttl_days", 7) * 86400
+    if time.time() - meta.get("generated", 0) > ttl:
+        REP_INFO = f"feeds CADUCADOS (>{meta.get('ttl_days', 7)}d sin refrescar; no se usan)"; return
+    try:
+        for line in open(os.path.join(FEEDS_DIR, "reputation.lst"), encoding="utf-8"):
+            line = line.strip()
+            if not line or line[0] in "#;":
+                continue
+            if "/" in line:
+                try:
+                    ipp, pl = line.split("/"); pl = int(pl)
+                    base = _ip4_int(ipp)
+                    if base is None:
+                        continue
+                    mask = (0xffffffff << (32 - pl)) & 0xffffffff if pl else 0
+                    net = base & mask
+                    if pl >= 8:
+                        REP_CIDR[(net >> 24) & 0xff].append((net, mask))
+                    else:
+                        REP_WIDE.append((net, mask))
+                except Exception:
+                    continue
+            else:
+                REP_IPS.add(line)
+    except Exception:
+        pass
+    n = len(REP_IPS) + sum(len(v) for v in REP_CIDR.values()) + len(REP_WIDE)
+    fuentes = ", ".join(k for k, s in meta.get("sources", {}).items() if s.get("ok"))
+    REP_INFO = f"{n:,} IOCs ({fuentes})" if n else "feeds vacios"
+    REP_OK = n > 0
+
+_cargar_reputacion()
+
+def es_malo(ip):
+    """La IP destino aparece en algun feed de reputacion?"""
+    if ip in REP_IPS:
+        return True
+    v = _ip4_int(ip)
+    if v is None:
+        return False
+    for net, mask in REP_CIDR.get((v >> 24) & 0xff, ()):
+        if (v & mask) == net:
+            return True
+    for net, mask in REP_WIDE:
+        if (v & mask) == net:
+            return True
+    return False
+
+
 def riesgo(src):
     """Puntaje de riesgo 0-100 del CPE (IP origen) combinando senales, en vez de
     clasificar por el texto de la firma. Devuelve (score, banda, color, desglose)."""
@@ -1121,7 +1268,14 @@ def riesgo(src):
             if n > otros:
                 otros = n
     c_cor = min(5, otros)
-    c_rep = 0                                          # reputacion (feeds): senal #5 pendiente
+    rep_hits = 0                                       # destinos del CPE en feeds de reputacion
+    if REP_OK:
+        for d in dst_by_src.get(src, ()):
+            if es_malo(d):
+                rep_hits += 1
+                if rep_hits >= 2:
+                    break
+    c_rep = min(10, rep_hits * 6)
     score = max(0, min(100, int(round(c_sev + c_dst + c_pt + c_per + c_cor + c_rep))))
     if score >= 70:
         banda, color = "ALTO", "#e34948"
@@ -1131,7 +1285,7 @@ def riesgo(src):
         banda, color = "bajo", "#3a9d5d"
     desg = (f"Severidad {c_sev}/30 &middot; Destinos unicos {c_dst}/20 &middot; "
             f"Puertos unicos {c_pt}/15 &middot; Persistencia {int(c_per)}/20 &middot; "
-            f"Correlacion flota {c_cor}/5 &middot; Reputacion {c_rep}/10 (feeds pendientes)")
+            f"Correlacion flota {c_cor}/5 &middot; Reputacion {c_rep}/10 [{REP_INFO}]")
     return score, banda, color, desg
 
 
@@ -3786,13 +3940,23 @@ extraer() { # $1=linea-inicio (substr)  $2=marcador-fin  $3=destino  $4=validado
 }
 extraer "cat > /usr/local/bin/suricata-dashboard <<'DASH'" "DASH" /usr/local/bin/suricata-dashboard py || exit 1
 extraer "cat > /usr/local/bin/suricata-html-report <<'HREP'" "HREP" /usr/local/bin/suricata-html-report py || exit 1
+# feeds de reputacion: script + cron (si falla, se sigue con lo demas)
+extraer "cat > /usr/local/bin/suricata-feeds-update <<'FEEDS'" "FEEDS" /usr/local/bin/suricata-feeds-update py || log "no se autoactualizo feeds-update"
 # el actualizador se auto-actualiza tambien (si falla, se sigue con lo demas)
 extraer "cat > /usr/local/bin/suricata-panel-update <<'UPDSH'" "UPDSH" /usr/local/bin/suricata-panel-update sh || log "no se autoactualizo el updater"
 # aplicar (dashboard y report son obligatorios; el updater si se pudo)
 mv /usr/local/bin/suricata-dashboard.new     /usr/local/bin/suricata-dashboard
 mv /usr/local/bin/suricata-html-report.new   /usr/local/bin/suricata-html-report
 [ -f /usr/local/bin/suricata-panel-update.new ] && mv /usr/local/bin/suricata-panel-update.new /usr/local/bin/suricata-panel-update
+[ -f /usr/local/bin/suricata-feeds-update.new ] && mv /usr/local/bin/suricata-feeds-update.new /usr/local/bin/suricata-feeds-update
 chmod 755 /usr/local/bin/suricata-dashboard /usr/local/bin/suricata-html-report /usr/local/bin/suricata-panel-update
+[ -f /usr/local/bin/suricata-feeds-update ] && chmod 755 /usr/local/bin/suricata-feeds-update
+# cron de feeds y primera carga si el box aun no los tiene (boxes viejos)
+if [ ! -f /etc/cron.d/suricata-feeds ] && [ -f /usr/local/bin/suricata-feeds-update ]; then
+  printf '17 4 * * * root /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1\n' > /etc/cron.d/suricata-feeds
+  chmod 644 /etc/cron.d/suricata-feeds
+fi
+[ -f /var/lib/suricata-feeds/reputation.lst ] || /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1 || true
 date '+%Y-%m-%d %H:%M:%S' > /etc/suricata-dashboard.updated
 log "actualizado OK; regenerando reporte y reiniciando panel"
 # regenerar el reporte YA con el codigo nuevo (respetando la ventana VENTANA_MIN), para

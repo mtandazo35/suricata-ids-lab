@@ -611,6 +611,7 @@ _RE = {k: re.compile(p) for k, p in {
     "proto": r'"proto":"([^"]+)"',
     "sig": r'"signature":"((?:[^"\\]|\\.)*)"',
     "cat": r'"category":"((?:[^"\\]|\\.)*)"',
+    "sev": r'"severity":(\d+)',
 }.items()}
 
 def campos(line):
@@ -747,6 +748,15 @@ by_hour = Counter()
 flujos = {}            # (src,sport,dst,dport,proto,sig) -> [count, first, last]
 ips_vistas = set()     # TODAS las IPs vistas en la ventana (cualquier evento, no solo alertas)
 MAX_IPS = 300000       # tope de cardinalidad del set (proteje la RAM en flotas grandes)
+# --- Senales para el PUNTAJE DE RIESGO por CPE (IP origen) 0-100 ---
+NOW = time.time()
+sev_by_src = {}                    # peor severidad Suricata vista (1=alta..3=baja)
+dst_by_src = defaultdict(set)      # IPs destino distintas (barrido/propagacion)
+dpt_by_src = defaultdict(set)      # puertos destino distintos (port-sweep)
+n5_by_src = Counter()              # alertas en los ultimos 5 min (actividad ahora)
+n1h_by_src = Counter()             # alertas en la ultima hora (sostenido)
+patron_src = defaultdict(set)      # (sig,dport) -> CPEs que lo comparten (correlacion de flota)
+MAX_CARD = 2500                    # tope por set (el score satura mucho antes; protege RAM)
 total = 0
 seen = 0
 ts_min = None          # timestamp del evento mas antiguo dentro de la ventana (cobertura real)
@@ -791,7 +801,21 @@ for p in files:
             by_src[src] += 1
             if dport != "":
                 by_dport[f"{dport}/{proto}"] += 1
+            # --- senales de riesgo por CPE ---
+            sv = g("sev")
+            if sv:
+                sv = int(sv)
+                if src not in sev_by_src or sv < sev_by_src[src]:
+                    sev_by_src[src] = sv     # menor numero = peor severidad
+            if dst != "?" and len(dst_by_src[src]) < MAX_CARD:
+                dst_by_src[src].add(dst)
+            if dport and len(dpt_by_src[src]) < MAX_CARD:
+                dpt_by_src[src].add(dport)
+            if dport and len(patron_src[(sig, dport)]) < MAX_CARD:
+                patron_src[(sig, dport)].add(src)
             if ts:
+                if ts >= NOW - 300:  n5_by_src[src] += 1
+                if ts >= NOW - 3600: n1h_by_src[src] += 1
                 by_hour[int(ts // BUCKET)] += 1
                 if ts_min is None or ts < ts_min:
                     ts_min = ts
@@ -1079,6 +1103,38 @@ def _org_celda(dst):
             f"no es un servicio grande conocido'>{esc(org)}</span></td>")
 
 
+def riesgo(src):
+    """Puntaje de riesgo 0-100 del CPE (IP origen) combinando senales, en vez de
+    clasificar por el texto de la firma. Devuelve (score, banda, color, desglose)."""
+    sev = sev_by_src.get(src, 3)
+    c_sev = {1: 30, 2: 18, 3: 8}.get(sev, 8)          # severidad Suricata (1=alta)
+    c_dst = min(20, len(dst_by_src.get(src, ())) * 2)  # destinos unicos (barrido)
+    c_pt  = min(15, len(dpt_by_src.get(src, ())) * 3)  # puertos unicos (port-sweep)
+    p = 8 if n5_by_src.get(src, 0) > 0 else 0          # activo en los ultimos 5 min
+    p += min(6, n1h_by_src.get(src, 0) / 20 * 6)       # sostenido en la ultima hora
+    p += min(6, by_src.get(src, 0) / 60 * 6)           # persistente en la ventana
+    c_per = min(20, p)
+    otros = 0                                          # correlacion: otros CPE, mismo patron
+    for k in flujos:
+        if k[0] == src:
+            n = len(patron_src.get((k[5], k[3]), ())) - 1
+            if n > otros:
+                otros = n
+    c_cor = min(5, otros)
+    c_rep = 0                                          # reputacion (feeds): senal #5 pendiente
+    score = max(0, min(100, int(round(c_sev + c_dst + c_pt + c_per + c_cor + c_rep))))
+    if score >= 70:
+        banda, color = "ALTO", "#e34948"
+    elif score >= 40:
+        banda, color = "MEDIO", "#e58a00"
+    else:
+        banda, color = "bajo", "#3a9d5d"
+    desg = (f"Severidad {c_sev}/30 &middot; Destinos unicos {c_dst}/20 &middot; "
+            f"Puertos unicos {c_pt}/15 &middot; Persistencia {int(c_per)}/20 &middot; "
+            f"Correlacion flota {c_cor}/5 &middot; Reputacion {c_rep}/10 (feeds pendientes)")
+    return score, banda, color, desg
+
+
 def top_origenes_section(n_src=5, n_sub=8):
     """Top de IPs origen que mas peticionan, con el desglose de cada una:
     desde que puerto origen, hacia que IP destino y hacia que puerto destino.
@@ -1104,10 +1160,13 @@ def top_origenes_section(n_src=5, n_sub=8):
             f"<td class='mono'>{esc(dp or '-')}</td>"
             f"<td class='mono'>{esc((pr or '-').upper())}</td>"
             f"<td class='num'>{c:,}</td></tr>" for (sp, dst, dp, pr), c in sub)
+        rsc, rband, rcol, rdes = riesgo(src)
         cards.append(
             f"<div class='tcard'>"
             f"<div class='thd'><span class='rank'>#{i}</span>"
             f"<span class='ipx mono'>{esc(src)}</span>"
+            f"<span class='risk' style='background:{rcol}' title='Puntaje de riesgo del CPE (0-100): {rdes}'>"
+            f"Riesgo {rsc} &middot; {rband}</span>"
             f"<span class='tot'>{tot:,} alertas</span>"
             f"<span class='meta'>&rarr; {len(dsts):,} IP destino &middot; {len(dports):,} puertos destino</span></div>"
             f"<div class='tablewrap'><table><thead><tr>"
@@ -1124,6 +1183,7 @@ def top_origenes_section(n_src=5, n_sub=8):
         ".topwrap .rank{font-weight:800;color:#2a78d6;font-size:15px}"
         ".topwrap .ipx{font-weight:700;font-size:15px}"
         ".topwrap .tot{background:#e34948;color:#fff;font-size:12px;font-weight:700;padding:3px 9px;border-radius:20px}"
+        ".topwrap .risk{color:#fff;font-size:12px;font-weight:800;padding:3px 10px;border-radius:20px;letter-spacing:.3px;cursor:help}"
         ".topwrap .meta{color:#52514e;font-size:12px;margin-left:auto}"
         ".topwrap table{table-layout:fixed}"
         ".topwrap table th,.topwrap table td{text-align:center!important;padding-left:6px;padding-right:6px}"

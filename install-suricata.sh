@@ -722,6 +722,12 @@ def campos(line):
     return g
 
 LOGDIR = "/var/log/suricata"
+# IPs ya enviadas a la cuarentena del MikroTik (lo escribe el panel): para que el boton
+# del Top muestre "En cuarentena" en vez de "Cuarentena" cuando ya se envio.
+try:
+    _MK_ENVIADOS = set(json.load(open("/var/log/suricata-cuarentena-enviados.json", encoding="utf-8")).keys())
+except Exception:
+    _MK_ENVIADOS = set()
 # Ventana del resumen en MINUTOS (argv[1]); por defecto 24h. Con una ventana corta
 # (p.ej. 30 min) los cuadros muestran solo la actividad reciente: una IP atendida hace
 # rato se cae sola del top al no tener alertas nuevas.
@@ -1354,11 +1360,15 @@ def top_origenes_section(n_src=5, n_sub=8):
             f"<td class='mono'>{esc((pr or '-').upper())}</td>"
             f"<td class='num'>{c:,}</td></tr>" for (sp, dst, dp, pr), c in sub)
         rsc, rband, rcol, rdes = riesgo(src)
-        cuar = (f"<form method='post' action='/cuarentena/enviar' style='display:inline;margin:0'>"
-                f"<input type='hidden' name='ip' value='{esc(src)}'>"
-                f"<input type='hidden' name='score' value='{rsc}'>"
-                f"<button class='qsend' title='Enviar este CPE a la address-list de cuarentena del MikroTik'>"
-                f"&#9888; Cuarentena</button></form>")
+        if src in _MK_ENVIADOS:
+            cuar = ("<span class='qsent' title='Este CPE ya esta en la lista de cuarentena del MikroTik'>"
+                    "&#10003; En cuarentena</span>")
+        else:
+            cuar = (f"<form method='post' action='/cuarentena/enviar' style='display:inline;margin:0'>"
+                    f"<input type='hidden' name='ip' value='{esc(src)}'>"
+                    f"<input type='hidden' name='score' value='{rsc}'>"
+                    f"<button class='qsend' title='Enviar este CPE a la address-list de cuarentena del MikroTik'>"
+                    f"&#9888; Cuarentena</button></form>")
         cards.append(
             f"<div class='tcard'>"
             f"<div class='thd'><span class='rank'>#{i}</span>"
@@ -1384,6 +1394,7 @@ def top_origenes_section(n_src=5, n_sub=8):
         ".topwrap .risk{color:#fff;font-size:12px;font-weight:800;padding:3px 10px;border-radius:20px;letter-spacing:.3px;cursor:help}"
         ".topwrap .qsend{font:11px system-ui;font-weight:700;color:#fff;background:#e34948;border:0;border-radius:20px;padding:3px 11px;cursor:pointer}"
         ".topwrap .qsend:hover{background:#c93b3a}"
+        ".topwrap .qsent{font-size:11px;font-weight:700;color:#1a7f37;background:#e6f4ea;border:1px solid #b7e0c2;border-radius:20px;padding:2px 10px}"
         ".topwrap .meta{color:#52514e;font-size:12px;margin-left:auto}"
         ".topwrap table{table-layout:fixed}"
         ".topwrap table th,.topwrap table td{text-align:center!important;padding-left:6px;padding-right:6px}"
@@ -2428,6 +2439,8 @@ def reconciliar_cuarentena():
         env = cargar_enviados(sent_path)
         lst = m.get(list_key, ""); cambiado = False
         for ip in list(env.keys()):
+            if env[ip].get("manual"):
+                continue                       # enviado a mano -> solo lo saca el usuario con Quitar
             if ip in ips_activas:
                 continue                       # sigue atacando -> se queda (entrada permanente)
             try:
@@ -3927,6 +3940,28 @@ def cuarentena_page(msg="", es_admin=False):
                        f"Consultas DNS a dominios maliciosos (&ge;{umbral_dns} alertas DNS o &ge;2 firmas) &rarr; lista <code>{esc(m.get('LIST_DNS',''))}</code> (otro trato)",
                        dns_cand, enviados_dns, "cuarentena/dns", m.get("LIST_DNS", ""), "alertas_dns", "alertas DNS", "firmas_dns",
                        "Sin CPEs consultando dominios maliciosos en la ventana.")
+    # --- Enviados manualmente (desde Top origenes): IPs en la lista que NO son candidatos ---
+    def _fila_manual(ip, mm, pref, lista):
+        cuando = time.strftime("%d/%m %H:%M", time.localtime(mm.get("cuando", 0)))
+        quitar = (f"<form method=post action='/{pref}/quitar' style='display:inline'>"
+                  f"<input type=hidden name=ip value='{esc(ip)}'>"
+                  f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de {esc(lista)}?')\">Quitar</button></form>"
+                  ) if es_admin else ""
+        return (f"<tr><td class='mono ipx'>{esc(ip)}</td><td class='mono'>{esc(lista)}</td>"
+                f"<td>{esc(str(mm.get('score','')))}</td><td>{esc(mm.get('por','?'))}</td>"
+                f"<td class='mono'>{cuando}</td><td>{quitar}</td></tr>")
+    _ci = {c.get("ip") for c in cand}; _cd = {c.get("ip") for c in dns_cand}
+    manual_rows = "".join(_fila_manual(ip, mm, "cuarentena", m.get("LIST", "")) for ip, mm in enviados.items() if ip not in _ci)
+    manual_rows += "".join(_fila_manual(ip, mm, "cuarentena/dns", m.get("LIST_DNS", "")) for ip, mm in enviados_dns.items() if ip not in _cd)
+    if manual_rows:
+        sec_manual = ("<div class='seccion'><div class='shead'><div><h2>Enviados manualmente</h2>"
+                      "<p class='sub'>IPs que pusiste a mano (p.ej. desde Top origenes) y no son candidatos actuales. "
+                      "Con auto-mantener <b>no</b> se liberan solas: quitalas tu aqui cuando quieras.</p></div></div>"
+                      "<div class='card'><table><thead><tr><th>CPE (IP origen)</th><th>Lista</th><th>Riesgo</th>"
+                      "<th>Por</th><th>Enviado</th><th>Accion</th></tr></thead>"
+                      f"<tbody>{manual_rows}</tbody></table></div></div>")
+    else:
+        sec_manual = ""
     if activo:
         auto = m.get("AUTO_MANTENER") == "1"
         auto_txt = (" <b>Auto-mantener ON</b>: las IPs entran sin caducidad y se liberan solas cuando el CPE deja de atacar."
@@ -3971,7 +4006,7 @@ def cuarentena_page(msg="", es_admin=False):
             "<h1>Cuarentena y control de CPEs</h1>"
             f"<p class='sub'>Ventana {vmin} min · lista de hace {edad}. Dos categorias: <b>infectados</b> (malware/CnC) "
             "y <b>DNS sospechoso</b> (consultan dominios de botnet), cada una a su address-list del MikroTik.</p>"
-            + flash + estado + sec_inf + sec_dns +
+            + flash + estado + sec_inf + sec_dns + sec_manual +
             "</main></body></html>")
     return wrap(body, refresh=False, active="/cuarentena")
 
@@ -4386,15 +4421,21 @@ class H(BaseHTTPRequestHandler):
             m = cargar_mk()
             if not (mk_configurado() and m.get("ENABLED") == "1"):
                 return self._redirect("/cuarentena?msg=" + _up.quote("Configura y HABILITA el MikroTik en Ajustes primero"))
+            try:   # si la IP no es candidato actual, es un envio MANUAL (no lo libera el auto)
+                cand_ips = {c.get("ip") for c in json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8")).get("candidatos", [])}
+            except Exception:
+                cand_ips = set()
             try:
                 ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}", ttl=_ttl_efectivo(m, "TTL"))
             except Exception as ex:
                 ok, err = False, str(ex)
             if ok:
                 env = cargar_enviados()
-                env[ip] = {"cuando": int(time.time()), "score": score, "por": getattr(CTX, "user", "?")}
+                env[ip] = {"cuando": int(time.time()), "score": score, "por": getattr(CTX, "user", "?"),
+                           "manual": ip not in cand_ips}
                 guardar_enviados(env)
-                mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} ttl={m.get('TTL')}")
+                mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} ttl={m.get('TTL')}" + (" (manual)" if ip not in cand_ips else ""))
+                globals()["FORCE_REGEN"] = True   # regenerar pronto para que el Top muestre 'En cuarentena'
                 return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} enviado a la lista {m.get('LIST')}"))
             mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), err)
             return self._redirect("/cuarentena?msg=" + _up.quote(f"No se pudo enviar {ip}: {err}"))

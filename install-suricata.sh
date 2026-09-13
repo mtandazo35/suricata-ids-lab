@@ -1364,11 +1364,8 @@ def top_origenes_section(n_src=5, n_sub=8):
             cuar = ("<span class='qsent' title='Este CPE ya esta en la lista de cuarentena del MikroTik'>"
                     "&#10003; En cuarentena</span>")
         else:
-            cuar = (f"<form method='post' action='/cuarentena/enviar' style='display:inline;margin:0'>"
-                    f"<input type='hidden' name='ip' value='{esc(src)}'>"
-                    f"<input type='hidden' name='score' value='{rsc}'>"
-                    f"<button class='qsend' title='Enviar este CPE a la address-list de cuarentena del MikroTik'>"
-                    f"&#9888; Cuarentena</button></form>")
+            cuar = (f"<button class='qsend' title='Enviar este CPE a la address-list de cuarentena del MikroTik' "
+                    f"onclick=\"qcuar(this,'{esc(src)}','{rsc}')\">&#9888; Cuarentena</button>")
         cards.append(
             f"<div class='tcard'>"
             f"<div class='thd'><span class='rank'>#{i}</span>"
@@ -1404,6 +1401,13 @@ def top_origenes_section(n_src=5, n_sub=8):
         ".topwrap .obadge.unk{background:#fdf0e6;color:#a15c12;border:1px solid #f2d3ad}"
         ".topwrap .obadge.none{background:#f1f1ef;color:#6b6a66;border:1px solid #e0dfda}"
         "</style>"
+        "<script>function qcuar(b,ip,sc){b.disabled=true;var o=b.innerHTML;b.textContent='enviando...';"
+        "fetch('/cuarentena/enviar',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+        "body:'ajax=1&ip='+encodeURIComponent(ip)+'&score='+encodeURIComponent(sc)})"
+        ".then(function(r){return r.text();}).then(function(t){"
+        "if(t.indexOf('OK')===0){b.outerHTML=\"<span class='qsent' title='Ya en cuarentena'>\\u2713 En cuarentena</span>\";}"
+        "else{b.disabled=false;b.innerHTML=o;alert(t.replace(/^ERR: /,''));}})"
+        ".catch(function(e){b.disabled=false;b.innerHTML=o;alert('Error: '+e);});}</script>"
         "<section class=\"card\"><h2>Top 5 IPs origen que mas peticionan</h2>"
         "<p class=\"muted\" style=\"margin:0 0 12px\">Quien ataca mas, hacia que IP destino, desde que puerto origen y hacia que puerto destino. "
         "La columna <b>Dueno / organizacion</b> viene del DNS inverso (PTR) de la IP destino: "
@@ -4462,15 +4466,25 @@ class H(BaseHTTPRequestHandler):
         if ruta == "/cuarentena/enviar":
             if not self._admin():
                 return self._deny()
+            ajax = bool(q.get("ajax"))   # desde el Top: responde texto plano y NO redirige
+            def _fin(okr, texto):
+                if ajax:
+                    b = (("OK " if okr else "ERR: ") + texto).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", str(len(b)))
+                    self.end_headers(); self.wfile.write(b)
+                    return
+                return self._redirect("/cuarentena?msg=" + _up.quote(texto))
             ip = (q.get("ip", [""])[0]).strip()
             score = (q.get("score", [""])[0]).strip()[:8]
             try:
                 ipaddress.ip_address(ip)
             except Exception:
-                return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+                return _fin(False, "IP invalida")
             m = cargar_mk()
             if not (mk_configurado() and m.get("ENABLED") == "1"):
-                return self._redirect("/cuarentena?msg=" + _up.quote("Configura y HABILITA el MikroTik en Ajustes primero"))
+                return _fin(False, "Configura y HABILITA el MikroTik en Ajustes primero")
             try:   # si la IP no es candidato actual, es un envio MANUAL (no lo libera el auto)
                 cand_ips = {c.get("ip") for c in json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8")).get("candidatos", [])}
             except Exception:
@@ -4486,10 +4500,10 @@ class H(BaseHTTPRequestHandler):
                 guardar_enviados(env)
                 mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} ttl={m.get('TTL')}" + (" (manual)" if ip not in cand_ips else ""))
                 globals()["FORCE_REGEN"] = True   # regenerar pronto para que el Top muestre 'En cuarentena'
-                nota = " (ya estaba en la lista; ahora la puedes Quitar aqui)" if err else ""
-                return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} en la lista {m.get('LIST')}{nota}"))
+                nota = " (ya estaba en la lista)" if err else ""
+                return _fin(True, f"{ip} en la lista {m.get('LIST')}{nota}")
             mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), err)
-            return self._redirect("/cuarentena?msg=" + _up.quote(f"No se pudo enviar {ip}: {err}"))
+            return _fin(False, f"No se pudo enviar {ip}: {err}")
         if ruta == "/cuarentena/enviar-todos":
             if not self._admin():
                 return self._deny()

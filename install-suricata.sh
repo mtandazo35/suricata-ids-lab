@@ -1350,13 +1350,18 @@ def top_origenes_section(n_src=5, n_sub=8):
             f"<td class='mono'>{esc((pr or '-').upper())}</td>"
             f"<td class='num'>{c:,}</td></tr>" for (sp, dst, dp, pr), c in sub)
         rsc, rband, rcol, rdes = riesgo(src)
+        cuar = (f"<form method='post' action='/cuarentena/enviar' style='display:inline;margin:0'>"
+                f"<input type='hidden' name='ip' value='{esc(src)}'>"
+                f"<input type='hidden' name='score' value='{rsc}'>"
+                f"<button class='qsend' title='Enviar este CPE a la address-list de cuarentena del MikroTik'>"
+                f"&#9888; Cuarentena</button></form>")
         cards.append(
             f"<div class='tcard'>"
             f"<div class='thd'><span class='rank'>#{i}</span>"
             f"<span class='ipx mono'>{esc(src)}</span>"
             f"<span class='risk' style='background:{rcol}' title='Puntaje de riesgo del CPE (0-100): {rdes}'>"
             f"Riesgo {rsc} &middot; {rband}</span>"
-            f"<span class='tot'>{tot:,} alertas</span>"
+            f"<span class='tot'>{tot:,} alertas</span>{cuar}"
             f"<span class='meta'>&rarr; {len(dsts):,} IP destino &middot; {len(dports):,} puertos destino</span></div>"
             f"<div class='tablewrap'><table><thead><tr>"
             f"<th>Puerto origen</th><th>IP destino (a donde)</th><th>Dueno / organizacion</th>"
@@ -1373,6 +1378,8 @@ def top_origenes_section(n_src=5, n_sub=8):
         ".topwrap .ipx{font-weight:700;font-size:15px}"
         ".topwrap .tot{background:#e34948;color:#fff;font-size:12px;font-weight:700;padding:3px 9px;border-radius:20px}"
         ".topwrap .risk{color:#fff;font-size:12px;font-weight:800;padding:3px 10px;border-radius:20px;letter-spacing:.3px;cursor:help}"
+        ".topwrap .qsend{font:11px system-ui;font-weight:700;color:#fff;background:#e34948;border:0;border-radius:20px;padding:3px 11px;cursor:pointer}"
+        ".topwrap .qsend:hover{background:#c93b3a}"
         ".topwrap .meta{color:#52514e;font-size:12px;margin-left:auto}"
         ".topwrap table{table-layout:fixed}"
         ".topwrap table th,.topwrap table td{text-align:center!important;padding-left:6px;padding-right:6px}"
@@ -2151,7 +2158,8 @@ MK_LOG  = "/var/log/suricata-cuarentena.log"                 # bitacora de accio
 def cargar_mk():
     d = {"HOST": "", "PORT": "8728", "TLS": "0", "USER": "", "PASS": "",
          "LIST": "suricata-cuarentena", "TTL": "1h",
-         "LIST_DNS": "suricata-dns-sospechoso", "TTL_DNS": "1d", "ENABLED": "0"}
+         "LIST_DNS": "suricata-dns-sospechoso", "TTL_DNS": "1d",
+         "AUTO_MANTENER": "0", "ENABLED": "0"}
     try:
         for l in open(MK_CONF, encoding="utf-8"):
             l = l.strip()
@@ -2162,7 +2170,7 @@ def cargar_mk():
     return d
 
 def guardar_mk(d):
-    orden = ["HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL", "LIST_DNS", "TTL_DNS", "ENABLED"]
+    orden = ["HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL", "LIST_DNS", "TTL_DNS", "AUTO_MANTENER", "ENABLED"]
     txt = ("# Conexion API al MikroTik para la cuarentena. La clave se usa para autenticar\n"
            "# (no se puede hashear). Archivo con permisos 600.\n"
            + "".join(f"{k}={d.get(k,'')}\n" for k in orden))
@@ -2342,6 +2350,39 @@ def mk_log(accion, ip, quien, detalle=""):
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {accion} {ip} por={quien} {detalle}\n")
     except OSError:
         pass
+
+def _ttl_efectivo(m, ttl_key):
+    """Con auto-mantener, las entradas van SIN TTL (permanentes) y las libera el
+    reconciliador cuando el CPE deja de atacar. Sin auto, se usa el TTL configurado."""
+    return "" if m.get("AUTO_MANTENER") == "1" else m.get(ttl_key, "")
+
+def reconciliar_cuarentena():
+    """Mantiene la cuarentena: un CPE sigue en la lista mientras siga siendo candidato
+    (sigue atacando); cuando deja de aparecer, se libera solo. Corre en segundo plano.
+    Solo actua con MikroTik habilitado y AUTO_MANTENER activo."""
+    m = cargar_mk()
+    if not (mk_configurado() and m.get("ENABLED") == "1" and m.get("AUTO_MANTENER") == "1"):
+        return
+    try:
+        data = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
+    except Exception:
+        return
+    for cand_key, sent_path, list_key in (("candidatos", MK_SENT, "LIST"),
+                                          ("dns_candidatos", MK_SENT_DNS, "LIST_DNS")):
+        ips_activas = {c.get("ip") for c in data.get(cand_key, [])}
+        env = cargar_enviados(sent_path)
+        lst = m.get(list_key, ""); cambiado = False
+        for ip in list(env.keys()):
+            if ip in ips_activas:
+                continue                       # sigue atacando -> se queda (entrada permanente)
+            try:
+                mk_remove(ip, lista=lst)       # dejo de atacar -> liberar
+            except Exception:
+                continue                       # si el router no responde, reintenta el proximo ciclo
+            env.pop(ip, None); cambiado = True
+            mk_log("AUTO-LIBERADO", ip, "auto", f"lista={lst} (dejo de atacar)")
+        if cambiado:
+            guardar_enviados(env, sent_path)
 
 # --- log de actividad unificado (accesos + acciones de cuarentena) + retencion ---
 LOG_RETENCION_DIAS = 15   # los registros mas viejos que esto se borran solos
@@ -2650,6 +2691,10 @@ def refrescador():
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
                 pass
+            try:
+                reconciliar_cuarentena()   # libera de la cuarentena a los que dejaron de atacar
+            except Exception:
+                pass
         time.sleep(10)   # poll corto para atender un cambio de ventana casi al instante
 
 _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
@@ -2891,6 +2936,11 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "Permitir enviar IPs al MikroTik</label>"
             "<div class=hint>Activado: aparece el boton para poner CPEs en cuarentena (el panel escribe en el router). "
             "Apagado: la pestana Cuarentena solo muestra sugerencias y no toca el MikroTik.</div></div>"
+            "<div class=field><label class=chk>"
+            f"<input type=checkbox name=auto value=1 {'checked' if m.get('AUTO_MANTENER') == '1' else ''}> "
+            "Mantener la cuarentena automaticamente</label>"
+            "<div class=hint>Activado: la IP entra SIN caducidad y se <b>libera sola</b> cuando el CPE deja de atacar "
+            "(mientras siga enviando virus, sigue en cuarentena). Apagado: la IP caduca sola con el TTL de arriba.</div></div>"
             "<div class=actions>"
             "<button class=primary type=submit>Guardar</button>"
             "<button class=cancelbtn type=submit formaction='/mikrotik/test' formnovalidate>Probar conexion</button>"
@@ -3809,9 +3859,12 @@ def cuarentena_page(msg="", es_admin=False):
                        dns_cand, enviados_dns, "cuarentena/dns", m.get("LIST_DNS", ""), "alertas_dns", "alertas DNS", "firmas_dns",
                        "Sin CPEs consultando dominios maliciosos en la ventana.")
     if activo:
+        auto = m.get("AUTO_MANTENER") == "1"
+        auto_txt = (" <b>Auto-mantener ON</b>: las IPs entran sin caducidad y se liberan solas cuando el CPE deja de atacar."
+                    if auto else " Las IPs caducan solas con su TTL.")
         estado = (f"<div class='banner ok'><b>MikroTik habilitado.</b> Puedes enviar cada CPE a su address-list "
                   f"(infectados &rarr; <code>{esc(m.get('LIST',''))}</code>, DNS &rarr; <code>{esc(m.get('LIST_DNS',''))}</code>) "
-                  f"en <code>{esc(m.get('HOST',''))}</code>; el MikroTik decide con tus reglas. Reversible con <b>Quitar</b>.</div>")
+                  f"en <code>{esc(m.get('HOST',''))}</code>; el MikroTik decide con tus reglas. Reversible con <b>Quitar</b>.{auto_txt}</div>")
     elif en and not conf_ok:
         estado = ("<div class='banner err'><b>Falta configurar la conexion.</b> Marcaste <b>Permitir enviar</b>, pero "
                   "aun falta <b>host, usuario o clave</b> del MikroTik. Ve a <b>Ajustes &rarr; MikroTik</b>, completa los datos "
@@ -4198,6 +4251,7 @@ class H(BaseHTTPRequestHandler):
             m["TTL"] = (q.get("ttl", [""])[0]).strip()[:16]
             m["LIST_DNS"] = (q.get("list_dns", [""])[0]).strip()[:64] or "suricata-dns-sospechoso"
             m["TTL_DNS"] = (q.get("ttl_dns", [""])[0]).strip()[:16]
+            m["AUTO_MANTENER"] = "1" if q.get("auto") else "0"
             m["TLS"] = "1" if q.get("tls") else "0"
             m["ENABLED"] = "1" if q.get("enabled") else "0"
             try:
@@ -4238,7 +4292,7 @@ class H(BaseHTTPRequestHandler):
             if not (mk_configurado() and m.get("ENABLED") == "1"):
                 return self._redirect("/cuarentena?msg=" + _up.quote("Configura y HABILITA el MikroTik en Ajustes primero"))
             try:
-                ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}")
+                ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}", ttl=_ttl_efectivo(m, "TTL"))
             except Exception as ex:
                 ok, err = False, str(ex)
             if ok:
@@ -4269,7 +4323,7 @@ class H(BaseHTTPRequestHandler):
                 except Exception:
                     continue
                 try:
-                    ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {c.get('riesgo',0)} {time.strftime('%Y-%m-%d %H:%M')}")
+                    ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {c.get('riesgo',0)} {time.strftime('%Y-%m-%d %H:%M')}", ttl=_ttl_efectivo(m, "TTL"))
                 except Exception as ex:
                     ok, err = False, str(ex)
                 if ok:
@@ -4301,7 +4355,7 @@ class H(BaseHTTPRequestHandler):
         if ruta in ("/cuarentena/dns/enviar", "/cuarentena/dns/quitar", "/cuarentena/dns/enviar-todos"):
             if not self._admin():
                 return self._deny()
-            m = cargar_mk(); lst = m.get("LIST_DNS", "suricata-dns-sospechoso"); ttl = m.get("TTL_DNS", "")
+            m = cargar_mk(); lst = m.get("LIST_DNS", "suricata-dns-sospechoso"); ttl = _ttl_efectivo(m, "TTL_DNS")
             if ruta == "/cuarentena/dns/quitar":
                 ip = (q.get("ip", [""])[0]).strip()
                 try: ipaddress.ip_address(ip)

@@ -698,6 +698,19 @@ CNC_KW = ("cnc", "c2 ", "command and control", "checkin", "check-in", "botnet", 
           "katana", "trojan", "ransom", " rat ", "coinmin", "cryptomin", "compromised")
 UMBRAL_INFECTADO = 3
 
+# DNS SOSPECHOSO (Camino A): alertas de consulta DNS a dominios de botnet/C2/malware.
+# Se detecta una firma que hable de DNS y ademas de contexto malicioso. Un CPE que
+# consulta esos dominios probablemente esta infectado -> lista aparte en el MikroTik.
+DNS_MAL = ("malware", "trojan", "botnet", "c2 ", "cnc", "command and control", "dga",
+           "sinkhole", "hostile", "phishing", "stealer", "ransom", "known bad",
+           "observed", "suspicious domain")
+UMBRAL_DNS = 3
+def es_dns_sospechoso(sig, cat):
+    s = (sig or "").lower(); c = (cat or "").lower()
+    if "dns" not in s and "dns" not in c:
+        return False
+    return any(k in s for k in DNS_MAL) or "c2" in c or "command and control" in c
+
 def campos(line):
     def g(k):
         m = _RE[k].search(line)
@@ -843,6 +856,9 @@ patron_src = defaultdict(set)      # (sig,dport) -> CPEs que lo comparten (corre
 inf_hits = Counter()               # alertas CnC/botnet por CPE (para confirmar infeccion)
 inf_sids = defaultdict(set)        # firmas CnC distintas por CPE (SID o texto)
 inf_sig = {}                       # firma CnC mas reciente por CPE (para el motivo)
+dns_hits = Counter()               # alertas de DNS sospechoso por CPE
+dns_sids = defaultdict(set)        # firmas DNS distintas por CPE
+dns_sig = {}                       # firma DNS mas reciente por CPE
 MAX_CARD = 2500                    # tope por set (el score satura mucho antes; protege RAM)
 total = 0
 seen = 0
@@ -905,6 +921,10 @@ for p in files:
                 inf_hits[src] += 1
                 inf_sids[src].add(g("sid") or sig)
                 inf_sig[src] = sig
+            if es_dns_sospechoso(sig, cat):        # consulta DNS a dominio malicioso
+                dns_hits[src] += 1
+                dns_sids[src].add(g("sid") or sig)
+                dns_sig[src] = sig
             if ts:
                 if ts >= NOW - 300:  n5_by_src[src] += 1
                 if ts >= NOW - 3600: n1h_by_src[src] += 1
@@ -1392,8 +1412,26 @@ try:
                 "total_alertas": by_src.get(src, 0),
             })
     cand.sort(key=lambda c: (c["riesgo"], c["alertas_cnc"]), reverse=True)
+    # DNS sospechoso: CPEs que consultaron dominios de botnet/C2 (Camino A: alertas DNS)
+    cand_dns = []
+    for src in dns_hits:
+        if dns_hits[src] >= UMBRAL_DNS or len(dns_sids[src]) >= 2:
+            sc, band, _c, _d = riesgo(src)
+            cand_dns.append({
+                "ip": src,
+                "riesgo": sc,
+                "banda": band,
+                "alertas_dns": dns_hits[src],
+                "firmas_dns": len(dns_sids[src]),
+                "firma": dns_sig.get(src, ""),
+                "destinos": len(dst_by_src.get(src, ())),
+                "puertos": len(dpt_by_src.get(src, ())),
+                "total_alertas": by_src.get(src, 0),
+            })
+    cand_dns.sort(key=lambda c: (c["alertas_dns"], c["riesgo"]), reverse=True)
     _cq = {"generado": int(time.time()), "ventana_min": VENTANA_MIN,
-           "umbral": UMBRAL_INFECTADO, "candidatos": cand}
+           "umbral": UMBRAL_INFECTADO, "umbral_dns": UMBRAL_DNS,
+           "candidatos": cand, "dns_candidatos": cand_dns}
     _tmpq = os.path.join(LOGDIR, "cuarentena.json.tmp")
     with open(_tmpq, "w", encoding="utf-8") as _f:
         json.dump(_cq, _f)
@@ -2106,12 +2144,14 @@ CFG = conf()
 # La contrasena API es un SECRETO que se USA (no se verifica): se guarda con chmod 600.
 import socket as _socket, ssl as _ssl, hashlib as _hashlib
 MK_CONF = "/etc/suricata-mikrotik.conf"
-MK_SENT = "/var/log/suricata-cuarentena-enviados.json"   # estado local: IPs ya enviadas
-MK_LOG  = "/var/log/suricata-cuarentena.log"             # bitacora de acciones
+MK_SENT = "/var/log/suricata-cuarentena-enviados.json"       # IPs enviadas a la lista de cuarentena
+MK_SENT_DNS = "/var/log/suricata-dns-enviados.json"          # IPs enviadas a la lista de DNS sospechoso
+MK_LOG  = "/var/log/suricata-cuarentena.log"                 # bitacora de acciones
 
 def cargar_mk():
     d = {"HOST": "", "PORT": "8728", "TLS": "0", "USER": "", "PASS": "",
-         "LIST": "suricata-cuarentena", "TTL": "1h", "ENABLED": "0"}
+         "LIST": "suricata-cuarentena", "TTL": "1h",
+         "LIST_DNS": "suricata-dns-sospechoso", "TTL_DNS": "1d", "ENABLED": "0"}
     try:
         for l in open(MK_CONF, encoding="utf-8"):
             l = l.strip()
@@ -2122,7 +2162,7 @@ def cargar_mk():
     return d
 
 def guardar_mk(d):
-    orden = ["HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL", "ENABLED"]
+    orden = ["HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL", "LIST_DNS", "TTL_DNS", "ENABLED"]
     txt = ("# Conexion API al MikroTik para la cuarentena. La clave se usa para autenticar\n"
            "# (no se puede hashear). Archivo con permisos 600.\n"
            + "".join(f"{k}={d.get(k,'')}\n" for k in orden))
@@ -2246,14 +2286,15 @@ def mk_probar():
     except Exception as e:
         return (False, f"No conecto: {e}")
 
-def mk_add(ip, comment=""):
+def mk_add(ip, comment="", lista=None, ttl=None):
     d = cargar_mk()
+    lst = lista or d.get("LIST", "suricata-cuarentena")
+    tt = ttl if ttl is not None else d.get("TTL")
     s = mk_conectar(d)
     try:
-        words = ["/ip/firewall/address-list/add", f"=list={d.get('LIST','suricata-cuarentena')}",
-                 f"=address={ip}"]
-        if d.get("TTL"):
-            words.append(f"=timeout={d['TTL']}")
+        words = ["/ip/firewall/address-list/add", f"=list={lst}", f"=address={ip}"]
+        if tt:
+            words.append(f"=timeout={tt}")
         if comment:
             words.append(f"=comment={comment[:120]}")
         _mk_send(s, words)
@@ -2263,9 +2304,9 @@ def mk_add(ip, comment=""):
         try: s.close()
         except Exception: pass
 
-def mk_remove(ip):
+def mk_remove(ip, lista=None):
     """Quita TODAS las entradas de esa IP en la lista (busca .id y las borra)."""
-    d = cargar_mk(); lst = d.get("LIST", "suricata-cuarentena")
+    d = cargar_mk(); lst = lista or d.get("LIST", "suricata-cuarentena")
     s = mk_conectar(d)
     try:
         _mk_send(s, ["/ip/firewall/address-list/print", "=.proplist=.id",
@@ -2280,18 +2321,18 @@ def mk_remove(ip):
         try: s.close()
         except Exception: pass
 
-def cargar_enviados():
+def cargar_enviados(path=MK_SENT):
     try:
-        return json.load(open(MK_SENT, encoding="utf-8"))
+        return json.load(open(path, encoding="utf-8"))
     except Exception:
         return {}
 
-def guardar_enviados(d):
+def guardar_enviados(d, path=MK_SENT):
     try:
-        tmp = MK_SENT + ".tmp"
+        tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f)
-        os.replace(tmp, MK_SENT)
+        os.replace(tmp, path)
     except OSError:
         pass
 
@@ -2841,10 +2882,14 @@ def perfil_page(msg="", ok=False, edit_user=None):
             f"<div class=field><label>Clave API {'<span style=color:#3a9d5d>(guardada)</span>' if tiene_pass else ''}</label>"
             "<input type=password name=pass autocomplete=new-password placeholder='"
             + ("dejar vacio para conservar" if tiene_pass else "clave del usuario API") + "'></div>"
-            f"<div class=field><label>Address-list destino</label>"
+            f"<div class=field><label>Address-list de cuarentena (infectados)</label>"
             f"<input type=text name=list value=\"{esc(m.get('LIST','suricata-cuarentena'))}\"></div>"
-            f"<div class=field><label>TTL en la lista (timeout)</label>"
+            f"<div class=field><label>TTL cuarentena (timeout)</label>"
             f"<input type=text name=ttl value=\"{esc(m.get('TTL','1h'))}\" placeholder='1h, 30m, 1d (vacio = permanente)'></div>"
+            f"<div class=field><label>Address-list de DNS sospechoso</label>"
+            f"<input type=text name=list_dns value=\"{esc(m.get('LIST_DNS','suricata-dns-sospechoso'))}\"></div>"
+            f"<div class=field><label>TTL DNS sospechoso (timeout)</label>"
+            f"<input type=text name=ttl_dns value=\"{esc(m.get('TTL_DNS','1d'))}\" placeholder='1d, 12h (vacio = permanente)'></div>"
             "</div>"
             "<div class=field style='margin-top:6px'><label class=chk>"
             f"<input type=checkbox name=tls value=1 {'checked' if tls else ''}> Usar API-SSL (TLS, puerto 8729)</label></div>"
@@ -3714,49 +3759,66 @@ def cuarentena_page(msg="", es_admin=False):
         umbral = data.get("umbral", 3); cand = data.get("candidatos", [])
     except Exception:
         pass
+    dns_cand = data.get("dns_candidatos", []); umbral_dns = data.get("umbral_dns", 3)
     edad = f"{int((time.time()-gen)//60)} min" if gen else "-"
     m = cargar_mk(); en = m.get("ENABLED") == "1"; conf_ok = mk_configurado()
     activo = en and conf_ok
-    enviados = cargar_enviados()
-    pendientes = [c for c in cand if c.get("ip") not in enviados]
+    enviados = cargar_enviados(MK_SENT)
+    enviados_dns = cargar_enviados(MK_SENT_DNS)
     def _col(b):
         return {"ALTO": "#e34948", "MEDIO": "#e58a00"}.get(b, "#3a9d5d")
-    def _accion(c):
-        ip = c.get("ip", "")
-        if ip in enviados:
-            e = enviados[ip]
-            cuando = time.strftime("%d/%m %H:%M", time.localtime(e.get("cuando", 0)))
-            quitar = (f"<form method=post action='/cuarentena/quitar' style='display:inline'>"
-                      f"<input type=hidden name=ip value='{esc(ip)}'>"
-                      f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de la cuarentena del MikroTik?')\">Quitar</button></form>"
-                      ) if es_admin else ""
-            return f"<span class='enq' title='En la address-list desde {cuando}'>En cuarentena</span> {quitar}"
-        if es_admin and activo:
-            return (f"<form method=post action='/cuarentena/enviar' style='display:inline'>"
-                    f"<input type=hidden name=ip value='{esc(ip)}'><input type=hidden name=score value='{c.get('riesgo',0)}'>"
-                    f"<button class='qbtn send' onclick=\"return confirm('Enviar {esc(ip)} a la lista {esc(m.get('LIST',''))} del MikroTik?')\">Enviar a cuarentena</button></form>")
-        return "<span class='dry' title='Configura y habilita el MikroTik en Ajustes para activar el envio'>solo sugerencia</span>"
-    filas = "".join(
-        f"<tr><td class='mono ipx'>{esc(c.get('ip',''))}</td>"
-        f"<td><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {esc(c.get('banda',''))}</span></td>"
-        f"<td class='mot'>{c.get('alertas_cnc',0)} alertas CnC · {c.get('firmas_cnc',0)} firma(s)<br>"
-        f"<span class='fw'>{esc((c.get('firma','') or '')[:70])}</span></td>"
-        f"<td class='num'>{c.get('destinos',0)}</td><td class='num'>{c.get('puertos',0)}</td>"
-        f"<td class='num'>{c.get('total_alertas',0):,}</td>"
-        f"<td>{_accion(c)}</td></tr>"
-        for c in cand)
-    if not filas:
-        filas = "<tr><td colspan=7 class='muted' style='padding:18px;text-align:center'>Sin CPEs infectados confirmados en la ventana. (Un solo aviso de CnC aislado NO entra aqui.)</td></tr>"
+
+    def _seccion(titulo, sub, candidatos, env_map, pref, lista_name, cnt_key, cnt_lbl, fir_key, vacio):
+        """Arma una seccion (titulo + tabla + boton 'enviar todos') para una categoria."""
+        pend = [c for c in candidatos if c.get("ip") not in env_map]
+        def _acc(c):
+            ip = c.get("ip", "")
+            if ip in env_map:
+                cuando = time.strftime("%d/%m %H:%M", time.localtime(env_map[ip].get("cuando", 0)))
+                quitar = (f"<form method=post action='/{pref}/quitar' style='display:inline'>"
+                          f"<input type=hidden name=ip value='{esc(ip)}'>"
+                          f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de la lista {esc(lista_name)}?')\">Quitar</button></form>"
+                          ) if es_admin else ""
+                return f"<span class='enq' title='En {esc(lista_name)} desde {cuando}'>En lista</span> {quitar}"
+            if es_admin and activo:
+                return (f"<form method=post action='/{pref}/enviar' style='display:inline'>"
+                        f"<input type=hidden name=ip value='{esc(ip)}'><input type=hidden name=score value='{c.get('riesgo',0)}'>"
+                        f"<button class='qbtn send' onclick=\"return confirm('Enviar {esc(ip)} a la lista {esc(lista_name)} del MikroTik?')\">Enviar</button></form>")
+            return "<span class='dry' title='Configura y habilita el MikroTik en Ajustes para activar el envio'>solo sugerencia</span>"
+        filas = "".join(
+            f"<tr><td class='mono ipx'>{esc(c.get('ip',''))}</td>"
+            f"<td><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {esc(c.get('banda',''))}</span></td>"
+            f"<td class='mot'>{c.get(cnt_key,0)} {cnt_lbl} · {c.get(fir_key,0)} firma(s)<br>"
+            f"<span class='fw'>{esc((c.get('firma','') or '')[:70])}</span></td>"
+            f"<td class='num'>{c.get('destinos',0)}</td><td class='num'>{c.get('puertos',0)}</td>"
+            f"<td class='num'>{c.get('total_alertas',0):,}</td>"
+            f"<td>{_acc(c)}</td></tr>" for c in candidatos)
+        if not filas:
+            filas = f"<tr><td colspan=7 class='muted' style='padding:18px;text-align:center'>{vacio}</td></tr>"
+        btn = ""
+        if es_admin and activo and pend:
+            btn = (f"<form method=post action='/{pref}/enviar-todos' style='display:inline;margin-left:auto'>"
+                   f"<button class='qbtn send' onclick=\"return confirm('Enviar los {len(pend)} CPE de esta lista al MikroTik?')\">"
+                   f"&#9888; Enviar todos ({len(pend)})</button></form>")
+        return (f"<div class='seccion'><div class='shead'><div><h2>{titulo}</h2>"
+                f"<p class='sub'>{sub} · {len(candidatos)} candidato(s).</p></div>{btn}</div>"
+                "<div class='card'><table><thead><tr>"
+                "<th>CPE (IP origen)</th><th>Riesgo</th><th>Motivo</th>"
+                "<th class='num'>Destinos</th><th class='num'>Puertos</th><th class='num'>Alertas</th><th>Accion</th>"
+                f"</tr></thead><tbody>{filas}</tbody></table></div></div>")
+
+    sec_inf = _seccion("Infectados (malware/CnC)",
+                       f"Infeccion confirmada (&ge;{umbral} alertas de CnC o &ge;2 firmas distintas) &rarr; lista <code>{esc(m.get('LIST',''))}</code>",
+                       cand, enviados, "cuarentena", m.get("LIST", ""), "alertas_cnc", "alertas CnC", "firmas_cnc",
+                       "Sin CPEs infectados confirmados en la ventana. (Un solo aviso de CnC aislado NO entra aqui.)")
+    sec_dns = _seccion("DNS sospechoso (consultan dominios de botnet/C2)",
+                       f"Consultas DNS a dominios maliciosos (&ge;{umbral_dns} alertas DNS o &ge;2 firmas) &rarr; lista <code>{esc(m.get('LIST_DNS',''))}</code> (otro trato)",
+                       dns_cand, enviados_dns, "cuarentena/dns", m.get("LIST_DNS", ""), "alertas_dns", "alertas DNS", "firmas_dns",
+                       "Sin CPEs consultando dominios maliciosos en la ventana.")
     if activo:
-        btn_todos = ""
-        if es_admin and pendientes:
-            btn_todos = (f"<form method=post action='/cuarentena/enviar-todos' style='display:inline;margin-left:10px'>"
-                         f"<button class='qbtn send' onclick=\"return confirm('Enviar los {len(pendientes)} CPE de la lista a la cuarentena del MikroTik?')\">"
-                         f"&#9888; Enviar todos ({len(pendientes)})</button></form>")
-        estado = (f"<div class='banner ok'><b>MikroTik habilitado.</b> Todo lo que aparece en esta lista se puede "
-                  f"enviar a la address-list <code>{esc(m.get('LIST',''))}</code> (timeout {esc(m.get('TTL','') or 'sin TTL')}) "
-                  f"en <code>{esc(m.get('HOST',''))}</code>; el MikroTik decide con tus reglas. Envia uno con su boton, "
-                  f"o <b>todos</b> de una. Reversible con <b>Quitar</b>.{btn_todos}</div>")
+        estado = (f"<div class='banner ok'><b>MikroTik habilitado.</b> Puedes enviar cada CPE a su address-list "
+                  f"(infectados &rarr; <code>{esc(m.get('LIST',''))}</code>, DNS &rarr; <code>{esc(m.get('LIST_DNS',''))}</code>) "
+                  f"en <code>{esc(m.get('HOST',''))}</code>; el MikroTik decide con tus reglas. Reversible con <b>Quitar</b>.</div>")
     elif en and not conf_ok:
         estado = ("<div class='banner err'><b>Falta configurar la conexion.</b> Marcaste <b>Permitir enviar</b>, pero "
                   "aun falta <b>host, usuario o clave</b> del MikroTik. Ve a <b>Ajustes &rarr; MikroTik</b>, completa los datos "
@@ -3785,18 +3847,17 @@ def cuarentena_page(msg="", es_admin=False):
            ".qbtn{font:12px system-ui;font-weight:700;border:0;border-radius:7px;padding:5px 11px;cursor:pointer;color:#fff}"
            ".qbtn.send{background:#e34948}.qbtn.send:hover{background:#c93b3a}"
            ".qbtn.quit{background:#6b6a66;margin-left:6px}.qbtn.quit:hover{background:#524f4c}"
+           ".seccion{margin:0 0 26px}.shead{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:0 0 10px}"
+           ".shead h2{font-size:16px;margin:0}.shead .sub{margin:2px 0 0}"
            "</style>")
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
             "<title>Cuarentena</title>" + css + "</head><body><main>"
-            "<h1>Cuarentena de CPEs infectados</h1>"
-            f"<p class='sub'>Candidatos por <b>infeccion confirmada</b> (&ge;{umbral} alertas de CnC o &ge;2 firmas distintas). "
-            f"Ventana {vmin} min · lista de hace {edad} · {len(cand)} candidato(s).</p>"
-            + flash + estado +
-            "<div class='card'><table><thead><tr>"
-            "<th>CPE (IP origen)</th><th>Riesgo</th><th>Motivo (infeccion)</th>"
-            "<th class='num'>Destinos</th><th class='num'>Puertos</th><th class='num'>Alertas</th><th>Accion</th>"
-            f"</tr></thead><tbody>{filas}</tbody></table></div></main></body></html>")
+            "<h1>Cuarentena y control de CPEs</h1>"
+            f"<p class='sub'>Ventana {vmin} min · lista de hace {edad}. Dos categorias: <b>infectados</b> (malware/CnC) "
+            "y <b>DNS sospechoso</b> (consultan dominios de botnet), cada una a su address-list del MikroTik.</p>"
+            + flash + estado + sec_inf + sec_dns +
+            "</main></body></html>")
     return wrap(body, refresh=False, active="/cuarentena")
 
 class H(BaseHTTPRequestHandler):
@@ -4142,6 +4203,8 @@ class H(BaseHTTPRequestHandler):
                 m["PASS"] = npass
             m["LIST"] = (q.get("list", [""])[0]).strip()[:64] or "suricata-cuarentena"
             m["TTL"] = (q.get("ttl", [""])[0]).strip()[:16]
+            m["LIST_DNS"] = (q.get("list_dns", [""])[0]).strip()[:64] or "suricata-dns-sospechoso"
+            m["TTL_DNS"] = (q.get("ttl_dns", [""])[0]).strip()[:16]
             m["TLS"] = "1" if q.get("tls") else "0"
             m["ENABLED"] = "1" if q.get("enabled") else "0"
             try:
@@ -4242,6 +4305,58 @@ class H(BaseHTTPRequestHandler):
             env = cargar_enviados(); env.pop(ip, None); guardar_enviados(env)
             mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), err)
             return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
+        if ruta in ("/cuarentena/dns/enviar", "/cuarentena/dns/quitar", "/cuarentena/dns/enviar-todos"):
+            if not self._admin():
+                return self._deny()
+            m = cargar_mk(); lst = m.get("LIST_DNS", "suricata-dns-sospechoso"); ttl = m.get("TTL_DNS", "")
+            if ruta == "/cuarentena/dns/quitar":
+                ip = (q.get("ip", [""])[0]).strip()
+                try: ipaddress.ip_address(ip)
+                except Exception: return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+                try: ok, err = mk_remove(ip, lista=lst)
+                except Exception as ex: ok, err = False, str(ex)
+                env = cargar_enviados(MK_SENT_DNS); env.pop(ip, None); guardar_enviados(env, MK_SENT_DNS)
+                mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), f"lista={lst} {err}")
+                return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
+            if not (mk_configurado() and m.get("ENABLED") == "1"):
+                return self._redirect("/cuarentena?msg=" + _up.quote("Configura y HABILITA el MikroTik en Ajustes primero"))
+            if ruta == "/cuarentena/dns/enviar":
+                ip = (q.get("ip", [""])[0]).strip(); score = (q.get("score", [""])[0]).strip()[:8]
+                try: ipaddress.ip_address(ip)
+                except Exception: return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+                try: ok, err = mk_add(ip, comment=f"suricata DNS-sospechoso riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl=ttl)
+                except Exception as ex: ok, err = False, str(ex)
+                if ok:
+                    env = cargar_enviados(MK_SENT_DNS)
+                    env[ip] = {"cuando": int(time.time()), "score": score, "por": getattr(CTX, "user", "?")}
+                    guardar_enviados(env, MK_SENT_DNS)
+                    mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={lst} (dns)")
+                    return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} enviado a la lista {lst}"))
+                mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), f"lista={lst} {err}")
+                return self._redirect("/cuarentena?msg=" + _up.quote(f"No se pudo enviar {ip}: {err}"))
+            # enviar-todos DNS
+            try:
+                cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8")).get("dns_candidatos", [])
+            except Exception:
+                cq = []
+            env = cargar_enviados(MK_SENT_DNS)
+            pend = [c for c in cq if c.get("ip") not in env][:50]
+            ok_n = err_n = 0; ult_err = ""
+            for c in pend:
+                ip = c.get("ip", "")
+                try: ipaddress.ip_address(ip)
+                except Exception: continue
+                try: ok, err = mk_add(ip, comment=f"suricata DNS-sospechoso riesgo {c.get('riesgo',0)} {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl=ttl)
+                except Exception as ex: ok, err = False, str(ex)
+                if ok:
+                    env[ip] = {"cuando": int(time.time()), "score": c.get("riesgo", 0), "por": getattr(CTX, "user", "?")}
+                    mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={lst} (dns masivo)"); ok_n += 1
+                else:
+                    mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), f"lista={lst} {err}"); err_n += 1; ult_err = err
+                    if "conexion" in (err or "").lower() or "login" in (err or "").lower():
+                        break
+            guardar_enviados(env, MK_SENT_DNS)
+            return self._redirect("/cuarentena?msg=" + _up.quote(f"Enviados {ok_n} a {lst}" + (f", {err_n} con error ({ult_err})" if err_n else "")))
         return self._html("<h1>No encontrado</h1>", 404)
 
     def _post_perfil(self, q):

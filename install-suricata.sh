@@ -3452,6 +3452,23 @@ address-list y TTL. Marca <b>Habilitar</b>.</li>
 servicio API a la IP del servidor Suricata, y si el enlace no es de confianza usa <b>API-SSL</b>. Si
 dejas el envio <b>deshabilitado</b>, la pestana Cuarentena solo <b>sugiere</b> (no toca el router).</p>
 
+<h3>5) Estados de la pestana Cuarentena</h3>
+<p>El aviso de arriba de la pestana cambia de color segun el estado:</p>
+<ul>
+<li><b style="color:#1a7f37">Verde &mdash; MikroTik habilitado</b>: marcaste <b>Permitir enviar</b> y la conexion
+(host, usuario, clave) esta completa. Aparecen los botones <b>Enviar a cuarentena</b> por CPE y
+<b>Enviar todos</b>.</li>
+<li><b style="color:#b52a2a">Rojo &mdash; Falta configurar la conexion</b>: marcaste <b>Permitir enviar</b>
+pero todavia falta host, usuario o clave (o no conecta). Completa <b>Ajustes &rarr; MikroTik</b> y pulsa
+<b>Probar conexion</b>. Mientras tanto no se envia nada.</li>
+<li><b>Gris &mdash; Modo sugerencia (dry-run)</b>: el permiso esta apagado. Solo se listan candidatos;
+el panel no toca el router.</li>
+</ul>
+<p><b>Enviar todos:</b> con el estado en verde, el boton <b>Enviar todos (N)</b> manda de una a la
+address-list todos los CPE de la lista que aun no esten en cuarentena (tope de 50 por accion; si el
+router deja de responder, se detiene y avisa). Cada IP queda con su <b>TTL</b> y se puede sacar con
+<b>Quitar</b>. Toda accion se registra en <code>/var/log/suricata-cuarentena.log</code>.</p>
+
 <h2>Reinstalar o actualizar</h2>
 <p>Todo esta en un instalador idempotente. Para actualizar a la ultima version
 (ejemplo ISP con espejo y todas las redes privadas):</p>

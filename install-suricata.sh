@@ -1455,9 +1455,14 @@ try:
                 "total_alertas": by_src.get(src, 0),
             })
     cand_dns.sort(key=lambda c: (c["alertas_dns"], c["riesgo"]), reverse=True)
+    # top con su banda de riesgo, para el motor de politicas del panel (tope 50 CPEs)
+    top_r = []
+    for _s, _t in by_src.most_common(50):
+        _sc, _bd, _c2, _d2 = riesgo(_s)
+        top_r.append({"ip": _s, "riesgo": _sc, "banda": _bd})
     _cq = {"generado": int(time.time()), "ventana_min": VENTANA_MIN,
            "umbral": UMBRAL_INFECTADO, "umbral_dns": UMBRAL_DNS,
-           "candidatos": cand, "dns_candidatos": cand_dns}
+           "candidatos": cand, "dns_candidatos": cand_dns, "top_riesgo": top_r}
     _tmpq = os.path.join(LOGDIR, "cuarentena.json.tmp")
     with open(_tmpq, "w", encoding="utf-8") as _f:
         json.dump(_cq, _f)
@@ -2189,7 +2194,8 @@ def cargar_mk():
     d = {"HOST": "", "PORT": "8728", "TLS": "0", "USER": "", "PASS": "",
          "LIST": "suricata-cuarentena", "TTL": "1h",
          "LIST_DNS": "suricata-dns-sospechoso", "TTL_DNS": "1d",
-         "AUTO_MANTENER": "0", "ENABLED": "0", "CERT_FP": ""}
+         "AUTO_MANTENER": "0", "ENABLED": "0", "CERT_FP": "",
+         "POL_AUTO": "0", "POL_BAJO": "nada", "POL_MEDIO": "nada", "POL_ALTO": "nada"}
     try:
         for l in open(MK_CONF, encoding="utf-8"):
             l = l.strip()
@@ -2200,7 +2206,8 @@ def cargar_mk():
     return d
 
 def guardar_mk(d):
-    orden = ["HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL", "LIST_DNS", "TTL_DNS", "AUTO_MANTENER", "ENABLED", "CERT_FP"]
+    orden = ["HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL", "LIST_DNS", "TTL_DNS",
+             "AUTO_MANTENER", "ENABLED", "CERT_FP", "POL_AUTO", "POL_BAJO", "POL_MEDIO", "POL_ALTO"]
     txt = ("# Conexion API al MikroTik para la cuarentena. La clave se usa para autenticar\n"
            "# (no se puede hashear). Archivo con permisos 600.\n"
            + "".join(f"{k}={d.get(k,'')}\n" for k in orden))
@@ -2445,8 +2452,8 @@ def reconciliar_cuarentena():
         env = cargar_enviados(sent_path)
         lst = m.get(list_key, ""); cambiado = False
         for ip in list(env.keys()):
-            if env[ip].get("manual"):
-                continue                       # enviado a mano -> solo lo saca el usuario con Quitar
+            if env[ip].get("manual") or env[ip].get("pol"):
+                continue                       # manual o por politica -> los gestiona otro, no el auto
             if ip in ips_activas:
                 continue                       # sigue atacando -> se queda (entrada permanente)
             try:
@@ -2499,6 +2506,79 @@ def mk_sync_enviados():
         for ip in list(env.keys()):
             if ip not in reales:           # ya no esta en el router (lo quitaron o expiro) -> soltar
                 env.pop(ip, None); cambiado = True
+        if cambiado:
+            guardar_enviados(env, sent_path)
+
+POL_NOTIF = "/var/log/suricata-politica-notif.json"   # dedupe de la accion 'notificar'
+POL_ACCIONES = ("nada", "cuarentena", "dns", "notificar")
+
+def aplicar_politicas():
+    """Aplica las politicas por banda de riesgo del Top a los CPEs: envia a cuarentena/DNS,
+    solo notifica, o nada. Las entradas 'pol' las gestiona ESTA funcion (entran cuando el CPE
+    califica por banda, salen cuando deja de calificar). Solo con MikroTik habilitado y POL_AUTO."""
+    m = cargar_mk()
+    if not (mk_configurado() and m.get("ENABLED") == "1" and m.get("POL_AUTO") == "1"):
+        return
+    pol = {"BAJO": m.get("POL_BAJO", "nada"), "MEDIO": m.get("POL_MEDIO", "nada"),
+           "ALTO": m.get("POL_ALTO", "nada")}
+    try:
+        top = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8")).get("top_riesgo", [])
+    except Exception:
+        return
+    deseado_lst = {}; deseado_dns = {}; a_notificar = {}
+    for c in top:
+        act = pol.get((c.get("banda", "") or "").upper(), "nada")
+        ip = c.get("ip"); sc = c.get("riesgo", "")
+        if not ip:
+            continue
+        if act == "cuarentena":
+            deseado_lst[ip] = sc
+        elif act == "dns":
+            deseado_dns[ip] = sc
+        elif act == "notificar":
+            a_notificar[ip] = (sc, c.get("banda", ""))
+    # --- accion notificar (dedupe: 1 aviso cada 6h por IP) ---
+    if a_notificar:
+        try:
+            nv = json.load(open(POL_NOTIF, encoding="utf-8"))
+        except Exception:
+            nv = {}
+        ahora = time.time(); cambio_n = False
+        for ip, (sc, band) in a_notificar.items():
+            if ahora - nv.get(ip, 0) > 6 * 3600:
+                mk_log("POLITICA-NOTIFICAR", ip, "politica", f"riesgo={sc} banda={band}")
+                nv[ip] = ahora; cambio_n = True
+        nv = {k: v for k, v in nv.items() if ahora - v < 7 * 86400}   # limpiar viejos
+        if cambio_n:
+            try:
+                with open(POL_NOTIF + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump(nv, f)
+                os.replace(POL_NOTIF + ".tmp", POL_NOTIF)
+            except OSError:
+                pass
+    # --- acciones que tocan el router (cuarentena / dns) ---
+    for lst, deseado, sent_path in ((m.get("LIST", ""), deseado_lst, MK_SENT),
+                                    (m.get("LIST_DNS", ""), deseado_dns, MK_SENT_DNS)):
+        if not lst:
+            continue
+        env = cargar_enviados(sent_path); cambiado = False
+        for ip, sc in deseado.items():
+            if ip in env:
+                continue
+            try:
+                ok, err = mk_add(ip, comment=f"suricata politica riesgo {sc} {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl="")
+            except Exception:
+                ok = False
+            if ok:
+                env[ip] = {"cuando": int(time.time()), "score": sc, "por": "politica", "manual": False, "pol": True}
+                mk_log("POLITICA-ENVIADO", ip, "politica", f"lista={lst} riesgo={sc}"); cambiado = True
+        for ip in list(env.keys()):        # sacar los que entraron por politica y ya no califican
+            if env[ip].get("pol") and ip not in deseado:
+                try:
+                    mk_remove(ip, lista=lst)
+                except Exception:
+                    continue
+                env.pop(ip, None); mk_log("POLITICA-LIBERADO", ip, "politica", f"lista={lst}"); cambiado = True
         if cambiado:
             guardar_enviados(env, sent_path)
 
@@ -2817,6 +2897,10 @@ def refrescador():
                 reconciliar_cuarentena()   # libera de la cuarentena a los que dejaron de atacar
             except Exception:
                 pass
+            try:
+                aplicar_politicas()        # aplica las politicas por banda de riesgo del Top
+            except Exception:
+                pass
         time.sleep(10)   # poll corto para atender un cambio de ventana casi al instante
 
 _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
@@ -2939,6 +3023,29 @@ _IC_EDIT = ('<svg viewBox="0 0 24 24" width="15" height="15"><path fill="current
             'l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>')
 _IC_DEL = ('<svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" '
            'd="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>')
+
+def _card_politicas(m):
+    """Sub-bloque de la tarjeta MikroTik: politicas por banda de riesgo del Top origenes."""
+    esc = html.escape
+    ops = [("nada", "Nada (solo mostrar)"), ("cuarentena", "Enviar a cuarentena"),
+           ("dns", "Enviar a lista DNS"), ("notificar", "Solo notificar (Log)")]
+    def _sel(name, actual):
+        o = "".join(f"<option value='{v}'{' selected' if v == actual else ''}>{esc(t)}</option>" for v, t in ops)
+        return f"<select name='{name}'>{o}</select>"
+    auto = m.get("POL_AUTO") == "1"
+    return ("<div class=polbox><h3 class=ch>Politicas por riesgo (Top origenes)</h3>"
+            "<p class=sub2 style='margin:2px 0 10px'>Que hacer automaticamente con cada CPE del Top segun su banda de riesgo. "
+            "<b>Ojo:</b> riesgo alto no siempre es infeccion (un torrent puede dar alto). Por eso viene apagado.</p>"
+            "<div class=grid2>"
+            f"<div class=field><label>Riesgo BAJO (0-39)</label>{_sel('pol_bajo', m.get('POL_BAJO','nada'))}</div>"
+            f"<div class=field><label>Riesgo MEDIO (40-69)</label>{_sel('pol_medio', m.get('POL_MEDIO','nada'))}</div>"
+            f"<div class=field><label>Riesgo ALTO (70-100)</label>{_sel('pol_alto', m.get('POL_ALTO','nada'))}</div>"
+            "</div>"
+            "<div class=field><label class=chk>"
+            f"<input type=checkbox name=pol_auto value=1 {'checked' if auto else ''}> "
+            "Aplicar politicas automaticamente</label>"
+            "<div class=hint>Activado: el panel envia/saca del MikroTik solo, segun la banda de cada CPE. "
+            "Apagado: las politicas no hacen nada (usa los botones a mano).</div></div></div>")
 
 def perfil_page(msg="", ok=False, edit_user=None):
     import urllib.parse as _up
@@ -3065,6 +3172,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "Mantener la cuarentena automaticamente</label>"
             "<div class=hint>Activado: la IP entra SIN caducidad y se <b>libera sola</b> cuando el CPE deja de atacar "
             "(mientras siga enviando virus, sigue en cuarentena). Apagado: la IP caduca sola con el TTL de arriba.</div></div>"
+            + _card_politicas(m) +
             "<div class=actions>"
             "<button class=primary type=submit>Guardar</button>"
             "<button class=cancelbtn type=submit formaction='/mikrotik/test' formnovalidate "
@@ -4427,6 +4535,11 @@ class H(BaseHTTPRequestHandler):
             m["LIST_DNS"] = (q.get("list_dns", [""])[0]).strip()[:64] or "suricata-dns-sospechoso"
             m["TTL_DNS"] = (q.get("ttl_dns", [""])[0]).strip()[:16]
             m["AUTO_MANTENER"] = "1" if q.get("auto") else "0"
+            _va = {"nada", "cuarentena", "dns", "notificar"}
+            m["POL_BAJO"] = (q.get("pol_bajo", ["nada"])[0]) if (q.get("pol_bajo", ["nada"])[0]) in _va else "nada"
+            m["POL_MEDIO"] = (q.get("pol_medio", ["nada"])[0]) if (q.get("pol_medio", ["nada"])[0]) in _va else "nada"
+            m["POL_ALTO"] = (q.get("pol_alto", ["nada"])[0]) if (q.get("pol_alto", ["nada"])[0]) in _va else "nada"
+            m["POL_AUTO"] = "1" if q.get("pol_auto") else "0"
             m["TLS"] = "1" if q.get("tls") else "0"
             m["ENABLED"] = "1" if q.get("enabled") else "0"
             try:

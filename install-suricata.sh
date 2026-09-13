@@ -689,7 +689,14 @@ _RE = {k: re.compile(p) for k, p in {
     "sig": r'"signature":"((?:[^"\\]|\\.)*)"',
     "cat": r'"category":"((?:[^"\\]|\\.)*)"',
     "sev": r'"severity":(\d+)',
+    "sid": r'"signature_id":(\d+)',
 }.items()}
+
+# Firmas de "infeccion" (CnC/botnet/troyano): mismas claves que el informe. Para marcar
+# INFECTADO no basta una: se exige repeticion (UMBRAL_INFECTADO) o >=2 firmas distintas.
+CNC_KW = ("cnc", "c2 ", "command and control", "checkin", "check-in", "botnet", "mirai",
+          "katana", "trojan", "ransom", " rat ", "coinmin", "cryptomin", "compromised")
+UMBRAL_INFECTADO = 3
 
 def campos(line):
     def g(k):
@@ -833,6 +840,9 @@ dpt_by_src = defaultdict(set)      # puertos destino distintos (port-sweep)
 n5_by_src = Counter()              # alertas en los ultimos 5 min (actividad ahora)
 n1h_by_src = Counter()             # alertas en la ultima hora (sostenido)
 patron_src = defaultdict(set)      # (sig,dport) -> CPEs que lo comparten (correlacion de flota)
+inf_hits = Counter()               # alertas CnC/botnet por CPE (para confirmar infeccion)
+inf_sids = defaultdict(set)        # firmas CnC distintas por CPE (SID o texto)
+inf_sig = {}                       # firma CnC mas reciente por CPE (para el motivo)
 MAX_CARD = 2500                    # tope por set (el score satura mucho antes; protege RAM)
 total = 0
 seen = 0
@@ -890,6 +900,11 @@ for p in files:
                 dpt_by_src[src].add(dport)
             if dport and len(patron_src[(sig, dport)]) < MAX_CARD:
                 patron_src[(sig, dport)].add(src)
+            _sl = sig.lower()
+            if any(k in _sl for k in CNC_KW):     # firma de infeccion (CnC/botnet/troyano)
+                inf_hits[src] += 1
+                inf_sids[src].add(g("sid") or sig)
+                inf_sig[src] = sig
             if ts:
                 if ts >= NOW - 300:  n5_by_src[src] += 1
                 if ts >= NOW - 3600: n1h_by_src[src] += 1
@@ -1357,6 +1372,34 @@ def top_origenes_section(n_src=5, n_sub=8):
         "<!--TOP_FIN-->")
 
 top_sec = top_origenes_section()
+
+# --- Cuarentena (Fase A, dry-run): CPEs INFECTADOS CONFIRMADOS (repeticion/contexto).
+# Solo se ESCRIBE la lista de candidatos; NO se toca el MikroTik. El panel la muestra.
+try:
+    cand = []
+    for src in inf_hits:
+        if inf_hits[src] >= UMBRAL_INFECTADO or len(inf_sids[src]) >= 2:
+            sc, band, _c, _d = riesgo(src)
+            cand.append({
+                "ip": src,
+                "riesgo": sc,
+                "banda": band,
+                "alertas_cnc": inf_hits[src],
+                "firmas_cnc": len(inf_sids[src]),
+                "firma": inf_sig.get(src, ""),
+                "destinos": len(dst_by_src.get(src, ())),
+                "puertos": len(dpt_by_src.get(src, ())),
+                "total_alertas": by_src.get(src, 0),
+            })
+    cand.sort(key=lambda c: (c["riesgo"], c["alertas_cnc"]), reverse=True)
+    _cq = {"generado": int(time.time()), "ventana_min": VENTANA_MIN,
+           "umbral": UMBRAL_INFECTADO, "candidatos": cand}
+    _tmpq = os.path.join(LOGDIR, "cuarentena.json.tmp")
+    with open(_tmpq, "w", encoding="utf-8") as _f:
+        json.dump(_cq, _f)
+    os.replace(_tmpq, os.path.join(LOGDIR, "cuarentena.json"))
+except Exception:
+    pass
 
 doc = f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2296,6 +2339,7 @@ def refrescador():
         time.sleep(10)   # poll corto para atender un cambio de ventana casi al instante
 
 _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
+              ("/cuarentena", "Cuarentena"),
               ("/historico", "Historico"), ("/exclusiones", "Exclusiones"),
               ("/ajustes", "Ajustes"), ("/log", "Log"), ("/documentacion", "Documentacion")]
 _NAV_CSS = """<style>
@@ -3244,6 +3288,58 @@ def historico_page():
             + "</tbody></table></main></body></html>")
     return wrap(body, refresh=False, active="/historico")
 
+def cuarentena_page():
+    """Fase A (dry-run): lista de CPEs INFECTADOS CONFIRMADOS candidatos a cuarentena.
+    Solo informa; NO envia nada al MikroTik. La lista la calcula el reporte (cuarentena.json)."""
+    data, gen, vmin, umbral, cand = {}, 0, 0, 3, []
+    try:
+        data = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
+        gen = data.get("generado", 0); vmin = data.get("ventana_min", 0)
+        umbral = data.get("umbral", 3); cand = data.get("candidatos", [])
+    except Exception:
+        pass
+    edad = f"{int((time.time()-gen)//60)} min" if gen else "-"
+    def _col(b):
+        return {"ALTO": "#e34948", "MEDIO": "#e58a00"}.get(b, "#3a9d5d")
+    filas = "".join(
+        f"<tr><td class='mono ipx'>{html.escape(c.get('ip',''))}</td>"
+        f"<td><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {html.escape(c.get('banda',''))}</span></td>"
+        f"<td class='mot'>{c.get('alertas_cnc',0)} alertas CnC · {c.get('firmas_cnc',0)} firma(s)<br>"
+        f"<span class='fw'>{html.escape((c.get('firma','') or '')[:70])}</span></td>"
+        f"<td class='num'>{c.get('destinos',0)}</td><td class='num'>{c.get('puertos',0)}</td>"
+        f"<td class='num'>{c.get('total_alertas',0):,}</td>"
+        f"<td><span class='dry' title='Fase A: aun no se envia nada al MikroTik'>solo sugerencia</span></td></tr>"
+        for c in cand)
+    if not filas:
+        filas = "<tr><td colspan=7 class='muted' style='padding:18px;text-align:center'>Sin CPEs infectados confirmados en la ventana. (Un solo aviso de CnC aislado NO entra aqui.)</td></tr>"
+    css = ("<style>body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
+           "main{max-width:1100px;margin:0 auto;padding:20px 24px}h1{font-size:21px;margin:0 0 4px}"
+           ".sub{color:#52514e;margin:0 0 14px}"
+           ".banner{background:#fff7ed;border:1px solid #f2d3ad;color:#7a4a12;border-radius:10px;padding:11px 14px;margin:0 0 16px;font-size:13px}"
+           ".card{border:1px solid #e7e6e2;border-radius:12px;background:#fff;overflow:hidden}"
+           "table{width:100%;border-collapse:collapse;font-size:13px}"
+           "thead th{background:#f4f4f2;text-align:left;padding:9px 12px;border-bottom:1px solid #e7e6e2;color:#52514e;font-weight:600}"
+           "tbody td{padding:9px 12px;border-bottom:1px solid #f2f1ee;vertical-align:top}"
+           "tbody tr:hover{background:#faf9f6}.num{text-align:right;font-variant-numeric:tabular-nums}"
+           ".mono{font-family:ui-monospace,Consolas,monospace}.ipx{font-weight:700}"
+           ".rb{color:#fff;font-weight:800;font-size:12px;padding:2px 9px;border-radius:20px;white-space:nowrap}"
+           ".fw{color:#7a4a12;font-size:12px}.mot{max-width:280px}"
+           ".dry{background:#eef4fd;color:#2a5fa0;border:1px solid #cfe0f6;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap}"
+           "</style>")
+    body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<meta http-equiv=refresh content=120><title>Cuarentena</title>" + css + "</head><body><main>"
+            "<h1>Cuarentena de CPEs infectados</h1>"
+            f"<p class='sub'>Candidatos por <b>infeccion confirmada</b> (&ge;{umbral} alertas de CnC o &ge;2 firmas distintas). "
+            f"Ventana {vmin} min · lista de hace {edad} · {len(cand)} candidato(s).</p>"
+            "<div class='banner'><b>Fase A — solo sugerencia (dry-run).</b> Esta lista <b>no</b> envia nada al MikroTik todavia; "
+            "es para revisar quien entraria a cuarentena antes de activar el bloqueo real.</div>"
+            "<div class='card'><table><thead><tr>"
+            "<th>CPE (IP origen)</th><th>Riesgo</th><th>Motivo (infeccion)</th>"
+            "<th class='num'>Destinos</th><th class='num'>Puertos</th><th class='num'>Alertas</th><th>Accion</th>"
+            f"</tr></thead><tbody>{filas}</tbody></table></div></main></body></html>")
+    return wrap(body, refresh=False, active="/cuarentena")
+
 class H(BaseHTTPRequestHandler):
     server_version = "suricata-dashboard"
     # HTTP/1.1 con keep-alive: reutiliza la conexion en vez de reabrirla en cada
@@ -3392,6 +3488,8 @@ class H(BaseHTTPRequestHandler):
             return self._html(page)
         if path == "/historico":
             return self._html(historico_page())
+        if path == "/cuarentena":
+            return self._html(cuarentena_page())
         if path == "/log":
             if not self._admin():
                 return self._redirect("/")   # lectura no ve el log de accesos

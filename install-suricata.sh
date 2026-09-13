@@ -2254,6 +2254,14 @@ def mk_conectar(d, timeout=6):
     if d.get("TLS") == "1":
         ctx = _ssl.create_default_context()
         ctx.check_hostname = False; ctx.verify_mode = _ssl.CERT_NONE
+        # RouterOS api-ssl suele usar cert autofirmado y cifrados/version viejos:
+        # bajar el nivel para no fallar el handshake (no verificamos identidad de todos modos).
+        try: ctx.minimum_version = _ssl.TLSVersion.TLSv1
+        except Exception: pass
+        try: ctx.set_ciphers("DEFAULT@SECLEVEL=0")
+        except Exception:
+            try: ctx.set_ciphers("ALL:@SECLEVEL=1")
+            except Exception: pass
         sock = ctx.wrap_socket(raw, server_hostname=host)
     sock.settimeout(timeout)
     # login moderno (6.43+/v7): usuario y clave directos
@@ -4285,15 +4293,22 @@ class H(BaseHTTPRequestHandler):
                 m["PASS"] = npass
             m["LIST"] = (q.get("list", [""])[0]).strip()[:64] or m.get("LIST", "suricata-cuarentena")
             m["TTL"] = (q.get("ttl", [""])[0]).strip()[:16]
+            m["LIST_DNS"] = (q.get("list_dns", [""])[0]).strip()[:64] or m.get("LIST_DNS", "suricata-dns-sospechoso")
+            m["TTL_DNS"] = (q.get("ttl_dns", [""])[0]).strip()[:16]
+            m["AUTO_MANTENER"] = "1" if q.get("auto") else "0"
             m["TLS"] = "1" if q.get("tls") else "0"
-            m["ENABLED"] = m.get("ENABLED", "0")
+            m["ENABLED"] = "1" if q.get("enabled") else "0"
             try:
                 guardar_mk(m)
             except OSError:
                 pass
             ok, msg = mk_probar()
             if not ok:
-                msg += " — Revisa host, puerto, usuario, clave, que el servicio API este activo y permitido desde este servidor."
+                if "ssl" in msg.lower() or "handshake" in msg.lower():
+                    msg += (" — El API-SSL del MikroTik necesita un CERTIFICADO asignado: "
+                            "/ip service set api-ssl certificate=NOMBRE_CERT. O desmarca API-SSL y usa API plano (8728).")
+                else:
+                    msg += " — Revisa host, puerto, usuario, clave, que el servicio API este activo y permitido desde este servidor."
             return self._html(perfil_page(("Prueba: " + msg), ok=ok))
         if ruta == "/cuarentena/enviar":
             if not self._admin():

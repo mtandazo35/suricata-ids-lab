@@ -2561,6 +2561,11 @@ font-size:15px;font-weight:500;transition:background .15s,color .15s}
 .nav .out{margin-left:14px;color:#f3b0b0;text-decoration:none;font-weight:600;padding:9px 17px;border-radius:8px;font-size:15px;
 border:1px solid rgba(243,176,176,.35);transition:background .15s,color .15s,border-color .15s}
 .nav .out:hover{background:#e34948;color:#fff;border-color:#e34948}
+.nav .live{display:inline-flex;align-items:center;gap:7px;margin-left:6px;color:#d6f5e0;text-decoration:none;
+font-weight:600;font-size:14px;padding:9px 14px;border-radius:8px;border:1px solid rgba(58,157,93,.5);transition:background .15s,color .15s}
+.nav .live:hover{background:#1f7a45;color:#fff;border-color:#1f7a45}
+.nav .live .dotlive{width:8px;height:8px;border-radius:50%;background:#37d67a;box-shadow:0 0 0 0 rgba(55,214,122,.7);animation:pulselive 1.6s infinite}
+@keyframes pulselive{0%{box-shadow:0 0 0 0 rgba(55,214,122,.6)}70%{box-shadow:0 0 0 7px rgba(55,214,122,0)}100%{box-shadow:0 0 0 0 rgba(55,214,122,0)}}
 .empbar{background:#fff;border-bottom:1px solid #ececec}
 .empbar .empwrap{max-width:1360px;margin:0 auto;padding:7px 28px;display:flex;justify-content:flex-end;align-items:center;gap:10px}
 .empbar .elogo{height:30px;width:auto;max-width:150px;object-fit:contain;display:block}
@@ -2576,8 +2581,10 @@ def nav(active=""):
         cls = "tab on" if h == active else "tab"
         parts.append(f'<a href="{h}" class="{cls}">{t}</a>')
     brand = '<span class="brand"><img class="applogo" src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
+    evebox = ('<a href="#" class="live" onclick="window.open(\'https://\'+location.hostname+\':5636\',\'_blank\');return false" '
+              'title="Alertas en tiempo real (EveBox, puerto 5636)"><span class="dotlive"></span>En vivo (EveBox)</a>')
     navbar = ('<div class="nav"><div class="navwrap">' + brand + '<span class="push"></span>'
-              + "".join(parts) + '<a href="/logout" class="out">Salir</a></div></div>')
+              + "".join(parts) + evebox + '<a href="/logout" class="out">Salir</a></div></div>')
     # marca de la empresa (logo + nombre) en una franja debajo, alineada a la derecha (bajo Salir)
     emp = cargar_empresa()
     tiene_logo = emp.get("logo", "").startswith("data:image/")
@@ -3545,7 +3552,10 @@ def log_page():
             f"<td>{esc(us) or '<span style=color:#c3c2be>&mdash;</span>'}</td><td>{estb(est)}</td></tr>"
             for ts, ip, us, est in rec)
         cuerpo = ("<div class=twrap><table class=ut><thead><tr><th>Fecha (Ecuador)</th><th>IP</th>"
-                  f"<th>Usuario</th><th>Resultado</th></tr></thead><tbody id=logbody>{rows}</tbody></table></div>")
+                  f"<th>Usuario</th><th>Resultado</th></tr></thead><tbody id=logbody>{rows}</tbody></table></div>"
+                  "<div class=pager><button id=lprev type=button onclick=lprev()>&larr; Anterior</button>"
+                  "<span id=lpi></span>"
+                  "<button id=lnext type=button onclick=lnext()>Siguiente &rarr;</button></div>")
     else:
         cuerpo = "<p class=sub2>Sin intentos de acceso registrados todavia.</p>"
     css = (
@@ -3560,10 +3570,24 @@ def log_page():
         ".ut th{text-align:left;color:#8a8a86;font-weight:600;padding:10px 12px;background:#fafafa;border-bottom:1px solid #eee}"
         ".ut td{padding:8px 12px;border-bottom:1px solid #f2f1ee}"
         ".ut tbody tr:last-child td{border-bottom:0}.ut tbody tr:hover{background:#fafbfd}"
-        ".mono{font-family:ui-monospace,Consolas,monospace}")
-    script = ("<script>function lfiltrar(){var q=(document.getElementById('lsearch').value||'').toLowerCase();"
-              "var rs=document.querySelectorAll('#logbody tr');for(var i=0;i<rs.length;i++){"
-              "var f=rs[i].getAttribute('data-f')||'';rs[i].style.display=f.indexOf(q)>=0?'':'none';}}</script>")
+        ".mono{font-family:ui-monospace,Consolas,monospace}"
+        ".pager{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}"
+        ".pager button{font:13px system-ui;padding:6px 12px;border:1px solid #d7d6d2;background:#fff;border-radius:8px;cursor:pointer;color:#0b0b0b}"
+        ".pager button:hover:not(:disabled){background:#eef4fd;border-color:#2a78d6}"
+        ".pager button:disabled{opacity:.4;cursor:default}.pager #lpi{font-weight:600;font-size:13px;color:#52514e}")
+    script = ("<script>(function(){var SIZE=50,page=0,"
+              "rows=[].slice.call(document.querySelectorAll('#logbody tr')),q='';"
+              "function filtered(){return rows.filter(function(r){return (r.getAttribute('data-f')||'').indexOf(q)>=0;});}"
+              "function render(){var f=filtered(),pages=Math.max(1,Math.ceil(f.length/SIZE));"
+              "if(page>=pages)page=pages-1;if(page<0)page=0;"
+              "rows.forEach(function(r){r.style.display='none';});"
+              "f.slice(page*SIZE,page*SIZE+SIZE).forEach(function(r){r.style.display='';});"
+              "var pi=document.getElementById('lpi');if(pi)pi.textContent='Pagina '+(page+1)+' de '+pages+' ('+f.length+' registros)';"
+              "var pv=document.getElementById('lprev'),nx=document.getElementById('lnext');"
+              "if(pv)pv.disabled=page<=0;if(nx)nx.disabled=page>=pages-1;}"
+              "window.lfiltrar=function(){q=(document.getElementById('lsearch').value||'').toLowerCase();page=0;render();};"
+              "window.lprev=function(){page--;render();};window.lnext=function(){page++;render();};"
+              "if(rows.length)render();})();</script>")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Log de accesos</title>"
             f"<style>{css}</style></head><body>" + nav("/log") +

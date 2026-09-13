@@ -2373,6 +2373,8 @@ def mk_add(ip, comment="", lista=None, ttl=None):
             words.append(f"=comment={comment[:120]}")
         _mk_send(s, words)
         ok, frases, err = _mk_reply(s)
+        if not ok and "already have such entry" in (err or "").lower():
+            return (True, "ya estaba en la lista")   # add idempotente: ya estaba -> ok
         return (ok, err)
     finally:
         try: s.close()
@@ -4436,7 +4438,8 @@ class H(BaseHTTPRequestHandler):
                 guardar_enviados(env)
                 mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} ttl={m.get('TTL')}" + (" (manual)" if ip not in cand_ips else ""))
                 globals()["FORCE_REGEN"] = True   # regenerar pronto para que el Top muestre 'En cuarentena'
-                return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} enviado a la lista {m.get('LIST')}"))
+                nota = " (ya estaba en la lista; ahora la puedes Quitar aqui)" if err else ""
+                return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} en la lista {m.get('LIST')}{nota}"))
             mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), err)
             return self._redirect("/cuarentena?msg=" + _up.quote(f"No se pudo enviar {ip}: {err}"))
         if ruta == "/cuarentena/enviar-todos":

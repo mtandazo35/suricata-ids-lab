@@ -2302,6 +2302,72 @@ def mk_log(accion, ip, quien, detalle=""):
     except OSError:
         pass
 
+# --- log de actividad unificado (accesos + acciones de cuarentena) + retencion ---
+LOG_RETENCION_DIAS = 15   # los registros mas viejos que esto se borran solos
+
+def _ev_ts(s):
+    try:
+        return time.mktime(time.strptime(s, "%Y-%m-%d %H:%M:%S"))
+    except Exception:
+        return 0.0
+
+def _cola_lineas(path, nbytes=200000):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2); sz = f.tell(); f.seek(max(0, sz - nbytes)); data = f.read()
+        return data.decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+
+def actividad_reciente(n=800):
+    """Eventos recientes (mas nuevo primero): accesos al panel + acciones de cuarentena.
+    Devuelve tuplas (ts, tipo, ip, usuario, accion, detalle)."""
+    evs = []
+    for l in _cola_lineas(LOGIN_LOG):                      # accesos (TAB separado)
+        p = l.split("\t")
+        if len(p) >= 4:
+            evs.append((p[0], "Acceso", p[1], p[2], p[3], ""))
+    for l in _cola_lineas(MK_LOG):                         # cuarentena (espacio separado)
+        t = l.split(" ")
+        if len(t) >= 5:
+            ts = t[0] + " " + t[1]; accion = t[2]; ip = t[3]
+            quien = ""; det = []
+            for x in t[4:]:
+                if x.startswith("por="):
+                    quien = x[4:]
+                else:
+                    det.append(x)
+            evs.append((ts, "Cuarentena", ip, quien, accion, " ".join(det)))
+    evs.sort(key=lambda e: e[0], reverse=True)
+    return evs[:n]
+
+def podar_logs():
+    """Borra del log de accesos y del de cuarentena las lineas mas viejas que LOG_RETENCION_DIAS."""
+    corte = time.time() - LOG_RETENCION_DIAS * 86400
+    for path, sep in ((LOGIN_LOG, "\t"), (MK_LOG, " ")):
+        try:
+            if not os.path.exists(path):
+                continue
+            keep = []
+            for l in open(path, encoding="utf-8", errors="replace"):
+                s = l.rstrip("\n")
+                if not s:
+                    continue
+                if sep == "\t":
+                    ts = s.split("\t", 1)[0]
+                else:
+                    parts = s.split(" ")
+                    ts = (parts[0] + " " + parts[1]) if len(parts) >= 2 else s
+                t = _ev_ts(ts)
+                if t == 0.0 or t >= corte:     # conserva lo reciente (y lo no-parseable, por si acaso)
+                    keep.append(l if l.endswith("\n") else l + "\n")
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.writelines(keep)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
 # ---------------------------------------------------------------- usuarios y roles
 USERS_FILE = "/etc/suricata-dashboard-users.json"
 CTX = threading.local()   # contexto por peticion: user/role del que la hace
@@ -2525,8 +2591,13 @@ def partes_top():
 def refrescador():
     """Hilo de fondo: regenera el reporte periodicamente, NUNCA en el request.
     Asi 'En vivo' sirve siempre el ultimo archivo al instante aunque generar tarde."""
+    ult_poda = 0.0
     while True:
         global FORCE_REGEN
+        if time.time() - ult_poda > 86400:     # poda de logs una vez al dia (retencion 15 dias)
+            try: podar_logs()
+            except Exception: pass
+            ult_poda = time.time()
         nr = newest_report()
         stale = FORCE_REGEN or (nr is None) or (time.time() - os.path.getmtime(nr) >= REFRESH_SECS)
         if stale:
@@ -3537,27 +3608,40 @@ router deja de responder, se detiene y avisa). Cada IP queda con su <b>TTL</b> y
     return body
 
 def log_page():
-    """Pestana Log: historial de intentos de acceso al panel (solo admin)."""
+    """Pestana Log: actividad del panel (accesos + acciones de cuarentena). Solo admin."""
     esc = html.escape
-    _col = {"OK": "#12b886", "FAIL": "#e34948", "BLOQUEADO": "#eb6834"}
+    _col = {"OK": "#12b886", "FAIL": "#e34948", "BLOQUEADO": "#eb6834",
+            "ENVIADO": "#b52a2a", "QUITADO": "#6b6a66"}
     def estb(e):
-        c = _col.get(e, "#2a78d6" if e.startswith("DESBLOQUEO") else "#8a8a86")
+        if e in _col:
+            c = _col[e]
+        elif e.startswith("DESBLOQUEO"):
+            c = "#2a78d6"
+        elif e.startswith("ERROR"):
+            c = "#e58a00"
+        else:
+            c = "#8a8a86"
         return (f'<span style="background:{c};color:#fff;font-size:10px;font-weight:700;'
                 f'padding:2px 8px;border-radius:20px">{esc(e)}</span>')
-    rec = login_recientes(200)
+    def tipob(t):
+        c = "#7048e8" if t == "Cuarentena" else "#2a78d6"
+        return (f'<span style="background:{c}1a;color:{c};font-size:10px;font-weight:700;'
+                f'padding:2px 8px;border-radius:20px">{esc(t)}</span>')
+    rec = actividad_reciente(800)
     if rec:
         rows = "".join(
-            f"<tr data-f=\"{esc((ts + ' ' + ip + ' ' + us + ' ' + est).lower())}\">"
-            f"<td class=mono>{esc(ts)}</td><td class=mono>{esc(ip)}</td>"
-            f"<td>{esc(us) or '<span style=color:#c3c2be>&mdash;</span>'}</td><td>{estb(est)}</td></tr>"
-            for ts, ip, us, est in rec)
-        cuerpo = ("<div class=twrap><table class=ut><thead><tr><th>Fecha (Ecuador)</th><th>IP</th>"
-                  f"<th>Usuario</th><th>Resultado</th></tr></thead><tbody id=logbody>{rows}</tbody></table></div>"
+            f"<tr data-f=\"{esc((ts + ' ' + tipo + ' ' + ip + ' ' + us + ' ' + acc + ' ' + det).lower())}\">"
+            f"<td class=mono>{esc(ts)}</td><td>{tipob(tipo)}</td><td class=mono>{esc(ip)}</td>"
+            f"<td>{esc(us) or '<span style=color:#c3c2be>&mdash;</span>'}</td><td>{estb(acc)}</td>"
+            f"<td class=det>{esc(det)}</td></tr>"
+            for ts, tipo, ip, us, acc, det in rec)
+        cuerpo = ("<div class=twrap><table class=ut><thead><tr><th>Fecha (Ecuador)</th><th>Tipo</th><th>IP</th>"
+                  f"<th>Usuario</th><th>Accion</th><th>Detalle</th></tr></thead><tbody id=logbody>{rows}</tbody></table></div>"
                   "<div class=pager><button id=lprev type=button onclick=lprev()>&larr; Anterior</button>"
                   "<span id=lpi></span>"
                   "<button id=lnext type=button onclick=lnext()>Siguiente &rarr;</button></div>")
     else:
-        cuerpo = "<p class=sub2>Sin intentos de acceso registrados todavia.</p>"
+        cuerpo = "<p class=sub2>Sin actividad registrada todavia.</p>"
     css = (
         "body{margin:0;background:#f6f6f4;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
         "main{max-width:1000px;margin:0 auto;padding:22px 22px 40px}"
@@ -3571,6 +3655,7 @@ def log_page():
         ".ut td{padding:8px 12px;border-bottom:1px solid #f2f1ee}"
         ".ut tbody tr:last-child td{border-bottom:0}.ut tbody tr:hover{background:#fafbfd}"
         ".mono{font-family:ui-monospace,Consolas,monospace}"
+        ".det{white-space:normal;color:#6b6a66;font-size:12px;max-width:320px}"
         ".pager{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}"
         ".pager button{font:13px system-ui;padding:6px 12px;border:1px solid #d7d6d2;background:#fff;border-radius:8px;cursor:pointer;color:#0b0b0b}"
         ".pager button:hover:not(:disabled){background:#eef4fd;border-color:#2a78d6}"
@@ -3589,12 +3674,13 @@ def log_page():
               "window.lprev=function(){page--;render();};window.lnext=function(){page++;render();};"
               "if(rows.length)render();})();</script>")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
-            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Log de accesos</title>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Log de actividad</title>"
             f"<style>{css}</style></head><body>" + nav("/log") +
-            "<main><h1>Log de accesos</h1>"
-            "<p class=sub2>Historial de intentos de acceso al panel: fecha, IP de origen, usuario y resultado.</p>"
-            "<section class=card><div class=uhead><h2 style='font-size:15px;margin:0'>Ultimos intentos</h2>"
-            "<input class=search id=lsearch placeholder='Buscar IP, usuario...' oninput='lfiltrar()'></div>"
+            "<main><h1>Log de actividad</h1>"
+            "<p class=sub2>Accesos al panel y acciones de cuarentena (quien envio o quito una IP). "
+            f"Los registros de mas de {LOG_RETENCION_DIAS} dias se borran solos.</p>"
+            "<section class=card><div class=uhead><h2 style='font-size:15px;margin:0'>Ultima actividad</h2>"
+            "<input class=search id=lsearch placeholder='Buscar IP, usuario, accion...' oninput='lfiltrar()'></div>"
             + cuerpo + "</section></main>" + script + "</body></html>")
 
 def historico_page():

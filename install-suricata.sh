@@ -46,8 +46,9 @@ Uso: sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] 
   -P CLAVE     clave del usuario web 'admin' (default: aleatoria, se muestra al final)
   -m ORIGEN    con -t: IP/CIDR del MikroTik que envia el espejo TZSP (una o varias,
                separadas por coma). Restringe UFW y el receptor a ese origen.
-               Sin -m, el receptor 37008/udp queda abierto a cualquier origen (no recomendado).
-  -t           receptor TZSP (UDP 37008) para espejo desde MikroTik
+               OBLIGATORIO con -t: sin origen conocido cualquier host de la red podria
+               inyectar tramas forjadas en el IDS, asi que el receptor no arranca.
+  -t           receptor TZSP (UDP 37008) para espejo desde MikroTik (requiere -m)
   -W           sin web (solo Suricata + logs locales)
   -h           esta ayuda
 
@@ -76,6 +77,9 @@ done
 # por si el usuario pasa -n "[a,b]": el yaml ya pone los corchetes
 HOME_NET="${HOME_NET#[}"; HOME_NET="${HOME_NET%]}"
 { [[ "$WEB_PORT" =~ ^[0-9]+$ ]] && [ "$WEB_PORT" -ge 1 ] && [ "$WEB_PORT" -le 65535 ]; } || die "Puerto invalido: $WEB_PORT"
+# el receptor TZSP sin lista de origenes aceptaria tramas forjadas de cualquier host de
+# la red: -t exige -m para que el espejo tenga un origen conocido.
+[ "$TZSP" -eq 0 ] || [ -n "$MIRROR_SRC" ] || die "-t necesita -m <IP_MikroTik> (origen del espejo; admite varios separados por coma)."
 export DEBIAN_FRONTEND=noninteractive
 
 # EveBox: se baja el .deb suelto del pool oficial (el repo apt usa firma SHA1 que
@@ -2133,7 +2137,13 @@ REFRESH_SECS = 300    # regeneracion del resumen en segundo plano: cada 5 min (t
 FORCE_REGEN = False   # el selector de ventana lo pone True para regenerar el resumen ya
 
 def conf():
-    d = {"PORT": "5637", "USER": "admin", "PASS": ""}
+    # PROXIES: IPs de los proxies inversos de confianza, separadas por coma. SOLO desde
+    #   esas IPs se hace caso a X-Forwarded-For / X-Forwarded-Proto; de cualquier otro
+    #   origen esas cabeceras las pone el cliente y se ignoran (si no, la lista de IPs
+    #   de confianza y el bloqueo por intentos se saltan mandando una cabecera).
+    # BIND: interfaz donde escucha el panel. 0.0.0.0 = todas (compatibilidad); si lo
+    #   pones detras de un proxy HTTPS, 127.0.0.1 deja de exponerlo en claro a la red.
+    d = {"PORT": "5637", "USER": "admin", "PASS": "", "PROXIES": "", "BIND": "0.0.0.0"}
     try:
         for l in open(CONF, encoding="utf-8"):
             l = l.strip()
@@ -2144,6 +2154,8 @@ def conf():
     return d
 
 CFG = conf()
+# proxies inversos de confianza (ver conf()). Vacio = no se hace caso a X-Forwarded-*.
+PROXIES_OK = {x.strip() for x in CFG.get("PROXIES", "").split(",") if x.strip()}
 
 # ---------------------------------------------------------------- MikroTik (cuarentena Fase B)
 # Empuja IPs de CPEs infectados a una address-list del MikroTik via API. El MikroTik
@@ -2156,10 +2168,13 @@ MK_SENT_DNS = "/var/log/suricata-dns-enviados.json"          # IPs enviadas a la
 MK_LOG  = "/var/log/suricata-cuarentena.log"                 # bitacora de acciones
 
 def cargar_mk():
+    # CERT_FP: huella SHA256 del certificado del router, fijada en la primera conexion
+    # TLS (TOFU). Mientras no cambie, nadie puede colarse en medio; si cambia, la
+    # conexion se rechaza y hay que borrar la clave a mano tras comprobar por que.
     d = {"HOST": "", "PORT": "8728", "TLS": "0", "USER": "", "PASS": "",
          "LIST": "suricata-cuarentena", "TTL": "1h",
          "LIST_DNS": "suricata-dns-sospechoso", "TTL_DNS": "1d",
-         "AUTO_MANTENER": "0", "ENABLED": "0"}
+         "AUTO_MANTENER": "0", "ENABLED": "0", "CERT_FP": ""}
     try:
         for l in open(MK_CONF, encoding="utf-8"):
             l = l.strip()
@@ -2170,7 +2185,7 @@ def cargar_mk():
     return d
 
 def guardar_mk(d):
-    orden = ["HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL", "LIST_DNS", "TTL_DNS", "AUTO_MANTENER", "ENABLED"]
+    orden = ["HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL", "LIST_DNS", "TTL_DNS", "AUTO_MANTENER", "ENABLED", "CERT_FP"]
     txt = ("# Conexion API al MikroTik para la cuarentena. La clave se usa para autenticar\n"
            "# (no se puede hashear). Archivo con permisos 600.\n"
            + "".join(f"{k}={d.get(k,'')}\n" for k in orden))
@@ -2246,23 +2261,55 @@ def _mk_reply(sock):
         if tipo == "!fatal":
             return (False, frases, err or "conexion terminada")
 
+def _mk_tls_wrap(host, port, timeout):
+    """Envuelve en TLS probando cifrados en orden. RouterOS api-ssl SIN certificado usa
+    cifrados ANONIMOS (ADH) -> hay que habilitarlos con @SECLEVEL=0 (Python los desactiva
+    por defecto). Con certificado usa los normales. Se prueban ambos para no exigir cert."""
+    ultimo = None
+    for ciphers in ("ADH:@SECLEVEL=0", "DEFAULT:@SECLEVEL=0", None):
+        try:
+            raw = _socket.create_connection((host, port), timeout=timeout)
+        except Exception as e:
+            raise IOError(str(e))
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False; ctx.verify_mode = _ssl.CERT_NONE
+        try: ctx.minimum_version = _ssl.TLSVersion.TLSv1
+        except Exception: pass
+        if ciphers:
+            try: ctx.set_ciphers(ciphers)
+            except Exception: pass
+        try:
+            return ctx.wrap_socket(raw, server_hostname=host)
+        except Exception as e:
+            ultimo = e
+            try: raw.close()
+            except Exception: pass
+    raise IOError(f"TLS handshake fallo ({ultimo})")
+
 def mk_conectar(d, timeout=6):
     """Abre el socket y hace login. Devuelve el socket o lanza excepcion."""
     host = d["HOST"]; port = int(d.get("PORT") or (8729 if d.get("TLS") == "1" else 8728))
-    raw = _socket.create_connection((host, port), timeout=timeout)
-    sock = raw
     if d.get("TLS") == "1":
-        ctx = _ssl.create_default_context()
-        ctx.check_hostname = False; ctx.verify_mode = _ssl.CERT_NONE
-        # RouterOS api-ssl suele usar cert autofirmado y cifrados/version viejos:
-        # bajar el nivel para no fallar el handshake (no verificamos identidad de todos modos).
-        try: ctx.minimum_version = _ssl.TLSVersion.TLSv1
-        except Exception: pass
-        try: ctx.set_ciphers("DEFAULT@SECLEVEL=0")
-        except Exception:
-            try: ctx.set_ciphers("ALL:@SECLEVEL=1")
-            except Exception: pass
-        sock = ctx.wrap_socket(raw, server_hostname=host)
+        sock = _mk_tls_wrap(host, port, timeout)
+        # RouterOS trae un certificado autofirmado: no hay CA que valide la cadena, asi
+        # que se fija su huella la primera vez (TOFU) y despues tiene que coincidir. Sin
+        # esto cualquiera en medio acepta el handshake y se lleva la clave del router,
+        # que es justo lo que se manda en el /login de aqui abajo.
+        fp = _hashlib.sha256(sock.getpeercert(binary_form=True) or b"").hexdigest()
+        esperada = (d.get("CERT_FP") or "").strip().lower().replace(":", "")
+        if esperada and fp != esperada:
+            sock.close()
+            raise RuntimeError(
+                "El certificado del MikroTik no coincide con el fijado (esperado "
+                f"{esperada[:16]}..., recibido {fp[:16]}...). Puede ser un cambio "
+                "legitimo del router o alguien en medio: comprueba el router y, si es "
+                f"correcto, borra la linea CERT_FP de {MK_CONF}.")
+        if not esperada:
+            d["CERT_FP"] = fp
+            try: guardar_mk(d)
+            except OSError: pass
+    else:
+        sock = _socket.create_connection((host, port), timeout=timeout)
     sock.settimeout(timeout)
     # login moderno (6.43+/v7): usuario y clave directos
     _mk_send(sock, ["/login", f"=name={d['USER']}", f"=password={d['PASS']}"])
@@ -3944,15 +3991,32 @@ class H(BaseHTTPRequestHandler):
             return m.value if m else None
         except Exception:
             return None
-    def _client_ip(self):
-        # detras de un proxy inverso, la IP real viene en X-Forwarded-For
-        xff = self.headers.get("X-Forwarded-For", "")
-        if xff:
-            return xff.split(",")[0].strip()
+    def _peer_ip(self):
         try:
             return self.client_address[0]
         except Exception:
             return "?"
+    def _proxy_confiable(self):
+        return self._peer_ip() in PROXIES_OK
+    def _cookie_secure(self):
+        # Secure solo si la peticion llego por HTTPS; si no, el navegador descartaria
+        # la cookie y no se podria entrar por HTTP. La cabecera del proxy solo cuenta
+        # si el proxy es de confianza.
+        if not self._proxy_confiable():
+            return ""
+        proto = self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+        if proto == "https":
+            return "; Secure"
+        return ""
+    def _client_ip(self):
+        # detras de un proxy inverso la IP real viene en X-Forwarded-For, pero esa
+        # cabecera la pone quien quiera: solo se acepta si la conexion viene de un
+        # proxy declarado en PROXIES. Si no, manda la IP del socket.
+        if self._proxy_confiable():
+            xff = self.headers.get("X-Forwarded-For", "")
+            if xff:
+                return xff.split(",")[0].strip()
+        return self._peer_ip()
     def _sesion(self):
         return SESSIONS.get(self._sid()) or {}
     def _sesion_ok(self):
@@ -4152,7 +4216,7 @@ class H(BaseHTTPRequestHandler):
                 SESSIONS[token] = {"user": u, "role": role, "exp": time.time() + SESSION_TTL}
                 for k in [k for k, v in SESSIONS.items() if v.get("exp", 0) < time.time()]:
                     SESSIONS.pop(k, None)
-                return self._redirect("/", cookie=f"sid={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}")
+                return self._redirect("/", cookie=f"sid={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}{self._cookie_secure()}")
             if not cargar_confianza():
                 login_fallo(ip)   # solo se cuenta para bloquear si no hay lista de confianza
             login_registrar(ip, u, "FAIL")
@@ -4304,9 +4368,9 @@ class H(BaseHTTPRequestHandler):
                 pass
             ok, msg = mk_probar()
             if not ok:
-                if "ssl" in msg.lower() or "handshake" in msg.lower():
-                    msg += (" — El API-SSL del MikroTik necesita un CERTIFICADO asignado: "
-                            "/ip service set api-ssl certificate=NOMBRE_CERT. O desmarca API-SSL y usa API plano (8728).")
+                if "ssl" in msg.lower() or "handshake" in msg.lower() or "tls" in msg.lower():
+                    msg += (" — Verifica que el servicio api-ssl este habilitado (/ip service enable api-ssl) y el puerto (8729). "
+                            "No necesitas certificado (se usan cifrados ADH). Si sigue, prueba API plano: desmarca API-SSL y usa 8728.")
                 else:
                     msg += " — Revisa host, puerto, usuario, clave, que el servicio API este activo y permitido desde este servidor."
             return self._html(perfil_page(("Prueba: " + msg), ok=ok))
@@ -4759,7 +4823,8 @@ def main():
     port = int(CFG.get("PORT", "5637"))
     cargar_usuarios()   # migra el usuario del .conf al almacen hasheado si aun no existe
     threading.Thread(target=refrescador, daemon=True).start()
-    httpd = ThreadingHTTPServer(("0.0.0.0", port), H)
+    bind = CFG.get("BIND", "0.0.0.0") or "0.0.0.0"
+    httpd = ThreadingHTTPServer((bind, port), H)
     httpd.serve_forever()
 
 if __name__ == "__main__":
@@ -4891,7 +4956,8 @@ import ipaddress, os, socket, struct, sys, time
 
 PORT = int(os.environ.get("TZSP_PORT", "37008"))
 OUT_IF = os.environ.get("TZSP_OUT_IF", "ids-in")
-# origenes autorizados del espejo (MikroTik). Vacio = aceptar de cualquiera (compat).
+# origenes autorizados del espejo (MikroTik). Vacio = NO arrancar (fail-closed):
+# sin lista, cualquiera en la red podria inyectar tramas forjadas en el IDS.
 ALLOW = []
 for _c in os.environ.get("TZSP_ALLOW", "").replace(" ", "").split(","):
     if _c:
@@ -4902,7 +4968,7 @@ for _c in os.environ.get("TZSP_ALLOW", "").replace(" ", "").split(","):
 
 def permitido(ip):
     if not ALLOW:
-        return True
+        return False        # fail-closed: sin lista de origenes no se acepta nada
     try:
         a = ipaddress.ip_address(ip)
     except ValueError:
@@ -4930,6 +4996,13 @@ def decap(d):
     return d[i:] if i < n else None
 
 def main():
+    if not ALLOW:
+        for _m in ("tzsp-decap: TZSP_ALLOW vacio. Sin origenes autorizados,",
+                   "cualquier host de la red podria inyectar trafico forjado en el",
+                   "IDS, asi que no se arranca. Reinstala con -m <IP_MikroTik>",
+                   "(acepta varios separados por coma)."):
+            print(_m, file=sys.stderr, flush=True)
+        return 2
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     rx.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 << 20)
@@ -4937,7 +5010,7 @@ def main():
     tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
     tx.bind((OUT_IF, 0))
     print(f"tzsp-decap: escuchando UDP {PORT} -> {OUT_IF}"
-          + (f" (solo desde {os.environ.get('TZSP_ALLOW')})" if ALLOW else " (cualquier origen)"), flush=True)
+          f" (solo desde {os.environ.get('TZSP_ALLOW')})", flush=True)
     rxn = txn = bad = big = rej = 0
     last = time.time()
     while True:
@@ -4962,7 +5035,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main() or 0)
     except KeyboardInterrupt:
         sys.exit(0)
 PYD
@@ -5368,9 +5441,10 @@ if [ "$TZSP" -eq 1 ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null
         && ok "UFW: ${TZSP_PORT}/udp permitido solo desde ${_src}."
     done
     IFS=$OLD_IFS
-  elif ! ufw status | grep -qE "^${TZSP_PORT}/udp\s+ALLOW"; then
-    ufw allow "${TZSP_PORT}/udp" comment 'TZSP MikroTik' >/dev/null \
-      && warn "UFW: ${TZSP_PORT}/udp ABIERTO A CUALQUIER ORIGEN. Pasa -m <IP_MikroTik> para restringirlo."
+  else
+    # sin origen de espejo NO se abre el puerto: abrirlo a cualquiera permitiria
+    # inyectar tramas forjadas en el IDS (el receptor tampoco arranca, ver -m).
+    warn "UFW: ${TZSP_PORT}/udp NO se abre sin -m <IP_MikroTik>."
   fi
 fi
 

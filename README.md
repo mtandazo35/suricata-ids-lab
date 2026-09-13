@@ -32,8 +32,8 @@ Opciones (se pasan tras `bash -s --`):
 | `-n CIDR[,CIDR]` | `HOME_NET` (admite varias redes separadas por coma; con `-t` pasa aqui las redes de tus clientes) | red de la interfaz |
 | `-p PUERTO` | puerto de la web | `5636` |
 | `-P CLAVE` | clave del usuario web `admin` | aleatoria (se muestra al final) |
-| `-t` | **receptor TZSP** (UDP 37008) para espejo MikroTik | apagado |
-| `-m IP[,IP]` | con `-t`: **IP/CIDR del MikroTik** que envia el espejo. Restringe UFW y el receptor solo a ese origen (recomendado). Sin `-m`, 37008/udp queda abierto a todos | abierto |
+| `-t` | **receptor TZSP** (UDP 37008) para espejo MikroTik. Requiere `-m` | apagado |
+| `-m IP[,IP]` | con `-t`: **IP/CIDR del MikroTik** que envia el espejo. Restringe UFW y el receptor solo a ese origen. **Obligatorio con `-t`**: sin origen conocido cualquier host de la red podria inyectar tramas forjadas en el IDS, y el receptor no arranca | - |
 | `-W` | **sin web**, solo Suricata + logs | web activada |
 
 ### One-liner segun tu caso
@@ -338,11 +338,12 @@ volumen, mirror por hardware (Opcion C). Vigila `tcp.reassembly_memuse` en
 
 ### 1. Instalar el receptor
 
-Pasa `-t` y en `-n` **las redes de tus clientes** (separadas por coma), para que
-Suricata sepa que es "casa" y marque bien lo saliente:
+Pasa `-t`, en `-m` **la IP del MikroTik que envia el espejo** y en `-n` **las redes
+de tus clientes** (separadas por coma), para que Suricata sepa que es "casa" y
+marque bien lo saliente:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -n 172.16.0.0/12,10.0.0.0/8
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -m 10.87.87.1 -n 172.16.0.0/12,10.0.0.0/8
 ```
 
 Probar sin MikroTik (manda una trama TZSP sintetica y espera la alerta):

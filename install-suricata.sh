@@ -2673,11 +2673,6 @@ font-size:15px;font-weight:500;transition:background .15s,color .15s}
 .nav .out{margin-left:14px;color:#f3b0b0;text-decoration:none;font-weight:600;padding:9px 17px;border-radius:8px;font-size:15px;
 border:1px solid rgba(243,176,176,.35);transition:background .15s,color .15s,border-color .15s}
 .nav .out:hover{background:#e34948;color:#fff;border-color:#e34948}
-.nav .live{display:inline-flex;align-items:center;gap:7px;margin-left:6px;color:#d6f5e0;text-decoration:none;
-font-weight:600;font-size:14px;padding:9px 14px;border-radius:8px;border:1px solid rgba(58,157,93,.5);transition:background .15s,color .15s}
-.nav .live:hover{background:#1f7a45;color:#fff;border-color:#1f7a45}
-.nav .live .dotlive{width:8px;height:8px;border-radius:50%;background:#37d67a;box-shadow:0 0 0 0 rgba(55,214,122,.7);animation:pulselive 1.6s infinite}
-@keyframes pulselive{0%{box-shadow:0 0 0 0 rgba(55,214,122,.6)}70%{box-shadow:0 0 0 7px rgba(55,214,122,0)}100%{box-shadow:0 0 0 0 rgba(55,214,122,0)}}
 .empbar{background:#fff;border-bottom:1px solid #ececec}
 .empbar .empwrap{max-width:1360px;margin:0 auto;padding:7px 28px;display:flex;justify-content:flex-end;align-items:center;gap:10px}
 .empbar .elogo{height:30px;width:auto;max-width:150px;object-fit:contain;display:block}
@@ -2693,10 +2688,8 @@ def nav(active=""):
         cls = "tab on" if h == active else "tab"
         parts.append(f'<a href="{h}" class="{cls}">{t}</a>')
     brand = '<span class="brand"><img class="applogo" src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
-    evebox = ('<a href="#" class="live" onclick="window.open(\'https://\'+location.hostname+\':5636\',\'_blank\');return false" '
-              'title="Alertas en tiempo real (EveBox, puerto 5636)"><span class="dotlive"></span>En vivo (EveBox)</a>')
     navbar = ('<div class="nav"><div class="navwrap">' + brand + '<span class="push"></span>'
-              + "".join(parts) + evebox + '<a href="/logout" class="out">Salir</a></div></div>')
+              + "".join(parts) + '<a href="/logout" class="out">Salir</a></div></div>')
     # marca de la empresa (logo + nombre) en una franja debajo, alineada a la derecha (bajo Salir)
     emp = cargar_empresa()
     tiene_logo = emp.get("logo", "").startswith("data:image/")

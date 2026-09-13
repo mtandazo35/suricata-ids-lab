@@ -2945,8 +2945,20 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "(mientras siga enviando virus, sigue en cuarentena). Apagado: la IP caduca sola con el TTL de arriba.</div></div>"
             "<div class=actions>"
             "<button class=primary type=submit>Guardar</button>"
-            "<button class=cancelbtn type=submit formaction='/mikrotik/test' formnovalidate>Probar conexion</button>"
-            "</div></form></section>")
+            "<button class=cancelbtn type=submit formaction='/mikrotik/test' formnovalidate "
+            "onclick=\"document.getElementById('mkwait').style.display='flex'\">Probar conexion</button>"
+            "</div></form>"
+            "<div id=mkwait class=mkwait><div class=mkbox><div class=mkspin></div>"
+            "<div><b>Probando conexion con el MikroTik&hellip;</b><br>"
+            "<span style='color:#52514e;font-size:13px'>Espera unos segundos. Si falla, se mostrara el error para revisar la conexion.</span></div></div></div>"
+            "<style>.mkwait{display:none;position:fixed;inset:0;background:rgba(11,11,11,.5);z-index:100;"
+            "align-items:center;justify-content:center}"
+            ".mkwait .mkbox{background:#fff;border-radius:14px;padding:24px 28px;display:flex;align-items:center;gap:16px;"
+            "max-width:420px;box-shadow:0 10px 40px rgba(0,0,0,.3)}"
+            ".mkwait .mkspin{width:30px;height:30px;flex:0 0 auto;border:3px solid #e7e6e2;border-top-color:#2a78d6;"
+            "border-radius:50%;animation:mkspin .8s linear infinite}"
+            "@keyframes mkspin{to{transform:rotate(360deg)}}</style>"
+            "</section>")
     # --- tarjeta: gestion de usuarios estilo tabla (solo admin) ---
     card_users = ""
     if es_admin and yo:
@@ -4280,6 +4292,8 @@ class H(BaseHTTPRequestHandler):
             except OSError:
                 pass
             ok, msg = mk_probar()
+            if not ok:
+                msg += " — Revisa host, puerto, usuario, clave, que el servicio API este activo y permitido desde este servidor."
             return self._html(perfil_page(("Prueba: " + msg), ok=ok))
         if ruta == "/cuarentena/enviar":
             if not self._admin():

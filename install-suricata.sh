@@ -438,10 +438,20 @@ def excluido(src, dst, dport):
             return True
     return False
 
+# Confianza para marcar INFECTADO (nivel 1): no basta el texto de UNA firma. Se exige
+# REPETICION (>= UMBRAL_INFECTADO alertas de nivel 1) o >=2 firmas CnC distintas (SIDs).
+# Una sola alerta de CnC aislada se degrada a nivel 2 "posible, sin confirmar".
+try:
+    UMBRAL_INFECTADO = max(1, int(conf().get("UMBRAL_INFECTADO", "3") or "3"))
+except Exception:
+    UMBRAL_INFECTADO = 3
+
 by_src_nivel = {}
 by_src_expl = {}
 by_src_accion = {}
 by_src_total = Counter()
+n1_hits = Counter()            # alertas de nivel 1 (CnC/botnet) por IP -> repeticion
+n1_sids = defaultdict(set)     # firmas CnC distintas por IP (SID o texto) -> contexto
 pair = defaultdict(Counter)
 total = 0
 seen = 0
@@ -477,6 +487,9 @@ for p in files:
             nivel, expl, accion = clasifica(sig)
             by_src_total[src] += 1
             pair[src][sig] += 1
+            if nivel == 1:
+                n1_hits[src] += 1
+                n1_sids[src].add(a.get("signature_id") or sig)
             if src not in by_src_nivel or nivel < by_src_nivel[src]:
                 by_src_nivel[src] = nivel; by_src_expl[src] = expl; by_src_accion[src] = accion
             total += 1
@@ -485,6 +498,17 @@ for p in files:
 
 host = socket.gethostname()
 NOMBRE = {1: "INFECTADOS (actuar ya)", 2: "ATACANDO / ESCANEANDO (revisar)", 3: "SOSPECHOSOS (vigilar)"}
+
+# Confirmacion de INFECTADO: solo se queda en nivel 1 si hubo repeticion (>= UMBRAL_INFECTADO
+# alertas de nivel 1) o >=2 firmas CnC distintas. Una alerta de CnC aislada baja a nivel 2
+# como "posible, sin confirmar" (evita marcar infectado por el texto de UNA sola firma).
+for ip in list(by_src_nivel):
+    if by_src_nivel[ip] == 1 and not (n1_hits[ip] >= UMBRAL_INFECTADO or len(n1_sids[ip]) >= 2):
+        by_src_nivel[ip] = 2
+        by_src_expl[ip] = (f"posible infeccion SIN confirmar: solo {n1_hits[ip]} alerta(s) de "
+                           f"CnC aislada(s) (se piden {UMBRAL_INFECTADO} o 2 firmas distintas)")
+        by_src_accion[ip] = "confirmar primero: ver si se repite o hay mas indicadores antes de aislar"
+
 grupos = defaultdict(list)
 for ip in by_src_total:
     grupos[by_src_nivel[ip]].append(ip)

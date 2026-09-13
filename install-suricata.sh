@@ -3588,8 +3588,10 @@ def cuarentena_page(msg="", es_admin=False):
     except Exception:
         pass
     edad = f"{int((time.time()-gen)//60)} min" if gen else "-"
-    m = cargar_mk(); activo = mk_configurado() and m.get("ENABLED") == "1"
+    m = cargar_mk(); en = m.get("ENABLED") == "1"; conf_ok = mk_configurado()
+    activo = en and conf_ok
     enviados = cargar_enviados()
+    pendientes = [c for c in cand if c.get("ip") not in enviados]
     def _col(b):
         return {"ALTO": "#e34948", "MEDIO": "#e58a00"}.get(b, "#3a9d5d")
     def _accion(c):
@@ -3619,18 +3621,29 @@ def cuarentena_page(msg="", es_admin=False):
     if not filas:
         filas = "<tr><td colspan=7 class='muted' style='padding:18px;text-align:center'>Sin CPEs infectados confirmados en la ventana. (Un solo aviso de CnC aislado NO entra aqui.)</td></tr>"
     if activo:
-        estado = (f"<div class='banner ok'><b>MikroTik habilitado.</b> Al pulsar <b>Enviar</b> la IP entra a la "
-                  f"address-list <code>{esc(m.get('LIST',''))}</code> (timeout {esc(m.get('TTL','') or 'sin TTL')}) en "
-                  f"<code>{esc(m.get('HOST',''))}</code>. El MikroTik decide con tus reglas. Reversible con <b>Quitar</b>.</div>")
+        btn_todos = ""
+        if es_admin and pendientes:
+            btn_todos = (f"<form method=post action='/cuarentena/enviar-todos' style='display:inline;margin-left:10px'>"
+                         f"<button class='qbtn send' onclick=\"return confirm('Enviar los {len(pendientes)} CPE de la lista a la cuarentena del MikroTik?')\">"
+                         f"&#9888; Enviar todos ({len(pendientes)})</button></form>")
+        estado = (f"<div class='banner ok'><b>MikroTik habilitado.</b> Todo lo que aparece en esta lista se puede "
+                  f"enviar a la address-list <code>{esc(m.get('LIST',''))}</code> (timeout {esc(m.get('TTL','') or 'sin TTL')}) "
+                  f"en <code>{esc(m.get('HOST',''))}</code>; el MikroTik decide con tus reglas. Envia uno con su boton, "
+                  f"o <b>todos</b> de una. Reversible con <b>Quitar</b>.{btn_todos}</div>")
+    elif en and not conf_ok:
+        estado = ("<div class='banner err'><b>Falta configurar la conexion.</b> Marcaste <b>Permitir enviar</b>, pero "
+                  "aun falta <b>host, usuario o clave</b> del MikroTik. Ve a <b>Ajustes &rarr; MikroTik</b>, completa los datos "
+                  "y pulsa <b>Probar conexion</b>. Hasta entonces esta pestana no envia nada.</div>")
     else:
         estado = ("<div class='banner'><b>Modo sugerencia (dry-run).</b> No se envia nada al MikroTik. "
-                  "Para activar el envio, configura y <b>habilita</b> la conexion en <b>Ajustes &rarr; MikroTik</b>.</div>")
+                  "Para activar el envio, configura y marca <b>Permitir enviar</b> en <b>Ajustes &rarr; MikroTik</b>.</div>")
     flash = f"<div class='banner msg'>{esc(msg)}</div>" if msg else ""
     css = ("<style>body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
            "main{max-width:1100px;margin:0 auto;padding:20px 24px}h1{font-size:21px;margin:0 0 4px}"
            ".sub{color:#52514e;margin:0 0 14px}code{background:#f1f1ef;padding:1px 5px;border-radius:4px}"
            ".banner{border:1px solid #f2d3ad;background:#fff7ed;color:#7a4a12;border-radius:10px;padding:11px 14px;margin:0 0 12px;font-size:13px}"
            ".banner.ok{border-color:#b7e0c2;background:#e6f4ea;color:#1a7f37}"
+           ".banner.err{border-color:#f3c4c4;background:#fdecec;color:#b52a2a}"
            ".banner.msg{border-color:#cfe0f6;background:#eef4fd;color:#2a5fa0}"
            ".card{border:1px solid #e7e6e2;border-radius:12px;background:#fff;overflow:hidden}"
            "table{width:100%;border-collapse:collapse;font-size:13px}"
@@ -4053,6 +4066,40 @@ class H(BaseHTTPRequestHandler):
                 return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} enviado a la lista {m.get('LIST')}"))
             mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), err)
             return self._redirect("/cuarentena?msg=" + _up.quote(f"No se pudo enviar {ip}: {err}"))
+        if ruta == "/cuarentena/enviar-todos":
+            if not self._admin():
+                return self._deny()
+            m = cargar_mk()
+            if not (mk_configurado() and m.get("ENABLED") == "1"):
+                return self._redirect("/cuarentena?msg=" + _up.quote("Configura y HABILITA el MikroTik en Ajustes primero"))
+            try:
+                cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8")).get("candidatos", [])
+            except Exception:
+                cq = []
+            env = cargar_enviados()
+            pend = [c for c in cq if c.get("ip") not in env][:50]   # tope de seguridad por accion
+            ok_n = err_n = 0; ult_err = ""
+            for c in pend:
+                ip = c.get("ip", "")
+                try:
+                    ipaddress.ip_address(ip)
+                except Exception:
+                    continue
+                try:
+                    ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {c.get('riesgo',0)} {time.strftime('%Y-%m-%d %H:%M')}")
+                except Exception as ex:
+                    ok, err = False, str(ex)
+                if ok:
+                    env[ip] = {"cuando": int(time.time()), "score": c.get("riesgo", 0), "por": getattr(CTX, "user", "?")}
+                    mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} (masivo)")
+                    ok_n += 1
+                else:
+                    mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), err); err_n += 1; ult_err = err
+                    if "conexion" in (err or "").lower() or "login" in (err or "").lower():
+                        break   # si el router no responde, no seguir intentando
+            guardar_enviados(env)
+            resumen = f"Enviados {ok_n} a cuarentena" + (f", {err_n} con error ({ult_err})" if err_n else "")
+            return self._redirect("/cuarentena?msg=" + _up.quote(resumen))
         if ruta == "/cuarentena/quitar":
             if not self._admin():
                 return self._deny()

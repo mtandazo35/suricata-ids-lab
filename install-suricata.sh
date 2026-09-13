@@ -2100,6 +2100,208 @@ def conf():
 
 CFG = conf()
 
+# ---------------------------------------------------------------- MikroTik (cuarentena Fase B)
+# Empuja IPs de CPEs infectados a una address-list del MikroTik via API. El MikroTik
+# decide que hacer con esa lista (drop/limitar) con las reglas que define el operador.
+# La contrasena API es un SECRETO que se USA (no se verifica): se guarda con chmod 600.
+import socket as _socket, ssl as _ssl, hashlib as _hashlib
+MK_CONF = "/etc/suricata-mikrotik.conf"
+MK_SENT = "/var/log/suricata-cuarentena-enviados.json"   # estado local: IPs ya enviadas
+MK_LOG  = "/var/log/suricata-cuarentena.log"             # bitacora de acciones
+
+def cargar_mk():
+    d = {"HOST": "", "PORT": "8728", "TLS": "0", "USER": "", "PASS": "",
+         "LIST": "suricata-cuarentena", "TTL": "1h", "ENABLED": "0"}
+    try:
+        for l in open(MK_CONF, encoding="utf-8"):
+            l = l.strip()
+            if l and not l.startswith("#") and "=" in l:
+                k, v = l.split("=", 1); d[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return d
+
+def guardar_mk(d):
+    orden = ["HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL", "ENABLED"]
+    txt = ("# Conexion API al MikroTik para la cuarentena. La clave se usa para autenticar\n"
+           "# (no se puede hashear). Archivo con permisos 600.\n"
+           + "".join(f"{k}={d.get(k,'')}\n" for k in orden))
+    tmp = MK_CONF + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(txt)
+    os.replace(tmp, MK_CONF)
+    try: os.chmod(MK_CONF, 0o600)
+    except OSError: pass
+
+def mk_configurado():
+    d = cargar_mk()
+    return bool(d.get("HOST") and d.get("USER") and d.get("PASS"))
+
+# --- cliente minimo de la API de RouterOS (v6.43+ y v7), stdlib pura ---
+def _mk_len(n):
+    if n < 0x80: return bytes([n])
+    if n < 0x4000: return (n | 0x8000).to_bytes(2, "big")
+    if n < 0x200000: return (n | 0xC00000).to_bytes(3, "big")
+    if n < 0x10000000: return (n | 0xE0000000).to_bytes(4, "big")
+    return b"\xF0" + n.to_bytes(4, "big")
+
+def _mk_word(sock, w):
+    b = w.encode("utf-8")
+    sock.sendall(_mk_len(len(b)) + b)
+
+def _mk_send(sock, words):
+    for w in words:
+        _mk_word(sock, w)
+    sock.sendall(b"\x00")
+
+def _mk_rlen(sock):
+    c = sock.recv(1)
+    if not c: raise IOError("conexion cerrada")
+    c = c[0]
+    if c & 0x80 == 0: return c
+    if c & 0xC0 == 0x80: return ((c & 0x3F) << 8) + sock.recv(1)[0]
+    if c & 0xE0 == 0xC0:
+        b = sock.recv(2); return ((c & 0x1F) << 16) + (b[0] << 8) + b[1]
+    if c & 0xF0 == 0xE0:
+        b = sock.recv(3); return ((c & 0x0F) << 24) + (b[0] << 16) + (b[1] << 8) + b[2]
+    b = sock.recv(4); return int.from_bytes(b, "big")
+
+def _mk_read(sock):
+    """Lee una sentencia (lista de palabras hasta la palabra vacia)."""
+    words = []
+    while True:
+        n = _mk_rlen(sock)
+        if n == 0:
+            return words
+        data = b""
+        while len(data) < n:
+            chunk = sock.recv(n - len(data))
+            if not chunk: raise IOError("conexion cerrada")
+            data += chunk
+        words.append(data.decode("utf-8", "replace"))
+
+def _mk_reply(sock):
+    """Junta sentencias hasta !done/!fatal. Devuelve (ok, sentencias, mensaje_error)."""
+    frases, err = [], ""
+    while True:
+        w = _mk_read(sock)
+        if not w:
+            continue
+        frases.append(w)
+        tipo = w[0]
+        if tipo == "!trap" or tipo == "!fatal":
+            for a in w[1:]:
+                if a.startswith("=message="):
+                    err = a[len("=message="):]
+        if tipo == "!done":
+            return (err == "", frases, err)
+        if tipo == "!fatal":
+            return (False, frases, err or "conexion terminada")
+
+def mk_conectar(d, timeout=6):
+    """Abre el socket y hace login. Devuelve el socket o lanza excepcion."""
+    host = d["HOST"]; port = int(d.get("PORT") or (8729 if d.get("TLS") == "1" else 8728))
+    raw = _socket.create_connection((host, port), timeout=timeout)
+    sock = raw
+    if d.get("TLS") == "1":
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False; ctx.verify_mode = _ssl.CERT_NONE
+        sock = ctx.wrap_socket(raw, server_hostname=host)
+    sock.settimeout(timeout)
+    # login moderno (6.43+/v7): usuario y clave directos
+    _mk_send(sock, ["/login", f"=name={d['USER']}", f"=password={d['PASS']}"])
+    ok, frases, err = _mk_reply(sock)
+    if ok:
+        # login viejo (<6.43): !done trae =ret= (reto) -> responder con MD5
+        reto = ""
+        for f in frases:
+            for a in f:
+                if a.startswith("=ret="):
+                    reto = a[len("=ret="):]
+        if reto:
+            md5 = _hashlib.md5(b"\x00" + d["PASS"].encode() + bytes.fromhex(reto)).hexdigest()
+            _mk_send(sock, ["/login", f"=name={d['USER']}", f"=response=00{md5}"])
+            ok, frases, err = _mk_reply(sock)
+    if not ok:
+        try: sock.close()
+        except Exception: pass
+        raise IOError(err or "login rechazado")
+    return sock
+
+def mk_probar():
+    d = cargar_mk()
+    if not (d.get("HOST") and d.get("USER") and d.get("PASS")):
+        return (False, "Falta host, usuario o clave.")
+    try:
+        s = mk_conectar(d)
+        _mk_send(s, ["/system/identity/print"])
+        ok, frases, err = _mk_reply(s)
+        nombre = ""
+        for f in frases:
+            for a in f:
+                if a.startswith("=name="):
+                    nombre = a[len("=name="):]
+        s.close()
+        return (True, f"Conexion OK con '{nombre or d['HOST']}'.")
+    except Exception as e:
+        return (False, f"No conecto: {e}")
+
+def mk_add(ip, comment=""):
+    d = cargar_mk()
+    s = mk_conectar(d)
+    try:
+        words = ["/ip/firewall/address-list/add", f"=list={d.get('LIST','suricata-cuarentena')}",
+                 f"=address={ip}"]
+        if d.get("TTL"):
+            words.append(f"=timeout={d['TTL']}")
+        if comment:
+            words.append(f"=comment={comment[:120]}")
+        _mk_send(s, words)
+        ok, frases, err = _mk_reply(s)
+        return (ok, err)
+    finally:
+        try: s.close()
+        except Exception: pass
+
+def mk_remove(ip):
+    """Quita TODAS las entradas de esa IP en la lista (busca .id y las borra)."""
+    d = cargar_mk(); lst = d.get("LIST", "suricata-cuarentena")
+    s = mk_conectar(d)
+    try:
+        _mk_send(s, ["/ip/firewall/address-list/print", "=.proplist=.id",
+                     f"?list={lst}", f"?address={ip}"])
+        ok, frases, err = _mk_reply(s)
+        ids = [a[len("=.id="):] for f in frases if f and f[0] == "!re" for a in f if a.startswith("=.id=")]
+        for _id in ids:
+            _mk_send(s, ["/ip/firewall/address-list/remove", f"=.id={_id}"])
+            _mk_reply(s)
+        return (True, f"{len(ids)} entrada(s) quitada(s)")
+    finally:
+        try: s.close()
+        except Exception: pass
+
+def cargar_enviados():
+    try:
+        return json.load(open(MK_SENT, encoding="utf-8"))
+    except Exception:
+        return {}
+
+def guardar_enviados(d):
+    try:
+        tmp = MK_SENT + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, MK_SENT)
+    except OSError:
+        pass
+
+def mk_log(accion, ip, quien, detalle=""):
+    try:
+        with open(MK_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {accion} {ip} por={quien} {detalle}\n")
+    except OSError:
+        pass
+
 # ---------------------------------------------------------------- usuarios y roles
 USERS_FILE = "/etc/suricata-dashboard-users.json"
 CTX = threading.local()   # contexto por peticion: user/role del que la hace
@@ -2538,6 +2740,43 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<form method=post action='/update-panel' onsubmit=\"return confirm('Actualizar el panel a la ultima version de GitHub? Se reiniciara en unos segundos.')\">"
             "<div class=actions><button class=primary type=submit>&#8681; Buscar y aplicar actualizaciones</button></div>"
             "</form></section>")
+    # --- tarjeta: conexion al MikroTik para la cuarentena (solo admin) ---
+    card_mk = ""
+    if es_admin and yo:
+        m = cargar_mk()
+        tiene_pass = bool(m.get("PASS"))
+        en = m.get("ENABLED") == "1"
+        tls = m.get("TLS") == "1"
+        card_mk = (
+            "<section class=card><h2>MikroTik (cuarentena)</h2>"
+            "<p class=sub2>Conexion por <b>API</b> para enviar las IPs de CPEs infectados a una "
+            "<b>address-list</b> del MikroTik. El MikroTik decide que hacer con esa lista (drop, limitar) "
+            "con <b>tus</b> reglas de firewall. La clave se guarda solo en este servidor (permisos 600).</p>"
+            "<form method=post action='/mikrotik'>"
+            "<div class=grid2>"
+            f"<div class=field><label>Host / IP del MikroTik</label>"
+            f"<input type=text name=host value=\"{esc(m.get('HOST',''))}\" placeholder='192.168.88.1'></div>"
+            f"<div class=field><label>Puerto API</label>"
+            f"<input type=text name=port value=\"{esc(m.get('PORT','8728'))}\" placeholder='8728 (8729 si TLS)'></div>"
+            f"<div class=field><label>Usuario API</label>"
+            f"<input type=text name=user value=\"{esc(m.get('USER',''))}\" autocomplete=off></div>"
+            f"<div class=field><label>Clave API {'<span style=color:#3a9d5d>(guardada)</span>' if tiene_pass else ''}</label>"
+            "<input type=password name=pass autocomplete=new-password placeholder='"
+            + ("dejar vacio para conservar" if tiene_pass else "clave del usuario API") + "'></div>"
+            f"<div class=field><label>Address-list destino</label>"
+            f"<input type=text name=list value=\"{esc(m.get('LIST','suricata-cuarentena'))}\"></div>"
+            f"<div class=field><label>TTL en la lista (timeout)</label>"
+            f"<input type=text name=ttl value=\"{esc(m.get('TTL','1h'))}\" placeholder='1h, 30m, 1d (vacio = permanente)'></div>"
+            "</div>"
+            "<div class=field style='margin-top:6px'><label class=chk>"
+            f"<input type=checkbox name=tls value=1 {'checked' if tls else ''}> Usar API-SSL (TLS, puerto 8729)</label></div>"
+            "<div class=field><label class=chk>"
+            f"<input type=checkbox name=enabled value=1 {'checked' if en else ''}> "
+            "Habilitar el envio (si esta apagado, la pestana Cuarentena solo sugiere)</label></div>"
+            "<div class=actions>"
+            "<button class=primary type=submit>Guardar</button>"
+            "<button class=cancelbtn type=submit formaction='/mikrotik/test' formnovalidate>Probar conexion</button>"
+            "</div></form></section>")
     # --- tarjeta: gestion de usuarios estilo tabla (solo admin) ---
     card_users = ""
     if es_admin and yo:
@@ -2766,7 +3005,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
             + nav("/ajustes") +
             "<main><h1>Ajustes</h1>"
             "<p class=psub>Tu cuenta, la gestion de usuarios y los datos de la empresa.</p>"
-            + banner + card_pw + card_empresa + card_users + card_acceso + card_update + script +
+            + banner + card_pw + card_empresa + card_users + card_acceso + card_mk + card_update + script +
             "</main></body></html>")
 
 def exclusiones_page(msg="", ok=False, edit_idx=None):
@@ -3288,9 +3527,11 @@ def historico_page():
             + "</tbody></table></main></body></html>")
     return wrap(body, refresh=False, active="/historico")
 
-def cuarentena_page():
-    """Fase A (dry-run): lista de CPEs INFECTADOS CONFIRMADOS candidatos a cuarentena.
-    Solo informa; NO envia nada al MikroTik. La lista la calcula el reporte (cuarentena.json)."""
+def cuarentena_page(msg="", es_admin=False):
+    """Cuarentena: CPEs INFECTADOS CONFIRMADOS. Si el MikroTik esta configurado y HABILITADO
+    y quien mira es admin, aparece el boton Enviar (a la address-list) / Quitar. Si no, dry-run.
+    La lista de candidatos la calcula el reporte (cuarentena.json)."""
+    esc = html.escape
     data, gen, vmin, umbral, cand = {}, 0, 0, 3, []
     try:
         data = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
@@ -3299,23 +3540,50 @@ def cuarentena_page():
     except Exception:
         pass
     edad = f"{int((time.time()-gen)//60)} min" if gen else "-"
+    m = cargar_mk(); activo = mk_configurado() and m.get("ENABLED") == "1"
+    enviados = cargar_enviados()
     def _col(b):
         return {"ALTO": "#e34948", "MEDIO": "#e58a00"}.get(b, "#3a9d5d")
+    def _accion(c):
+        ip = c.get("ip", "")
+        if ip in enviados:
+            e = enviados[ip]
+            cuando = time.strftime("%d/%m %H:%M", time.localtime(e.get("cuando", 0)))
+            quitar = (f"<form method=post action='/cuarentena/quitar' style='display:inline'>"
+                      f"<input type=hidden name=ip value='{esc(ip)}'>"
+                      f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de la cuarentena del MikroTik?')\">Quitar</button></form>"
+                      ) if es_admin else ""
+            return f"<span class='enq' title='En la address-list desde {cuando}'>En cuarentena</span> {quitar}"
+        if es_admin and activo:
+            return (f"<form method=post action='/cuarentena/enviar' style='display:inline'>"
+                    f"<input type=hidden name=ip value='{esc(ip)}'><input type=hidden name=score value='{c.get('riesgo',0)}'>"
+                    f"<button class='qbtn send' onclick=\"return confirm('Enviar {esc(ip)} a la lista {esc(m.get('LIST',''))} del MikroTik?')\">Enviar a cuarentena</button></form>")
+        return "<span class='dry' title='Configura y habilita el MikroTik en Ajustes para activar el envio'>solo sugerencia</span>"
     filas = "".join(
-        f"<tr><td class='mono ipx'>{html.escape(c.get('ip',''))}</td>"
-        f"<td><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {html.escape(c.get('banda',''))}</span></td>"
+        f"<tr><td class='mono ipx'>{esc(c.get('ip',''))}</td>"
+        f"<td><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {esc(c.get('banda',''))}</span></td>"
         f"<td class='mot'>{c.get('alertas_cnc',0)} alertas CnC · {c.get('firmas_cnc',0)} firma(s)<br>"
-        f"<span class='fw'>{html.escape((c.get('firma','') or '')[:70])}</span></td>"
+        f"<span class='fw'>{esc((c.get('firma','') or '')[:70])}</span></td>"
         f"<td class='num'>{c.get('destinos',0)}</td><td class='num'>{c.get('puertos',0)}</td>"
         f"<td class='num'>{c.get('total_alertas',0):,}</td>"
-        f"<td><span class='dry' title='Fase A: aun no se envia nada al MikroTik'>solo sugerencia</span></td></tr>"
+        f"<td>{_accion(c)}</td></tr>"
         for c in cand)
     if not filas:
         filas = "<tr><td colspan=7 class='muted' style='padding:18px;text-align:center'>Sin CPEs infectados confirmados en la ventana. (Un solo aviso de CnC aislado NO entra aqui.)</td></tr>"
+    if activo:
+        estado = (f"<div class='banner ok'><b>MikroTik habilitado.</b> Al pulsar <b>Enviar</b> la IP entra a la "
+                  f"address-list <code>{esc(m.get('LIST',''))}</code> (timeout {esc(m.get('TTL','') or 'sin TTL')}) en "
+                  f"<code>{esc(m.get('HOST',''))}</code>. El MikroTik decide con tus reglas. Reversible con <b>Quitar</b>.</div>")
+    else:
+        estado = ("<div class='banner'><b>Modo sugerencia (dry-run).</b> No se envia nada al MikroTik. "
+                  "Para activar el envio, configura y <b>habilita</b> la conexion en <b>Ajustes &rarr; MikroTik</b>.</div>")
+    flash = f"<div class='banner msg'>{esc(msg)}</div>" if msg else ""
     css = ("<style>body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
            "main{max-width:1100px;margin:0 auto;padding:20px 24px}h1{font-size:21px;margin:0 0 4px}"
-           ".sub{color:#52514e;margin:0 0 14px}"
-           ".banner{background:#fff7ed;border:1px solid #f2d3ad;color:#7a4a12;border-radius:10px;padding:11px 14px;margin:0 0 16px;font-size:13px}"
+           ".sub{color:#52514e;margin:0 0 14px}code{background:#f1f1ef;padding:1px 5px;border-radius:4px}"
+           ".banner{border:1px solid #f2d3ad;background:#fff7ed;color:#7a4a12;border-radius:10px;padding:11px 14px;margin:0 0 12px;font-size:13px}"
+           ".banner.ok{border-color:#b7e0c2;background:#e6f4ea;color:#1a7f37}"
+           ".banner.msg{border-color:#cfe0f6;background:#eef4fd;color:#2a5fa0}"
            ".card{border:1px solid #e7e6e2;border-radius:12px;background:#fff;overflow:hidden}"
            "table{width:100%;border-collapse:collapse;font-size:13px}"
            "thead th{background:#f4f4f2;text-align:left;padding:9px 12px;border-bottom:1px solid #e7e6e2;color:#52514e;font-weight:600}"
@@ -3325,15 +3593,18 @@ def cuarentena_page():
            ".rb{color:#fff;font-weight:800;font-size:12px;padding:2px 9px;border-radius:20px;white-space:nowrap}"
            ".fw{color:#7a4a12;font-size:12px}.mot{max-width:280px}"
            ".dry{background:#eef4fd;color:#2a5fa0;border:1px solid #cfe0f6;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap}"
+           ".enq{background:#fdecec;color:#b52a2a;border:1px solid #f3c4c4;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap}"
+           ".qbtn{font:12px system-ui;font-weight:700;border:0;border-radius:7px;padding:5px 11px;cursor:pointer;color:#fff}"
+           ".qbtn.send{background:#e34948}.qbtn.send:hover{background:#c93b3a}"
+           ".qbtn.quit{background:#6b6a66;margin-left:6px}.qbtn.quit:hover{background:#524f4c}"
            "</style>")
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
-            "<meta http-equiv=refresh content=120><title>Cuarentena</title>" + css + "</head><body><main>"
+            "<title>Cuarentena</title>" + css + "</head><body><main>"
             "<h1>Cuarentena de CPEs infectados</h1>"
             f"<p class='sub'>Candidatos por <b>infeccion confirmada</b> (&ge;{umbral} alertas de CnC o &ge;2 firmas distintas). "
             f"Ventana {vmin} min · lista de hace {edad} · {len(cand)} candidato(s).</p>"
-            "<div class='banner'><b>Fase A — solo sugerencia (dry-run).</b> Esta lista <b>no</b> envia nada al MikroTik todavia; "
-            "es para revisar quien entraria a cuarentena antes de activar el bloqueo real.</div>"
+            + flash + estado +
             "<div class='card'><table><thead><tr>"
             "<th>CPE (IP origen)</th><th>Riesgo</th><th>Motivo (infeccion)</th>"
             "<th class='num'>Destinos</th><th class='num'>Puertos</th><th class='num'>Alertas</th><th>Accion</th>"
@@ -3489,7 +3760,9 @@ class H(BaseHTTPRequestHandler):
         if path == "/historico":
             return self._html(historico_page())
         if path == "/cuarentena":
-            return self._html(cuarentena_page())
+            import urllib.parse as _up
+            _qs = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            return self._html(cuarentena_page(msg=_qs.get("msg", [""])[0], es_admin=self._admin()))
         if path == "/log":
             if not self._admin():
                 return self._redirect("/")   # lectura no ve el log de accesos
@@ -3535,7 +3808,7 @@ class H(BaseHTTPRequestHandler):
         return self._html("<h1>No encontrado</h1>", 404)
     def do_POST(self):
         ruta = self.path.split("?", 1)[0]
-        import urllib.parse
+        import urllib.parse, urllib.parse as _up, ipaddress
         try:
             n = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
@@ -3669,6 +3942,84 @@ class H(BaseHTTPRequestHandler):
             except OSError as ex:
                 return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
             return self._html(perfil_page("Datos de la empresa guardados.", ok=True))
+        if ruta == "/mikrotik":
+            if not self._admin():
+                return self._deny()
+            m = cargar_mk()
+            m["HOST"] = (q.get("host", [""])[0]).strip()[:80]
+            m["PORT"] = (q.get("port", [""])[0]).strip()[:6] or "8728"
+            m["USER"] = (q.get("user", [""])[0]).strip()[:64]
+            npass = q.get("pass", [""])[0]
+            if npass:                                   # vacio = conservar la clave actual
+                m["PASS"] = npass
+            m["LIST"] = (q.get("list", [""])[0]).strip()[:64] or "suricata-cuarentena"
+            m["TTL"] = (q.get("ttl", [""])[0]).strip()[:16]
+            m["TLS"] = "1" if q.get("tls") else "0"
+            m["ENABLED"] = "1" if q.get("enabled") else "0"
+            try:
+                guardar_mk(m)
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            return self._html(perfil_page("Conexion al MikroTik guardada.", ok=True))
+        if ruta == "/mikrotik/test":
+            if not self._admin():
+                return self._deny()
+            m = cargar_mk()                              # guarda lo que este en el form antes de probar
+            m["HOST"] = (q.get("host", [""])[0]).strip()[:80] or m.get("HOST", "")
+            m["PORT"] = (q.get("port", [""])[0]).strip()[:6] or m.get("PORT", "8728")
+            m["USER"] = (q.get("user", [""])[0]).strip()[:64] or m.get("USER", "")
+            npass = q.get("pass", [""])[0]
+            if npass:
+                m["PASS"] = npass
+            m["LIST"] = (q.get("list", [""])[0]).strip()[:64] or m.get("LIST", "suricata-cuarentena")
+            m["TTL"] = (q.get("ttl", [""])[0]).strip()[:16]
+            m["TLS"] = "1" if q.get("tls") else "0"
+            m["ENABLED"] = m.get("ENABLED", "0")
+            try:
+                guardar_mk(m)
+            except OSError:
+                pass
+            ok, msg = mk_probar()
+            return self._html(perfil_page(("Prueba: " + msg), ok=ok))
+        if ruta == "/cuarentena/enviar":
+            if not self._admin():
+                return self._deny()
+            ip = (q.get("ip", [""])[0]).strip()
+            score = (q.get("score", [""])[0]).strip()[:8]
+            try:
+                ipaddress.ip_address(ip)
+            except Exception:
+                return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+            m = cargar_mk()
+            if not (mk_configurado() and m.get("ENABLED") == "1"):
+                return self._redirect("/cuarentena?msg=" + _up.quote("Configura y HABILITA el MikroTik en Ajustes primero"))
+            try:
+                ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}")
+            except Exception as ex:
+                ok, err = False, str(ex)
+            if ok:
+                env = cargar_enviados()
+                env[ip] = {"cuando": int(time.time()), "score": score, "por": getattr(CTX, "user", "?")}
+                guardar_enviados(env)
+                mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} ttl={m.get('TTL')}")
+                return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} enviado a la lista {m.get('LIST')}"))
+            mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), err)
+            return self._redirect("/cuarentena?msg=" + _up.quote(f"No se pudo enviar {ip}: {err}"))
+        if ruta == "/cuarentena/quitar":
+            if not self._admin():
+                return self._deny()
+            ip = (q.get("ip", [""])[0]).strip()
+            try:
+                ipaddress.ip_address(ip)
+            except Exception:
+                return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+            try:
+                ok, err = mk_remove(ip)
+            except Exception as ex:
+                ok, err = False, str(ex)
+            env = cargar_enviados(); env.pop(ip, None); guardar_enviados(env)
+            mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), err)
+            return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
         return self._html("<h1>No encontrado</h1>", 404)
 
     def _post_perfil(self, q):

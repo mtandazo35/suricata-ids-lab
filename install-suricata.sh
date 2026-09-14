@@ -3087,6 +3087,7 @@ _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"
               ("/historico", "Historico"), ("/exclusiones", "Exclusiones"),
               ("/ajustes", "Ajustes")]   # Log y Documentacion viven dentro de Ajustes
 _NAV_CSS = """<style>
+html{scrollbar-gutter:stable}  /* reservar el hueco del scroll: paginas cortas (Exclusiones) y largas (Ajustes) no desplazan el contenido */
 .nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
 font:15px system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25)}
 .nav .navwrap{max-width:1360px;margin:0 auto;padding:0 28px;min-height:58px;display:flex;align-items:center;gap:4px}

@@ -2743,6 +2743,25 @@ def podar_logs():
         except OSError:
             pass
 
+REPORTES_RETENCION_DIAS = 3   # reportes HTML guardados: se borra lo mas viejo que esto
+
+def podar_reportes():
+    """Borra los reportes HTML de mas de REPORTES_RETENCION_DIAS dias, conservando SIEMPRE
+    el mas nuevo (En vivo sirve ese archivo, no debe quedarse sin ninguno)."""
+    corte = time.time() - REPORTES_RETENCION_DIAS * 86400
+    fs = glob.glob(f"{LOGDIR}/report-*.html")
+    if not fs:
+        return
+    nuevo = max(fs, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
+    for f in fs:
+        if f == nuevo:
+            continue
+        try:
+            if os.path.getmtime(f) < corte:
+                os.remove(f)
+        except OSError:
+            pass
+
 # ---------------------------------------------------------------- usuarios y roles
 USERS_FILE = "/etc/suricata-dashboard-users.json"
 CTX = threading.local()   # contexto por peticion: user/role del que la hace
@@ -2969,8 +2988,10 @@ def refrescador():
     ult_poda = 0.0
     while True:
         global FORCE_REGEN
-        if time.time() - ult_poda > 86400:     # poda de logs una vez al dia (retencion 15 dias)
+        if time.time() - ult_poda > 86400:     # 1x/dia: podar logs (15d) y reportes guardados (3d)
             try: podar_logs()
+            except Exception: pass
+            try: podar_reportes()
             except Exception: pass
             ult_poda = time.time()
         nr = newest_report()
@@ -4198,15 +4219,35 @@ def historico_page():
         t = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(f)))
         kb = os.path.getsize(f) // 1024
         rows.append(f'<tr><td><a href="/r/{b}">{b}</a></td><td>{t}</td><td>{kb} KB</td></tr>')
+    pager = ("<div class=pager><button id=hprev type=button onclick=hprev()>&larr; Anterior</button>"
+             "<span id=hpi></span>"
+             "<button id=hnext type=button onclick=hnext()>Siguiente &rarr;</button></div>") if rows else ""
+    script = ("<script>(function(){var SIZE=20,page=0,"
+              "rows=[].slice.call(document.querySelectorAll('#hbody tr'));"
+              "function render(){var pages=Math.max(1,Math.ceil(rows.length/SIZE));"
+              "if(page>=pages)page=pages-1;if(page<0)page=0;"
+              "rows.forEach(function(r,i){r.style.display=(i>=page*SIZE&&i<page*SIZE+SIZE)?'':'none';});"
+              "var pi=document.getElementById('hpi');if(pi)pi.textContent='Pagina '+(page+1)+' de '+pages+' ('+rows.length+' reportes)';"
+              "var pv=document.getElementById('hprev'),nx=document.getElementById('hnext');"
+              "if(pv)pv.disabled=page<=0;if(nx)nx.disabled=page>=pages-1;}"
+              "window.hprev=function(){page--;render();};window.hnext=function(){page++;render();};"
+              "if(rows.length)render();})();</script>") if rows else ""
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
             "<title>Historico</title><style>body{margin:0;background:#fcfcfb;"
             "font:14px system-ui,sans-serif;color:#0b0b0b}main{max-width:800px;margin:0 auto;padding:20px}"
             "table{width:100%;border-collapse:collapse}td{padding:8px;border-bottom:1px solid #e7e6e2}"
-            "a{color:#2a78d6}</style></head><body>"
-            "<main><h1>Reportes guardados</h1><table><tbody>"
+            "a{color:#2a78d6}"
+            ".pager{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}"
+            ".pager button{font:13px system-ui;padding:6px 12px;border:1px solid #d7d6d2;background:#fff;border-radius:8px;cursor:pointer}"
+            ".pager button:hover:not(:disabled){background:#eef4fd;border-color:#2a78d6}"
+            ".pager button:disabled{opacity:.4;cursor:default}.pager #hpi{font-weight:600;font-size:13px;color:#52514e}"
+            "</style></head><body>"
+            "<main><h1>Reportes guardados</h1>"
+            "<p style='color:#8a8a86;font-size:13px;margin:0 0 8px'>Se guardan los ultimos 3 dias.</p>"
+            "<table><tbody id=hbody>"
             + ("".join(rows) or "<tr><td>Sin reportes todavia.</td></tr>")
-            + "</tbody></table></main></body></html>")
+            + "</tbody></table>" + pager + script + "</main></body></html>")
     return wrap(body, refresh=False, active="/historico")
 
 def cuarentena_page(msg="", es_admin=False):

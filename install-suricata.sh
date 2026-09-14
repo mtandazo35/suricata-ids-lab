@@ -1175,7 +1175,7 @@ def ipnum(s):
             return 0
     return 0
 
-top_flujos = sorted(flujos.items(), key=lambda kv: kv[1][0], reverse=True)[:150]
+top_flujos = sorted(flujos.items(), key=lambda kv: kv[1][0], reverse=True)[:500]
 filas = []
 for (src, sport, dst, dport, proto, sig), (cnt, first, last) in top_flujos:
     hp = datetime.fromtimestamp(first, TZ_EC).strftime("%d/%m %H:%M") if first else "-"

@@ -2884,6 +2884,64 @@ def firma_panel():
             pass
     return h.hexdigest()[:10]
 
+# --- deteccion de actualizacion disponible (SHA instalado vs ultimo commit de GitHub) ---
+COMMIT_FILE = "/etc/suricata-dashboard.commit"      # SHA del commit aplicado (lo escribe el updater)
+UPDCHK_FILE = "/var/log/suricata-update-check.json"  # cache del ultimo chequeo contra GitHub
+_UPD_REPO = "mtandazo35/suricata-ids-lab"
+
+def _sha_local():
+    try:
+        return open(COMMIT_FILE, encoding="utf-8").read().strip() or None
+    except OSError:
+        return None
+
+def chequear_update():
+    """Consulta la API de GitHub (best-effort) y cachea si hay commits nuevos y cuales.
+    No lanza: si no hay red o la API falla, deja el cache como estaba."""
+    local = _sha_local()
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{_UPD_REPO}/commits?sha=main&per_page=20",
+            headers={"User-Agent": "suricata-panel", "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.load(r)
+    except Exception:
+        return
+    if not isinstance(data, list) or not data:
+        return
+    latest = data[0].get("sha", "") or ""
+    mejoras = []
+    if local:
+        for c in data:
+            if c.get("sha") == local:
+                break
+            msg = (c.get("commit", {}).get("message", "") or "").split("\n", 1)[0].strip()
+            if msg and not msg.lower().startswith("merge"):
+                mejoras.append(msg)
+    disponible = bool(local) and latest != local and (len(mejoras) > 0 or local not in [c.get("sha") for c in data])
+    out = {"disponible": bool(disponible), "latest": latest, "local": local,
+           "mejoras": mejoras[:12], "n": len(mejoras), "checked": int(time.time())}
+    try:
+        json.dump(out, open(UPDCHK_FILE, "w", encoding="utf-8"))
+    except OSError:
+        pass
+    if not local and latest:
+        # caja sin SHA registrado (instalacion previa a esta funcion): fijar linea base
+        # para no marcar un falso "disponible" sin poder listar las mejoras. El primer
+        # 'Actualizar panel' registrara el SHA real y a partir de ahi el chequeo es exacto.
+        try:
+            open(COMMIT_FILE, "w", encoding="utf-8").write(latest)
+        except OSError:
+            pass
+
+def update_estado():
+    """Lee el cache del chequeo; devuelve dict o None. Solo se muestra si 'disponible'."""
+    try:
+        d = json.load(open(UPDCHK_FILE, encoding="utf-8"))
+        return d if d.get("disponible") else None
+    except Exception:
+        return None
+
 TRUST_FILE = "/etc/suricata-dashboard-trust.json"
 
 def cargar_confianza():
@@ -2986,6 +3044,7 @@ def refrescador():
     """Hilo de fondo: regenera el reporte periodicamente, NUNCA en el request.
     Asi 'En vivo' sirve siempre el ultimo archivo al instante aunque generar tarde."""
     ult_poda = 0.0
+    ult_updchk = 0.0
     while True:
         global FORCE_REGEN
         if time.time() - ult_poda > 86400:     # 1x/dia: podar logs (15d) y reportes guardados (3d)
@@ -2994,6 +3053,10 @@ def refrescador():
             try: podar_reportes()
             except Exception: pass
             ult_poda = time.time()
+        if time.time() - ult_updchk > 21600:   # cada 6h: mirar si hay actualizacion en GitHub
+            try: chequear_update()
+            except Exception: pass
+            ult_updchk = time.time()
         nr = newest_report()
         stale = FORCE_REGEN or (nr is None) or (time.time() - os.path.getmtime(nr) >= REFRESH_SECS)
         if stale:
@@ -3040,6 +3103,20 @@ font-size:15px;font-weight:500;transition:background .15s,color .15s}
 .nav .out{margin-left:14px;color:#f3b0b0;text-decoration:none;font-weight:600;padding:9px 17px;border-radius:8px;font-size:15px;
 border:1px solid rgba(243,176,176,.35);transition:background .15s,color .15s,border-color .15s}
 .nav .out:hover{background:#e34948;color:#fff;border-color:#e34948}
+.nav .updbtn{display:inline-flex;align-items:center;gap:7px;margin-left:14px;cursor:pointer;background:#e67e22;color:#fff;
+border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0 2px 8px rgba(230,126,34,.4)}
+.nav .updbtn:hover{background:#d3691a}
+.nav .updbtn .uddot{width:9px;height:9px;border-radius:50%;background:#fff;animation:udpulse 1.6s infinite}
+@keyframes udpulse{0%{box-shadow:0 0 0 0 rgba(255,255,255,.6)}70%{box-shadow:0 0 0 8px rgba(255,255,255,0)}100%{box-shadow:0 0 0 0 rgba(255,255,255,0)}}
+.updov{display:none;position:fixed;inset:0;background:rgba(11,11,11,.5);z-index:120;align-items:center;justify-content:center;padding:24px}
+.updov .updbox{position:relative;background:#fff;color:#0b0b0b;border-radius:14px;max-width:560px;width:100%;max-height:calc(100vh - 48px);overflow:auto;padding:22px 24px;box-shadow:0 14px 50px rgba(0,0,0,.4)}
+.updov .updx{position:absolute;top:10px;right:12px;border:0;background:#eceae6;width:32px;height:32px;border-radius:50%;font-size:20px;line-height:1;cursor:pointer}
+.updov h3{margin:2px 0 6px;font-size:20px}
+.updov .updsub{color:#52514e;margin:0 0 14px;font-size:14px;line-height:1.5}
+.updov .updlist{margin:0 0 18px;padding-left:20px;max-height:44vh;overflow:auto}
+.updov .updlist li{margin:5px 0;font-size:14px;line-height:1.45}
+.updov .updgo{background:#2a78d6;color:#fff;border:0;padding:11px 18px;border-radius:9px;font:600 15px system-ui;cursor:pointer}
+.updov .updgo:hover{background:#1c5cab}
 .empbar{background:#fff;border-bottom:1px solid #ececec}
 .empbar .empwrap{max-width:1360px;margin:0 auto;padding:7px 28px;display:flex;justify-content:flex-end;align-items:center;gap:10px}
 .empbar .elogo{height:30px;width:auto;max-width:150px;object-fit:contain;display:block}
@@ -3055,8 +3132,34 @@ def nav(active=""):
         cls = "tab on" if h == active else "tab"
         parts.append(f'<a href="{h}" class="{cls}">{t}</a>')
     brand = '<span class="brand"><img class="applogo" src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
+    # boton + modal de 'actualizacion disponible' (solo admin y solo si el chequeo lo marca)
+    upd_btn = ""; upd_modal = ""
+    if getattr(CTX, "role", None) == "admin":
+        ue = update_estado()
+        if ue:
+            mej = ue.get("mejoras") or []
+            if mej:
+                items = "".join(f"<li>{html.escape(m)}</li>" for m in mej)
+            else:
+                items = "<li>Varias mejoras acumuladas del panel y los reportes.</li>"
+            upd_btn = ('<button type=button class=updbtn '
+                       "onclick=\"document.getElementById('updov').style.display='flex'\">"
+                       '<span class=uddot></span>Actualizacion</button>')
+            upd_modal = (
+                "<div id=updov class=updov onclick=\"if(event.target===this)this.style.display='none'\">"
+                "<div class=updbox>"
+                "<button type=button class=updx onclick=\"document.getElementById('updov').style.display='none'\">&times;</button>"
+                "<h3>Actualizacion disponible</h3>"
+                "<p class=updsub>Hay una version nueva del panel en GitHub. Solo se actualiza el codigo "
+                "(no toca tu configuracion). Mejoras incluidas:</p>"
+                f"<ul class=updlist>{items}</ul>"
+                "<form method=post action=/update-panel "
+                "onsubmit=\"return confirm('Actualizar el panel a la ultima version? Se reiniciara en unos segundos.')\">"
+                "<button class=updgo type=submit>&#8681; Actualizar ahora</button>"
+                "</form></div></div>")
     navbar = ('<div class="nav"><div class="navwrap">' + brand + '<span class="push"></span>'
-              + "".join(parts) + '<a href="/logout" class="out">Salir</a></div></div>')
+              + "".join(parts) + '<span class="push"></span>' + upd_btn
+              + '<a href="/logout" class="out">Salir</a></div></div>' + upd_modal)
     # marca de la empresa (logo + nombre) en una franja debajo, alineada a la derecha (bajo Salir)
     emp = cargar_empresa()
     tiene_logo = emp.get("logo", "").startswith("data:image/")
@@ -5335,7 +5438,11 @@ if [ ! -f /etc/cron.d/suricata-feeds ] && [ -f /usr/local/bin/suricata-feeds-upd
 fi
 [ -f /var/lib/suricata-feeds/reputation.lst ] || /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1 || true
 date '+%Y-%m-%d %H:%M:%S' > /etc/suricata-dashboard.updated
-log "actualizado OK; regenerando reporte y reiniciando panel"
+# registrar el SHA aplicado: el panel compara este valor con el ultimo commit de GitHub
+# para saber si hay actualizacion disponible y listar las mejoras nuevas.
+[ -n "$SHA" ] && printf '%s' "$SHA" > /etc/suricata-dashboard.commit
+rm -f /var/log/suricata-update-check.json   # invalidar el cache: ya no hay update pendiente
+log "actualizado OK (${SHA:-main}); regenerando reporte y reiniciando panel"
 # regenerar el reporte YA con el codigo nuevo (respetando la ventana VENTANA_MIN), para
 # que los cambios (tablas/graficos) se vean sin esperar los 30 min del ciclo normal
 VMIN=$(awk -F= '/^VENTANA_MIN=/{print $2}' /etc/suricata-dashboard.conf 2>/dev/null); [ -n "$VMIN" ] || VMIN=1440

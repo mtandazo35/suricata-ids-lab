@@ -5559,21 +5559,36 @@ PY
   if ! awk -v m="$TZSP_MON" '$0 ~ "^  - interface: "m"$"{f=1;next} f&&/^  - interface:/{exit} f&&/^    block-size: 131072/{ok=1} END{exit !ok}' "$CFG"; then
     sed -i "/^  - interface: ${TZSP_MON}\$/a\    block-size: 131072" "$CFG"
   fi
-  # que Suricata no inspeccione en ${IFACE} el propio flujo TZSP (doble CPU + "truncated").
-  # Los datagramas TZSP >1500 B llegan fragmentados y los fragmentos no iniciales no
-  # tienen cabecera UDP. Para NO cegar el trafico espejeado que tambien viene fragmentado,
-  # solo se excluyen los fragmentos dirigidos AL PROPIO SENSOR (destino del espejo TZSP),
-  # no todos los fragmentos IPv4. Si no se puede determinar la IP del sensor, se cae al
-  # filtro amplio anterior (mejor sin falsos "truncated" que arriesgar el reensamblado).
-  SENSOR_IP="$(ip -o -4 addr show dev "$IFACE" scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')"
-  if [ -n "$SENSOR_IP" ]; then
-    BPF="not (udp port ${TZSP_PORT} or (ip[6:2] \& 0x1fff != 0 and dst host ${SENSOR_IP}))"
-  else
-    BPF="not (udp port ${TZSP_PORT} or (ip[6:2] \& 0x1fff != 0))"
-  fi
-  BPF_LINE="    bpf-filter: \"${BPF}\""
-  sed -i "/^\s*bpf-filter: \"not udp port ${TZSP_PORT}\"\s*$/d; /^\s*bpf-filter: \"not (udp port ${TZSP_PORT} or/d" "$CFG"
-  sed -i "0,/^  - interface: ${IFACE}\$/s//&\n${BPF_LINE}/" "$CFG"
+  # En modo espejo, Suricata captura SOLO ${TZSP_MON} (veth estable que crea tzsp-decap).
+  # El bloque af-packet de la NIC fisica (${IFACE}) se ELIMINA: su unico valor era el
+  # trafico de gestion del propio sensor, y ademas ataba a Suricata al NOMBRE de la NIC.
+  # Si la VM se recrea/migra y la NIC se renombra (ens18 -> eth0), ese bloque provocaba
+  # "failed to find interface: No such device" -> Suricata en bucle de reinicios. Al no
+  # nombrar nunca la NIC fisica, un renombrado ya no rompe el sensor. Tambien se retira
+  # cualquier bpf-filter heredado de una corrida anterior (ya no aplica a ${TZSP_MON}).
+  python3 - "$CFG" "$IFACE" "$TZSP_MON" <<'PY'
+import sys, re
+cfg, fis, mon = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = open(cfg, encoding="utf-8").read().split("\n")
+out, i, n, quitado = [], 0, len(lines), False
+in_af = False   # solo tocar la seccion af-packet, no las plantillas de pcap/netmap
+while i < n:
+    l = lines[i]
+    if re.match(r"^af-packet:\s*$", l):
+        in_af = True
+    elif re.match(r"^\S", l):        # cualquier clave de primer nivel cierra af-packet
+        in_af = False
+    # ¿inicio del bloque af-packet de la NIC fisica? (no tocar el de ${mon})
+    if in_af and fis != mon and re.match(r"^  - interface: " + re.escape(fis) + r"\s*$", l):
+        i += 1  # saltar la linea de interface
+        while i < n and not re.match(r"^  - \S", lines[i]) and not re.match(r"^\S", lines[i]):
+            i += 1  # saltar el cuerpo hasta el siguiente '- interface:' o fin de seccion
+        quitado = True
+        continue
+    out.append(l); i += 1
+open(cfg, "w", encoding="utf-8").write("\n".join(out))
+print("af-packet NIC fisica " + fis + (": eliminada (captura solo " + mon + ")" if quitado else ": no estaba"))
+PY
   # checksums: el trafico espejeado llega con csum de offload -> no validar
   sed -i "s#^\(\s*checksum-validation:\)\s*yes#\1 no #" "$CFG"
   # eve.json: con espejo real 'flow' era el 76% del volumen, 'dns' el 15% y 'quic' el 6%
@@ -5654,16 +5669,28 @@ fi
 # de captura ahora y en cada arranque del servicio (drop-in con ExecStartPre).
 ETHTOOL="$(command -v ethtool || echo /usr/sbin/ethtool)"
 OFFLOADS="gro off lro off tso off gso off rx-gro-hw off"
+# Interfaz de captura real: en modo espejo es la veth estable ${TZSP_MON}; en modo
+# directo es la NIC fisica actual. El drop-in NO hardcodea el nombre de la NIC fisica:
+# lo resuelve por la ruta por defecto en CADA arranque, para que un renombrado de la
+# NIC (ens18 -> eth0 al recrear/migrar la VM) no deje a Suricata sin apagar offloads.
+if [ "$TZSP" -eq 1 ]; then
+  CAP_IF="$TZSP_MON"
+  OFFLOAD_PRE="${ETHTOOL} -K ${TZSP_MON} ${OFFLOADS}"
+else
+  CAP_IF="$IFACE"
+  OFFLOAD_PRE="/bin/sh -c 'I=\$(ip -o -4 route show to default 2>/dev/null | awk \"{print \\\$5; exit}\"); [ -n \"\$I\" ] || I=\$(ip -o -4 addr show scope global 2>/dev/null | awk \"{print \\\$2; exit}\"); [ -n \"\$I\" ] && ${ETHTOOL} -K \"\$I\" ${OFFLOADS} || true'"
+fi
 # shellcheck disable=SC2086
-"$ETHTOOL" -K "$IFACE" $OFFLOADS >/dev/null 2>&1 || true
+"$ETHTOOL" -K "$CAP_IF" $OFFLOADS >/dev/null 2>&1 || true
 install -d /etc/systemd/system/suricata.service.d
 cat > /etc/systemd/system/suricata.service.d/10-offload.conf <<UNIT
 # Generado por install-suricata.sh: sin offloads en la interfaz de captura.
+# La NIC fisica se resuelve en cada arranque (no se hardcodea el nombre).
 [Service]
-ExecStartPre=-${ETHTOOL} -K ${IFACE} ${OFFLOADS}
+ExecStartPre=-${OFFLOAD_PRE}
 UNIT
 systemctl daemon-reload
-ok "Offloads apagados en ${IFACE} (gro/lro/tso/gso/rx-gro-hw)."
+ok "Offloads apagados en ${CAP_IF} (gro/lro/tso/gso/rx-gro-hw)."
 
 # ----------------------------------------------------------------------------- servicio
 info "Habilitando servicio..."

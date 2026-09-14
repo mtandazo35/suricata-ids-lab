@@ -2909,18 +2909,31 @@ def chequear_update():
         return
     if not isinstance(data, list) or not data:
         return
+    def _subj(c):
+        return (c.get("commit", {}).get("message", "") or "").split("\n", 1)[0].strip()
+    def _fecha(c):
+        d = (c.get("commit", {}).get("committer", {}) or {}).get("date") \
+            or (c.get("commit", {}).get("author", {}) or {}).get("date") or ""
+        return f"{d[8:10]}/{d[5:7]}/{d[0:4]}" if len(d) >= 10 else ""
     latest = data[0].get("sha", "") or ""
     mejoras = []
-    if local:
-        for c in data:
-            if c.get("sha") == local:
-                break
-            msg = (c.get("commit", {}).get("message", "") or "").split("\n", 1)[0].strip()
-            if msg and not msg.lower().startswith("merge"):
-                mejoras.append(msg)
+    changelog = []
+    seen_local = False
+    for c in data[:12]:
+        sha = c.get("sha", "")
+        if sha == local:
+            seen_local = True
+        s = _subj(c)
+        if not s or s.lower().startswith("merge"):
+            continue
+        nuevo = bool(local) and not seen_local and sha != local
+        if nuevo:
+            mejoras.append(s)
+        changelog.append({"subject": s, "fecha": _fecha(c), "nuevo": nuevo})
     disponible = bool(local) and latest != local and (len(mejoras) > 0 or local not in [c.get("sha") for c in data])
     out = {"disponible": bool(disponible), "latest": latest, "local": local,
-           "mejoras": mejoras[:12], "n": len(mejoras), "checked": int(time.time())}
+           "ultimo": _subj(data[0]), "mejoras": mejoras[:12], "n": len(mejoras),
+           "changelog": changelog[:12], "checked": int(time.time())}
     try:
         json.dump(out, open(UPDCHK_FILE, "w", encoding="utf-8"))
     except OSError:
@@ -2933,6 +2946,30 @@ def chequear_update():
             open(COMMIT_FILE, "w", encoding="utf-8").write(latest)
         except OSError:
             pass
+
+UPDLAST_FILE = "/var/log/suricata-update-last.json"  # ultimo evento de actualizacion (de->a, por quien)
+
+def registrar_update_inicio(usuario):
+    """Antes de lanzar el updater: guarda desde que SHA y quien dispara la actualizacion.
+    El 'a' (SHA nuevo) se lee luego de COMMIT_FILE, que escribe el updater al terminar."""
+    try:
+        json.dump({"from": _sha_local() or "", "by": usuario or "", "at": int(time.time())},
+                  open(UPDLAST_FILE, "w", encoding="utf-8"))
+    except OSError:
+        pass
+
+def update_last():
+    try:
+        return json.load(open(UPDLAST_FILE, encoding="utf-8"))
+    except Exception:
+        return {}
+
+def update_info():
+    """Lee el cache completo del chequeo (haya o no update), para la tarjeta de Ajustes."""
+    try:
+        return json.load(open(UPDCHK_FILE, encoding="utf-8"))
+    except Exception:
+        return {}
 
 def update_estado():
     """Lee el cache del chequeo; devuelve dict o None. Solo se muestra si 'disponible'."""
@@ -3367,18 +3404,67 @@ def perfil_page(msg="", ok=False, edit_user=None):
     # --- tarjeta: actualizar el panel desde GitHub (solo codigo, no config; solo admin) ---
     card_update = ""
     if es_admin and yo:
-        ult = panel_actualizado()
-        ult_txt = f"Ultima actualizacion: <b>{esc(ult)}</b> &middot; " if ult else ""
+        info = update_info()
+        local = _sha_local()
+        disp = bool(info.get("disponible"))
+        sha_corto = (local[:7] if local else None)
+        ultimo = info.get("ultimo") or ""
+        changelog = info.get("changelog") or []
+        last = update_last()
+        _vcss = ("<style>"
+                 ".verhead{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;margin:4px 0 14px}"
+                 ".verlbl{font-size:12px;color:#8a8a86;font-weight:600}"
+                 ".versha{font:700 20px ui-monospace,Menlo,Consolas,monospace;color:#0b0b0b;margin-top:2px}"
+                 ".verbadge{padding:5px 12px;border-radius:20px;font-size:12.5px;font-weight:700;white-space:nowrap}"
+                 ".verbadge.new{background:#1a7f37;color:#fff}.verbadge.ok{background:#e8ece9;color:#4a4a46}"
+                 ".verblk{margin:0 0 12px}.vermsg{font-size:14px;color:#33322f;margin-top:3px}"
+                 ".versep{border:0;border-top:1px solid #ececea;margin:14px 0}"
+                 ".verstatus{display:flex;align-items:center;justify-content:center;gap:8px;font-weight:700;font-size:15px;margin:2px 0 14px}"
+                 ".verstatus.new{color:#1a7f37}.verstatus.ok{color:#52514e}"
+                 ".veractions{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-bottom:12px}.veractions form{margin:0}"
+                 ".verbtn2{background:#eef0f2;color:#33322f;border:1px solid #d7d6d2;padding:11px 16px;border-radius:9px;font:600 14px system-ui;cursor:pointer}"
+                 ".verbtn2:hover{background:#e2e5e8}"
+                 ".verlast{text-align:center;color:#3f7d55;font-size:13px;margin:0 0 16px}"
+                 ".verchg{border:1px solid #e7e6e2;border-radius:10px;overflow:hidden}"
+                 ".verchgh{background:#12161c;color:#fff;text-align:center;font-weight:700;font-size:13.5px;padding:8px}"
+                 ".verchgt{width:100%;border-collapse:collapse;font-size:13.5px}"
+                 ".verchgt td{padding:9px 12px;border-top:1px solid #f0efec;vertical-align:top}"
+                 ".verchgt td.c1{width:66px}.verchgt td.c3{width:94px;color:#8a8a86;white-space:nowrap;text-align:right}"
+                 ".vnew{color:#1a7f37;font-weight:700}"
+                 "</style>")
+        badge = ("<span class='verbadge new'>hay una version nueva</span>" if disp
+                 else "<span class='verbadge ok'>estas al dia</span>")
+        estado = ("<div class='verstatus new'>&#9432; Hay actualizaciones disponibles</div>" if disp
+                  else "<div class='verstatus ok'>&#10003; Estas en la ultima version</div>")
+        btn_upd = ("<form method=post action='/update-panel' "
+                   "onsubmit=\"return confirm('Actualizar el panel a la ultima version? Se reiniciara en unos segundos.')\">"
+                   "<button class=primary type=submit>&#8681; Actualizar ahora</button></form>")
+        btn_buscar = ("<form method=post action='/buscar-update'>"
+                      "<button class=verbtn2 type=submit>Buscar actualizaciones</button></form>")
+        acciones = "<div class=veractions>" + (btn_upd if disp else "") + btn_buscar + "</div>"
+        linea_last = ""
+        if last.get("from") and local:
+            linea_last = (f"<div class=verlast>&#10003; Actualizado de <b>{esc(last['from'][:7])}</b> a "
+                          f"<b>{esc(local[:7])}</b>" + (f" por {esc(last.get('by',''))}" if last.get('by') else "") + ".</div>")
+        tabla = ""
+        if changelog:
+            filas = ""
+            for c in changelog:
+                et = "<span class=vnew>Nuevo</span>" if c.get("nuevo") else ""
+                filas += (f"<tr><td class=c1>{et}</td><td>{esc(c.get('subject',''))}</td>"
+                          f"<td class=c3>{esc(c.get('fecha',''))}</td></tr>")
+            tabla = ("<div class=verchg><div class=verchgh>Registro de cambios</div>"
+                     f"<table class=verchgt><tbody>{filas}</tbody></table></div>")
         card_update = (
-            "<section class=card><h2>Actualizar panel</h2>"
-            "<p class=sub2>Descarga la ultima version del panel desde GitHub. <b>Solo actualiza el codigo</b> "
-            "del panel y de los reportes; <b>no toca tu configuracion</b> (usuarios, exclusiones, empresa, "
-            "IPs de confianza, clave, ni HOME_NET/Suricata).</p>"
-            f"<p class=sub2>{ult_txt}Firma del codigo instalado: <b class=mono>{firma_panel()}</b> "
-            "<span style='color:#8a8a86'>(si cambia despues de actualizar, se aplico codigo nuevo)</span></p>"
-            "<form method=post action='/update-panel' onsubmit=\"return confirm('Actualizar el panel a la ultima version de GitHub? Se reiniciara en unos segundos.')\">"
-            "<div class=actions><button class=primary type=submit>&#8681; Buscar y aplicar actualizaciones</button></div>"
-            "</form></section>")
+            _vcss + "<section class=card><h2>Version y actualizaciones</h2>"
+            "<div class=verhead><div><div class=verlbl>Version desplegada</div>"
+            f"<div class=versha>{esc(sha_corto) if sha_corto else '&mdash;'}</div></div>{badge}</div>"
+            f"<div class=verblk><div class=verlbl>Ultimo cambio</div>"
+            f"<div class=vermsg>{esc(ultimo) if ultimo else 'Pulsa <b>Buscar actualizaciones</b> para consultar GitHub.'}</div></div>"
+            "<hr class=versep>" + estado + acciones + linea_last + tabla +
+            "<p class=sub2 style='margin-top:14px;color:#8a8a86'>Solo actualiza el codigo del panel y de los reportes; "
+            "no toca tu configuracion (usuarios, exclusiones, empresa, IPs de confianza, clave, ni HOME_NET/Suricata).</p>"
+            "</section>")
     # --- tarjeta: conexion al MikroTik para la cuarentena (solo admin) ---
     card_mk = ""
     if es_admin and yo:
@@ -3689,7 +3775,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
              + _tile("usuarios", "Usuarios y roles", _IC_USERS, bool(card_users))
              + _tile("acceso", "IPs de confianza", _IC_SHIELD, bool(card_acceso))
              + _tile("mikrotik", "MikroTik", _IC_RTR, bool(card_mk))
-             + _tile("update", "Actualizar panel", _IC_DL, bool(card_update))
+             + _tile("update", "Actualizaciones", _IC_DL, bool(card_update))
              + _tile("log", "Log", _IC_LOG, es_admin)
              + _tile("doc", "Documentacion", _IC_BOOK, True))
     hub = f"<div class=hubgrid>{tiles}</div>"
@@ -4791,9 +4877,22 @@ class H(BaseHTTPRequestHandler):
             global FORCE_REGEN
             FORCE_REGEN = True   # el refrescador regenera el resumen con la nueva ventana en <=10 s
             return self._redirect("/")
+        if ruta == "/buscar-update":
+            if not self._admin():
+                return self._deny()
+            try:
+                chequear_update()
+                d = update_info()
+                msg = ("Hay una version nueva disponible." if d.get("disponible")
+                       else "Estas en la ultima version.")
+                ok = True
+            except Exception:
+                msg, ok = "No se pudo consultar GitHub (sin red o limite de la API).", False
+            return self._html(perfil_page(msg, ok=ok))
         if ruta == "/update-panel":
             if not self._admin():
                 return self._deny()
+            registrar_update_inicio(getattr(CTX, "user", ""))  # de-que-SHA y quien, para el registro
             # el actualizador reinicia el panel: se lanza DESACOPLADO (systemd-run) para
             # que sobreviva al reinicio; si no hay systemd-run, con setsid como respaldo.
             try:

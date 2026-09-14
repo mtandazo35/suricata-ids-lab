@@ -2932,7 +2932,7 @@ def refrescador():
 _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
               ("/cuarentena", "Cuarentena"),
               ("/historico", "Historico"), ("/exclusiones", "Exclusiones"),
-              ("/ajustes", "Ajustes"), ("/log", "Log"), ("/documentacion", "Documentacion")]
+              ("/ajustes", "Ajustes")]   # Log y Documentacion viven dentro de Ajustes
 _NAV_CSS = """<style>
 .nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
 font:15px system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25)}
@@ -3049,6 +3049,17 @@ _IC_EDIT = ('<svg viewBox="0 0 24 24" width="15" height="15"><path fill="current
             'l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>')
 _IC_DEL = ('<svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" '
            'd="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>')
+
+def _ic(d):   # icono redondo del hub de Ajustes (32px, blanco)
+    return f'<svg viewBox="0 0 24 24" width="32" height="32"><path fill="currentColor" d="{d}"/></svg>'
+_IC_USER  = _ic("M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z")
+_IC_BLD   = _ic("M12 7V3H2v18h20V7H12zM6 19H4v-2h2v2zm0-4H4v-2h2v2zm0-4H4V9h2v2zm0-4H4V5h2v2zm4 12H8v-2h2v2zm0-4H8v-2h2v2zm0-4H8V9h2v2zm0-4H8V5h2v2zm10 12h-8v-2h2v-2h-2v-2h2v-2h-2V9h8v10zm-2-8h-2v2h2v-2zm0 4h-2v2h2v-2z")
+_IC_USERS = _ic("M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5s-3 1.34-3 3 1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z")
+_IC_SHIELD= _ic("M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z")
+_IC_RTR   = _ic("M19 15h-1v-3a1 1 0 0 0-1-1h-4V9h1a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h1v2H7a1 1 0 0 0-1 1v3H5a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-2a2 2 0 0 0-2-2H8v-2h8v2h-1a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2a2 2 0 0 0-2-2z")
+_IC_DL    = _ic("M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z")
+_IC_LOG   = _ic("M3 5h18v2H3V5zm0 6h18v2H3v-2zm0 6h12v2H3v-2z")
+_IC_BOOK  = _ic("M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z")
 
 def _card_politicas(m):
     """Sub-bloque de la tarjeta MikroTik: politicas por banda de riesgo del Top origenes."""
@@ -3451,13 +3462,56 @@ def perfil_page(msg="", ok=False, edit_user=None):
               "var f=rs[i].getAttribute('data-f')||'';rs[i].style.display=f.indexOf(q)>=0?'':'none';}}"
               "document.addEventListener('keydown',function(e){if(e.key==='Escape'){cerrar('ovlNew');cerrar('ovlEdit');}});"
               "</script>")
+    # --- hub de accesos: cada apartado abre su contenido (Log y Documentacion incluidos) ---
+    def _tile(sid, label, icon, card=None, href=None):
+        if href is None and not card:
+            return ""
+        target = (f"href='{href}'" if href
+                  else f"href='#{sid}' onclick=\"return apt('{sid}')\"")
+        return (f"<a class=hubt {target}><span class=hubc>{icon}</span>"
+                f"<span class=hubl>{esc(label)}</span></a>")
+    tiles = (_tile("perfil", "Perfil", _IC_USER, card=card_pw)
+             + _tile("empresa", "Empresa", _IC_BLD, card=card_empresa)
+             + _tile("usuarios", "Usuarios y roles", _IC_USERS, card=card_users)
+             + _tile("acceso", "IPs de confianza", _IC_SHIELD, card=card_acceso)
+             + _tile("mikrotik", "MikroTik", _IC_RTR, card=card_mk)
+             + _tile("update", "Actualizar panel", _IC_DL, card=card_update)
+             + (_tile("log", "Log", _IC_LOG, href="/log") if es_admin else "")
+             + _tile("doc", "Documentacion", _IC_BOOK, href="/documentacion"))
+    hub = f"<div id=hub class=hubgrid>{tiles}</div>"
+    def _apt(sid, card):
+        return f"<div class=apt id=apt-{sid} hidden>{card}</div>" if card else ""
+    apts = (_apt("perfil", card_pw) + _apt("empresa", card_empresa) + _apt("usuarios", card_users)
+            + _apt("acceso", card_acceso) + _apt("mikrotik", card_mk) + _apt("update", card_update))
+    back = "<a id=hubback class=hubback hidden href='#' onclick=\"return volverhub()\">&larr; Volver a Ajustes</a>"
+    hubcss = ("<style>.hubgrid{display:flex;flex-wrap:wrap;gap:22px;margin:16px 0}"
+              ".hubt{display:flex;flex-direction:column;align-items:center;gap:9px;width:118px;text-decoration:none;color:#33322f}"
+              ".hubc{width:90px;height:90px;border-radius:50%;background:#109c8e;color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(16,156,142,.28);transition:transform .12s,box-shadow .12s}"
+              ".hubt:hover .hubc{transform:translateY(-3px);box-shadow:0 9px 20px rgba(16,156,142,.4)}"
+              ".hubl{font-size:13px;font-weight:600;text-align:center;line-height:1.2}"
+              ".hubback{display:inline-block;margin:2px 0 14px;color:#2a78d6;text-decoration:none;font-weight:600}"
+              ".hubback:hover{text-decoration:underline}</style>")
+    hubjs = ("<script>function apt(id){document.getElementById('hub').hidden=true;"
+             "var a=document.querySelectorAll('.apt');for(var i=0;i<a.length;i++)a[i].hidden=true;"
+             "var el=document.getElementById('apt-'+id);if(el)el.hidden=false;"
+             "document.getElementById('hubback').hidden=false;window.scrollTo(0,0);"
+             "try{sessionStorage.setItem('apt',id);history.replaceState(null,'','#'+id);}catch(e){}return false;}"
+             "function volverhub(){document.getElementById('hub').hidden=false;"
+             "var a=document.querySelectorAll('.apt');for(var i=0;i<a.length;i++)a[i].hidden=true;"
+             "document.getElementById('hubback').hidden=true;"
+             "try{sessionStorage.removeItem('apt');history.replaceState(null,'','#');}catch(e){}return false;}"
+             "(function(){var h=(location.hash||'').replace('#','');"
+             "if(h&&document.getElementById('apt-'+h)){apt(h);return;}"
+             "var fl=document.getElementById('aptflash');"
+             "if(fl&&fl.innerHTML.trim()){var la=null;try{la=sessionStorage.getItem('apt');}catch(e){}"
+             "if(la&&document.getElementById('apt-'+la))apt(la);}})();</script>")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Ajustes</title>"
-            f"<style>{css}</style></head><body>"
+            f"<style>{css}</style>" + hubcss + "</head><body>"
             + nav("/ajustes") +
             "<main><h1>Ajustes</h1>"
-            "<p class=psub>Tu cuenta, la gestion de usuarios y los datos de la empresa.</p>"
-            + banner + card_pw + card_empresa + card_users + card_acceso + card_mk + card_update + script +
+            "<p class=psub>Entra a cada apartado para ver o cambiar su informacion.</p>"
+            f"<div id=aptflash>{banner}</div>" + back + hub + apts + script + hubjs +
             "</main></body></html>")
 
 def exclusiones_page(msg="", ok=False, edit_idx=None):

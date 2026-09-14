@@ -2942,6 +2942,27 @@ def update_estado():
     except Exception:
         return None
 
+_UPD_KICK_TS = 0.0
+_UPD_KICK_LOCK = threading.Lock()
+
+def _kick_update_check():
+    """Refresca el chequeo en segundo plano cuando un admin navega, como mucho cada 30 min,
+    para que el aviso aparezca poco despues de subir un cambio (sin esperar el ciclo de 6h)
+    y sin bloquear el request (la llamada de red va en un hilo aparte)."""
+    global _UPD_KICK_TS
+    now = time.time()
+    if now - _UPD_KICK_TS < 1800:
+        return
+    if not _UPD_KICK_LOCK.acquire(blocking=False):
+        return
+    _UPD_KICK_TS = now
+    def _run():
+        try:
+            chequear_update()
+        finally:
+            _UPD_KICK_LOCK.release()
+    threading.Thread(target=_run, daemon=True).start()
+
 TRUST_FILE = "/etc/suricata-dashboard-trust.json"
 
 def cargar_confianza():
@@ -3136,6 +3157,7 @@ def nav(active=""):
     # boton + modal de 'actualizacion disponible' (solo admin y solo si el chequeo lo marca)
     upd_btn = ""; upd_modal = ""
     if getattr(CTX, "role", None) == "admin":
+        _kick_update_check()      # refresco oportunista (guardado a 30 min, en segundo plano)
         ue = update_estado()
         if ue:
             mej = ue.get("mejoras") or []

@@ -3462,56 +3462,59 @@ def perfil_page(msg="", ok=False, edit_user=None):
               "var f=rs[i].getAttribute('data-f')||'';rs[i].style.display=f.indexOf(q)>=0?'':'none';}}"
               "document.addEventListener('keydown',function(e){if(e.key==='Escape'){cerrar('ovlNew');cerrar('ovlEdit');}});"
               "</script>")
-    # --- hub de accesos: cada apartado abre su contenido (Log y Documentacion incluidos) ---
-    def _tile(sid, label, icon, card=None, href=None):
-        if href is None and not card:
+    # --- hub de accesos: cada apartado abre en su MODAL (Log y Documentacion incluidos) ---
+    def _tile(sid, label, icon, show=True):
+        if not show:
             return ""
-        target = (f"href='{href}'" if href
-                  else f"href='#{sid}' onclick=\"return apt('{sid}')\"")
-        return (f"<a class=hubt {target}><span class=hubc>{icon}</span>"
-                f"<span class=hubl>{esc(label)}</span></a>")
-    tiles = (_tile("perfil", "Perfil", _IC_USER, card=card_pw)
-             + _tile("empresa", "Empresa", _IC_BLD, card=card_empresa)
-             + _tile("usuarios", "Usuarios y roles", _IC_USERS, card=card_users)
-             + _tile("acceso", "IPs de confianza", _IC_SHIELD, card=card_acceso)
-             + _tile("mikrotik", "MikroTik", _IC_RTR, card=card_mk)
-             + _tile("update", "Actualizar panel", _IC_DL, card=card_update)
-             + (_tile("log", "Log", _IC_LOG, href="/log") if es_admin else "")
-             + _tile("doc", "Documentacion", _IC_BOOK, href="/documentacion"))
-    hub = f"<div id=hub class=hubgrid>{tiles}</div>"
-    def _apt(sid, card):
-        return f"<div class=apt id=apt-{sid} hidden>{card}</div>" if card else ""
-    apts = (_apt("perfil", card_pw) + _apt("empresa", card_empresa) + _apt("usuarios", card_users)
-            + _apt("acceso", card_acceso) + _apt("mikrotik", card_mk) + _apt("update", card_update))
-    back = "<a id=hubback class=hubback hidden href='#' onclick=\"return volverhub()\">&larr; Volver a Ajustes</a>"
-    hubcss = ("<style>.hubgrid{display:flex;flex-wrap:wrap;gap:22px;margin:16px 0}"
-              ".hubt{display:flex;flex-direction:column;align-items:center;gap:9px;width:118px;text-decoration:none;color:#33322f}"
+        return (f"<a class=hubt href='#' onclick=\"return openm('{sid}')\">"
+                f"<span class=hubc>{icon}</span><span class=hubl>{esc(label)}</span></a>")
+    tiles = (_tile("perfil", "Perfil", _IC_USER, bool(card_pw))
+             + _tile("empresa", "Empresa", _IC_BLD, bool(card_empresa))
+             + _tile("usuarios", "Usuarios y roles", _IC_USERS, bool(card_users))
+             + _tile("acceso", "IPs de confianza", _IC_SHIELD, bool(card_acceso))
+             + _tile("mikrotik", "MikroTik", _IC_RTR, bool(card_mk))
+             + _tile("update", "Actualizar panel", _IC_DL, bool(card_update))
+             + _tile("log", "Log", _IC_LOG, es_admin)
+             + _tile("doc", "Documentacion", _IC_BOOK, True))
+    hub = f"<div class=hubgrid>{tiles}</div>"
+    def _modal(sid, contenido):
+        return (f"<div class=aptmodal id=m-{sid} onclick=\"if(event.target===this)closem()\">"
+                f"<div class=aptbox><button type=button class=aptx onclick=closem() title=Cerrar>&times;</button>"
+                f"{contenido}</div></div>")
+    def _mcard(sid, card):
+        return _modal(sid, card) if card else ""
+    modals = (_mcard("perfil", card_pw) + _mcard("empresa", card_empresa) + _mcard("usuarios", card_users)
+              + _mcard("acceso", card_acceso) + _mcard("mikrotik", card_mk) + _mcard("update", card_update))
+    if es_admin:
+        modals += _modal("log", "<iframe class=aptframe data-src='/log?embed=1'></iframe>")
+    modals += _modal("doc", "<iframe class=aptframe data-src='/documentacion?embed=1'></iframe>")
+    hubcss = ("<style>.hubgrid{display:flex;flex-wrap:wrap;gap:22px;margin:18px 0}"
+              ".hubt{display:flex;flex-direction:column;align-items:center;gap:9px;width:118px;text-decoration:none;color:#33322f;cursor:pointer}"
               ".hubc{width:90px;height:90px;border-radius:50%;background:#109c8e;color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(16,156,142,.28);transition:transform .12s,box-shadow .12s}"
               ".hubt:hover .hubc{transform:translateY(-3px);box-shadow:0 9px 20px rgba(16,156,142,.4)}"
               ".hubl{font-size:13px;font-weight:600;text-align:center;line-height:1.2}"
-              ".hubback{display:inline-block;margin:2px 0 14px;color:#2a78d6;text-decoration:none;font-weight:600}"
-              ".hubback:hover{text-decoration:underline}</style>")
-    hubjs = ("<script>function apt(id){document.getElementById('hub').hidden=true;"
-             "var a=document.querySelectorAll('.apt');for(var i=0;i<a.length;i++)a[i].hidden=true;"
-             "var el=document.getElementById('apt-'+id);if(el)el.hidden=false;"
-             "document.getElementById('hubback').hidden=false;window.scrollTo(0,0);"
-             "try{sessionStorage.setItem('apt',id);history.replaceState(null,'','#'+id);}catch(e){}return false;}"
-             "function volverhub(){document.getElementById('hub').hidden=false;"
-             "var a=document.querySelectorAll('.apt');for(var i=0;i<a.length;i++)a[i].hidden=true;"
-             "document.getElementById('hubback').hidden=true;"
-             "try{sessionStorage.removeItem('apt');history.replaceState(null,'','#');}catch(e){}return false;}"
-             "(function(){var h=(location.hash||'').replace('#','');"
-             "if(h&&document.getElementById('apt-'+h)){apt(h);return;}"
-             "var fl=document.getElementById('aptflash');"
-             "if(fl&&fl.innerHTML.trim()){var la=null;try{la=sessionStorage.getItem('apt');}catch(e){}"
-             "if(la&&document.getElementById('apt-'+la))apt(la);}})();</script>")
+              ".aptmodal{display:none;position:fixed;inset:0;background:rgba(11,11,11,.5);z-index:90;align-items:flex-start;justify-content:center;padding:24px;overflow:auto}"
+              ".aptmodal .aptbox{position:relative;background:#fcfcfb;border-radius:14px;max-width:980px;width:100%;max-height:90vh;overflow:auto;padding:16px 20px 24px;box-shadow:0 12px 48px rgba(0,0,0,.35)}"
+              ".aptmodal .aptx{position:absolute;top:10px;right:12px;border:0;background:#eceae6;color:#33322f;width:32px;height:32px;border-radius:50%;font-size:20px;line-height:1;cursor:pointer;z-index:2}"
+              ".aptmodal .aptx:hover{background:#e34948;color:#fff}"
+              ".aptmodal .aptframe{width:100%;height:74vh;border:0;border-radius:8px;background:#fff}"
+              "</style>")
+    hubjs = ("<script>function openm(id){var mo=document.getElementById('m-'+id);if(!mo)return false;"
+             "var fr=mo.querySelector('iframe[data-src]');if(fr&&!fr.src){fr.src=fr.getAttribute('data-src');}"
+             "mo.style.display='flex';document.body.style.overflow='hidden';"
+             "try{sessionStorage.setItem('apt',id);}catch(e){}return false;}"
+             "function closem(){var a=document.querySelectorAll('.aptmodal');for(var i=0;i<a.length;i++)a[i].style.display='none';"
+             "document.body.style.overflow='';try{sessionStorage.removeItem('apt');}catch(e){}}"
+             "document.addEventListener('keydown',function(e){if(e.key==='Escape')closem();});"
+             "(function(){var fl=document.getElementById('aptflash');"
+             "if(fl&&fl.innerHTML.trim()){var la=null;try{la=sessionStorage.getItem('apt');}catch(e){}if(la)openm(la);}})();</script>")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Ajustes</title>"
             f"<style>{css}</style>" + hubcss + "</head><body>"
             + nav("/ajustes") +
             "<main><h1>Ajustes</h1>"
-            "<p class=psub>Entra a cada apartado para ver o cambiar su informacion.</p>"
-            f"<div id=aptflash>{banner}</div>" + back + hub + apts + script + hubjs +
+            "<p class=psub>Toca cada apartado para abrirlo.</p>"
+            f"<div id=aptflash>{banner}</div>" + hub + modals + script + hubjs +
             "</main></body></html>")
 
 def exclusiones_page(msg="", ok=False, edit_idx=None):
@@ -3711,7 +3714,7 @@ def update_box():
         'Con este boton la fuerzas ahora sin esperar; descarga ET Open y recarga en caliente.</p>'
         f'{boton}</div>')
 
-def documentacion_page():
+def documentacion_page(embed=False):
     port = CFG.get("PORT", "5637")
     ubox = update_box()
     refresh_meta = "<meta http-equiv=refresh content='15;url=/documentacion#reglas'>" if UPDATE["running"] else ""
@@ -4022,7 +4025,7 @@ router deja de responder, se detiene y avisa). Cada IP queda con su <b>TTL</b> y
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>" + refresh_meta +
             "<title>Documentacion</title><style>" + wcss + "</style></head><body>"
-            + nav("/documentacion") +
+            + ("" if embed else nav("/documentacion")) +
             "<div class=wiki>"
             "<aside class=toc><div class=toch>Contenido</div><nav><ol>" + toc + "</ol></nav></aside>"
             "<article><h1>Documentacion</h1>"
@@ -4031,7 +4034,7 @@ router deja de responder, se detiene y avisa). Cada IP queda con su <b>TTL</b> y
             "</article></div></body></html>")
     return body
 
-def log_page():
+def log_page(embed=False):
     """Pestana Log: actividad del panel (accesos + acciones de cuarentena). Solo admin."""
     esc = html.escape
     _col = {"OK": "#12b886", "FAIL": "#e34948", "BLOQUEADO": "#eb6834",
@@ -4099,7 +4102,7 @@ def log_page():
               "if(rows.length)render();})();</script>")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Log de actividad</title>"
-            f"<style>{css}</style></head><body>" + nav("/log") +
+            f"<style>{css}</style></head><body>" + ("" if embed else nav("/log")) +
             "<main><h1>Log de actividad</h1>"
             "<p class=sub2>Accesos al panel y acciones de cuarentena (quien envio o quito una IP). "
             f"Los registros de mas de {LOG_RETENCION_DIAS} dias se borran solos.</p>"
@@ -4436,7 +4439,7 @@ class H(BaseHTTPRequestHandler):
         if path == "/log":
             if not self._admin():
                 return self._redirect("/")   # lectura no ve el log de accesos
-            return self._html(log_page())
+            return self._html(log_page(embed=("embed=1" in (self.path.split("?", 1)[1] if "?" in self.path else ""))))
         if path == "/perfil":
             return self._redirect("/ajustes")
         if path == "/ajustes":
@@ -4465,7 +4468,7 @@ class H(BaseHTTPRequestHandler):
                     edit = None
             return self._html(exclusiones_page(edit_idx=edit))
         if path == "/documentacion":
-            return self._html(documentacion_page())
+            return self._html(documentacion_page(embed=("embed=1" in (self.path.split("?", 1)[1] if "?" in self.path else ""))))
         m = re.match(r"^/r/(report-[0-9A-Za-z_-]+\.html)$", path)
         if m:
             f = os.path.join(LOGDIR, m.group(1))

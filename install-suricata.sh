@@ -3201,19 +3201,31 @@ def perfil_page(msg="", ok=False, edit_user=None):
             + _card_politicas(m) +
             "<div class=actions>"
             "<button class=primary type=submit>Guardar</button>"
-            "<button class=cancelbtn type=submit formaction='/mikrotik/test' formnovalidate "
-            "onclick=\"document.getElementById('mkwait').style.display='flex'\">Probar conexion</button>"
+            "<button class=cancelbtn type=button onclick=\"mktest(this)\">Probar conexion</button>"
             "</div></form>"
-            "<div id=mkwait class=mkwait><div class=mkbox><div class=mkspin></div>"
-            "<div><b>Probando conexion con el MikroTik&hellip;</b><br>"
-            "<span style='color:#52514e;font-size:13px'>Espera unos segundos. Si falla, se mostrara el error para revisar la conexion.</span></div></div></div>"
+            "<div id=mkwait class=mkwait onclick=\"if(event.target===this)this.style.display='none'\">"
+            "<div class=mkbox><div class=mkspin></div><div><b>Probando conexion&hellip;</b></div></div></div>"
             "<style>.mkwait{display:none;position:fixed;inset:0;background:rgba(11,11,11,.5);z-index:100;"
             "align-items:center;justify-content:center}"
             ".mkwait .mkbox{background:#fff;border-radius:14px;padding:24px 28px;display:flex;align-items:center;gap:16px;"
-            "max-width:420px;box-shadow:0 10px 40px rgba(0,0,0,.3)}"
+            "max-width:440px;box-shadow:0 10px 40px rgba(0,0,0,.3)}"
             ".mkwait .mkspin{width:30px;height:30px;flex:0 0 auto;border:3px solid #e7e6e2;border-top-color:#2a78d6;"
             "border-radius:50%;animation:mkspin .8s linear infinite}"
             "@keyframes mkspin{to{transform:rotate(360deg)}}</style>"
+            "<script>function mkclose(){document.getElementById('mkwait').style.display='none';}"
+            "function mktest(btn){var f=btn.form,mo=document.getElementById('mkwait'),bx=mo.querySelector('.mkbox');"
+            "bx.innerHTML=\"<div class='mkspin'></div><div><b>Probando conexion&hellip;</b><br><span style='color:#52514e;font-size:13px'>Espera unos segundos.</span></div>\";"
+            "mo.style.display='flex';"
+            "var d=new URLSearchParams(new FormData(f));d.set('ajax','1');"
+            "fetch('/mikrotik/test',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:d.toString()})"
+            ".then(function(r){return r.text();}).then(function(t){var ok=t.indexOf('OK')===0;"
+            "var msg=t.replace(/^OK /,'').replace(/^ERR: /,'').replace(/</g,'&lt;');"
+            "bx.innerHTML=\"<div style='font-size:30px;line-height:1'>\"+(ok?'\\u2705':'\\u26D4')+\"</div>\"+"
+            "\"<div><b>\"+(ok?'Conexion OK':'No conecto')+\"</b><br>\"+"
+            "\"<span style='color:#52514e;font-size:13px'>\"+msg+\"</span><br>\"+"
+            "\"<button type=button class=cancelbtn style='margin-top:12px' onclick='mkclose()'>Cerrar</button></div>\";})"
+            ".catch(function(e){bx.innerHTML=\"<div><b>Error</b><br>\"+e+"
+            "\"<br><button type=button class=cancelbtn style='margin-top:10px' onclick='mkclose()'>Cerrar</button></div>\";});}</script>"
             "</section>")
     # --- tarjeta: gestion de usuarios estilo tabla (solo admin) ---
     card_users = ""
@@ -4602,6 +4614,12 @@ class H(BaseHTTPRequestHandler):
                             "No necesitas certificado (se usan cifrados ADH). Si sigue, prueba API plano: desmarca API-SSL y usa 8728.")
                 else:
                     msg += " — Revisa host, puerto, usuario, clave, que el servicio API este activo y permitido desde este servidor."
+            if q.get("ajax"):   # desde el modal: texto plano, sin recargar la pagina
+                b = (("OK " if ok else "ERR: ") + msg).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers(); self.wfile.write(b); return
             return self._html(perfil_page(("Prueba: " + msg), ok=ok))
         if ruta == "/cuarentena/enviar":
             if not self._admin():

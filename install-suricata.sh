@@ -639,19 +639,48 @@ for name, url in FEEDS:
         sys.stderr.write(f"{name}: fallo {e}\n")
     sources[name] = {"ok": ok, "count": n, "url": url, "fetched": int(time.time()) if ok else 0}
 
-if not entradas:
+# --- feeds de DOMINIOS malos (Camino B: se cruzan con las consultas DNS del espejo) ---
+DOMFEEDS = [
+    ("urlhaus-dom",   "https://urlhaus.abuse.ch/downloads/hostfile/"),
+    ("threatfox-dom", "https://threatfox.abuse.ch/downloads/hostfile/"),
+]
+dominios = set()
+for name, url in DOMFEEDS:
+    ok = False; n = 0
+    try:
+        for line in bajar(url).splitlines():
+            line = line.strip()
+            if not line or line[0] == "#":
+                continue
+            parts = line.split()
+            dom = (parts[-1] if len(parts) >= 2 else parts[0]).strip().lower().rstrip(".")
+            if not dom or "." not in dom or dom in ("localhost", "0.0.0.0", "127.0.0.1"):
+                continue
+            dominios.add(dom); n += 1
+        ok = True
+    except Exception as e:
+        sys.stderr.write(f"{name}: fallo {e}\n")
+    sources[name] = {"ok": ok, "count": n, "url": url, "fetched": int(time.time()) if ok else 0}
+
+if not entradas and not dominios:
     sys.stderr.write("ningun feed dio datos; no se sobrescribe lo existente\n")
     sys.exit(1)
 
-tmp = os.path.join(DIR, "reputation.lst.tmp")
-with open(tmp, "w", encoding="utf-8") as f:
-    f.write("\n".join(sorted(entradas)) + "\n")
-os.replace(tmp, os.path.join(DIR, "reputation.lst"))
+if entradas:
+    tmp = os.path.join(DIR, "reputation.lst.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(sorted(entradas)) + "\n")
+    os.replace(tmp, os.path.join(DIR, "reputation.lst"))
+if dominios:
+    tmpd = os.path.join(DIR, "domains.lst.tmp")
+    with open(tmpd, "w", encoding="utf-8") as f:
+        f.write("\n".join(sorted(dominios)) + "\n")
+    os.replace(tmpd, os.path.join(DIR, "domains.lst"))
 with open(os.path.join(DIR, "reputation.meta"), "w", encoding="utf-8") as f:
     json.dump({"generated": int(time.time()), "ttl_days": TTL_DAYS,
-               "total": len(entradas), "sources": sources}, f, indent=2)
+               "total": len(entradas), "total_dominios": len(dominios), "sources": sources}, f, indent=2)
 oks = sum(1 for s in sources.values() if s["ok"])
-print(f"reputation.lst: {len(entradas)} IOCs de {oks}/{len(FEEDS)} feeds")
+print(f"reputation.lst: {len(entradas)} IPs; domains.lst: {len(dominios)} dominios; {oks}/{len(FEEDS)+len(DOMFEEDS)} feeds OK")
 FEEDS
 chmod 755 /usr/local/bin/suricata-feeds-update
 # cron diario (04:17) para refrescar los feeds
@@ -694,6 +723,7 @@ _RE = {k: re.compile(p) for k, p in {
     "cat": r'"category":"((?:[^"\\]|\\.)*)"',
     "sev": r'"severity":(\d+)',
     "sid": r'"signature_id":(\d+)',
+    "rrname": r'"rrname":"([^"]+)"',
 }.items()}
 
 # Firmas de "infeccion" (CnC/botnet/troyano): mismas claves que el informe. Para marcar
@@ -874,7 +904,8 @@ total = 0
 seen = 0
 ts_min = None          # timestamp del evento mas antiguo dentro de la ventana (cobertura real)
 
-files = sorted(glob.glob(f"{LOGDIR}/eve.json*"), key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
+files = sorted(glob.glob(f"{LOGDIR}/eve.json*") + glob.glob(f"{LOGDIR}/dns.json*"),
+               key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
 for p in files:
     try:
         if os.path.getmtime(p) < cutoff - 3600:
@@ -896,6 +927,19 @@ for p in files:
                     _md = _RE["dest_ip"].search(line)
                     if _ms: ips_vistas.add(_ms.group(1))
                     if _md: ips_vistas.add(_md.group(1))
+            # Camino B: consulta DNS a dominio malo (cruce con feeds de dominios)
+            if DOM_OK and '"event_type":"dns"' in line and '"rrname":"' in line:
+                _qm = _RE["rrname"].search(line); _sm = _RE["src_ip"].search(line)
+                if _qm and _sm:
+                    _dom = _qm.group(1).lower().rstrip(".")
+                    if dominio_malo(_dom):
+                        _mt = _RE["ts"].search(line)
+                        _tv = parse_ts(_mt.group(1)) if _mt else None
+                        if _tv is None or _tv >= cutoff:
+                            _s = _sm.group(1)
+                            dns_hits[_s] += 1
+                            dns_sids[_s].add("dom:" + _dom)
+                            dns_sig[_s] = "DNS a dominio malo: " + _dom[:60]
             if '"event_type":"alert"' not in line:
                 continue
             g = campos(line)
@@ -1291,6 +1335,30 @@ def es_malo(ip):
             return True
     for net, mask in REP_WIDE:
         if (v & mask) == net:
+            return True
+    return False
+
+# --- Camino B: dominios malos (feeds URLhaus/ThreatFox) para cruzar con las consultas DNS ---
+DOM_MAL = set()
+DOM_OK = False
+try:
+    _dm = json.load(open(os.path.join(FEEDS_DIR, "reputation.meta"), encoding="utf-8"))
+    if time.time() - _dm.get("generated", 0) <= _dm.get("ttl_days", 7) * 86400:
+        for _l in open(os.path.join(FEEDS_DIR, "domains.lst"), encoding="utf-8"):
+            _l = _l.strip().lower()
+            if _l and _l[0] not in "#;":
+                DOM_MAL.add(_l)
+        DOM_OK = len(DOM_MAL) > 0
+except Exception:
+    pass
+
+def dominio_malo(dom):
+    """El dominio (o su dominio padre) esta en la lista de dominios malos?"""
+    if dom in DOM_MAL:
+        return True
+    p = dom.split(".")
+    for i in range(1, len(p) - 1):          # a.b.evil.com -> b.evil.com -> evil.com (no el TLD solo)
+        if ".".join(p[i:]) in DOM_MAL:
             return True
     return False
 

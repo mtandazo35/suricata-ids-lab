@@ -3498,7 +3498,16 @@ def perfil_page(msg="", ok=False, edit_user=None):
               ".aptmodal .aptx{position:absolute;top:10px;right:12px;border:0;background:#eceae6;color:#33322f;width:32px;height:32px;border-radius:50%;font-size:20px;line-height:1;cursor:pointer;z-index:2}"
               ".aptmodal .aptx:hover{background:#e34948;color:#fff}"
               ".aptmodal .aptframe{width:100%;height:74vh;border:0;border-radius:8px;background:#fff}"
+              ".notifm{position:fixed;top:18px;left:50%;transform:translateX(-50%) translateY(-16px);z-index:140;"
+              "display:flex;align-items:center;gap:10px;max-width:560px;padding:12px 16px;border-radius:12px;"
+              "font-size:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);opacity:0;transition:opacity .25s,transform .25s;pointer-events:none}"
+              ".notifm.show{opacity:1;transform:translateX(-50%) translateY(0)}"
+              ".notifm.ok{background:#e6f4ea;color:#1a7f37;border:1px solid #b7e0c2}"
+              ".notifm.err{background:#fdecec;color:#b52a2a;border:1px solid #f3c4c4}"
+              ".notifm .ni{font-size:18px}"
               "</style>")
+    ntf = ("<div id=notif class='notifm " + ("ok" if ok else "err") + "'>"
+           "<span class=ni>" + ("✅" if ok else "⛔") + "</span><span>" + esc(msg) + "</span></div>") if msg else ""
     hubjs = ("<script>function openm(id){var mo=document.getElementById('m-'+id);if(!mo)return false;"
              "var fr=mo.querySelector('iframe[data-src]');if(fr&&!fr.src){fr.src=fr.getAttribute('data-src');}"
              "mo.style.display='flex';document.body.style.overflow='hidden';"
@@ -3506,15 +3515,17 @@ def perfil_page(msg="", ok=False, edit_user=None):
              "function closem(){var a=document.querySelectorAll('.aptmodal');for(var i=0;i<a.length;i++)a[i].style.display='none';"
              "document.body.style.overflow='';try{sessionStorage.removeItem('apt');}catch(e){}}"
              "document.addEventListener('keydown',function(e){if(e.key==='Escape')closem();});"
-             "(function(){var fl=document.getElementById('aptflash');"
-             "if(fl&&fl.innerHTML.trim()){var la=null;try{la=sessionStorage.getItem('apt');}catch(e){}if(la)openm(la);}})();</script>")
+             "(function(){var n=document.getElementById('notif');if(!n)return;"
+             "var la=null;try{la=sessionStorage.getItem('apt');}catch(e){}if(la)openm(la);"
+             "setTimeout(function(){n.classList.add('show');},60);"
+             "setTimeout(function(){n.classList.remove('show');},3400);})();</script>")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Ajustes</title>"
             f"<style>{css}</style>" + hubcss + "</head><body>"
             + nav("/ajustes") +
             "<main><h1>Ajustes</h1>"
             "<p class=psub>Toca cada apartado para abrirlo.</p>"
-            f"<div id=aptflash>{banner}</div>" + hub + modals + script + hubjs +
+            + hub + modals + ntf + script + hubjs +
             "</main></body></html>")
 
 def exclusiones_page(msg="", ok=False, edit_idx=None):
@@ -4233,7 +4244,7 @@ def cuarentena_page(msg="", es_admin=False):
     else:
         estado = ("<div class='banner'><b>Modo sugerencia (dry-run).</b> No se envia nada al MikroTik. "
                   "Para activar el envio, configura y marca <b>Permitir enviar</b> en <b>Ajustes &rarr; MikroTik</b>.</div>")
-    flash = f"<div class='banner msg'>{esc(msg)}</div>" if msg else ""
+    flash = ("<div id=notif class='notifm msg'><span class=ni>&#8505;</span><span>" + esc(msg) + "</span></div>") if msg else ""
     css = ("<style>body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
            "main{max-width:1100px;margin:0 auto;padding:20px 24px}h1{font-size:21px;margin:0 0 4px}"
            ".sub{color:#52514e;margin:0 0 14px}code{background:#f1f1ef;padding:1px 5px;border-radius:4px}"
@@ -4256,6 +4267,9 @@ def cuarentena_page(msg="", es_admin=False):
            ".qbtn.quit{background:#6b6a66;margin-left:6px}.qbtn.quit:hover{background:#524f4c}"
            ".seccion{margin:0 0 26px}.shead{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:0 0 10px}"
            ".shead h2{font-size:16px;margin:0}.shead .sub{margin:2px 0 0}"
+           ".notifm{position:fixed;top:18px;left:50%;transform:translateX(-50%) translateY(-16px);z-index:140;display:flex;align-items:center;gap:10px;max-width:560px;padding:12px 16px;border-radius:12px;font-size:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);opacity:0;transition:opacity .25s,transform .25s;pointer-events:none}"
+           ".notifm.show{opacity:1;transform:translateX(-50%) translateY(0)}"
+           ".notifm.msg{background:#eef4fd;color:#2a5fa0;border:1px solid #cfe0f6}.notifm .ni{font-size:18px}"
            "</style>")
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -4264,6 +4278,9 @@ def cuarentena_page(msg="", es_admin=False):
             f"<p class='sub'>Ventana {vmin} min · lista de hace {edad}. Dos categorias: <b>infectados</b> (malware/CnC) "
             "y <b>DNS sospechoso</b> (consultan dominios de botnet), cada una a su address-list del MikroTik.</p>"
             + flash + estado + sec_inf + sec_dns + sec_manual +
+            "<script>(function(){var n=document.getElementById('notif');if(!n)return;"
+            "setTimeout(function(){n.classList.add('show');},60);"
+            "setTimeout(function(){n.classList.remove('show');},3600);})();</script>"
             "</main></body></html>")
     return wrap(body, refresh=False, active="/cuarentena")
 

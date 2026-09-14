@@ -904,6 +904,32 @@ total = 0
 seen = 0
 ts_min = None          # timestamp del evento mas antiguo dentro de la ventana (cobertura real)
 
+# --- Camino B: dominios malos (feeds URLhaus/ThreatFox) para cruzar con las consultas DNS.
+# DEBE definirse ANTES del bucle: el parseo de dns.json usa DOM_OK/dominio_malo. ---
+FEEDS_DIR = "/var/lib/suricata-feeds"
+DOM_MAL = set()
+DOM_OK = False
+try:
+    _dm = json.load(open(os.path.join(FEEDS_DIR, "reputation.meta"), encoding="utf-8"))
+    if time.time() - _dm.get("generated", 0) <= _dm.get("ttl_days", 7) * 86400:
+        for _l in open(os.path.join(FEEDS_DIR, "domains.lst"), encoding="utf-8"):
+            _l = _l.strip().lower()
+            if _l and _l[0] not in "#;":
+                DOM_MAL.add(_l)
+        DOM_OK = len(DOM_MAL) > 0
+except Exception:
+    pass
+
+def dominio_malo(dom):
+    """El dominio (o su dominio padre) esta en la lista de dominios malos?"""
+    if dom in DOM_MAL:
+        return True
+    p = dom.split(".")
+    for i in range(1, len(p) - 1):          # a.b.evil.com -> b.evil.com -> evil.com (no el TLD solo)
+        if ".".join(p[i:]) in DOM_MAL:
+            return True
+    return False
+
 files = sorted(glob.glob(f"{LOGDIR}/eve.json*") + glob.glob(f"{LOGDIR}/dns.json*"),
                key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
 for p in files:
@@ -1337,31 +1363,6 @@ def es_malo(ip):
         if (v & mask) == net:
             return True
     return False
-
-# --- Camino B: dominios malos (feeds URLhaus/ThreatFox) para cruzar con las consultas DNS ---
-DOM_MAL = set()
-DOM_OK = False
-try:
-    _dm = json.load(open(os.path.join(FEEDS_DIR, "reputation.meta"), encoding="utf-8"))
-    if time.time() - _dm.get("generated", 0) <= _dm.get("ttl_days", 7) * 86400:
-        for _l in open(os.path.join(FEEDS_DIR, "domains.lst"), encoding="utf-8"):
-            _l = _l.strip().lower()
-            if _l and _l[0] not in "#;":
-                DOM_MAL.add(_l)
-        DOM_OK = len(DOM_MAL) > 0
-except Exception:
-    pass
-
-def dominio_malo(dom):
-    """El dominio (o su dominio padre) esta en la lista de dominios malos?"""
-    if dom in DOM_MAL:
-        return True
-    p = dom.split(".")
-    for i in range(1, len(p) - 1):          # a.b.evil.com -> b.evil.com -> evil.com (no el TLD solo)
-        if ".".join(p[i:]) in DOM_MAL:
-            return True
-    return False
-
 
 def riesgo(src):
     """Puntaje de riesgo 0-100 del CPE (IP origen) combinando senales, en vez de

@@ -3111,7 +3111,7 @@ _NAV_CSS = """<style>
 html{scrollbar-gutter:stable}  /* reservar el hueco del scroll: paginas cortas (Exclusiones) y largas (Ajustes) no desplazan el contenido */
 .nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
 font:15px system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25)}
-.nav .navwrap{max-width:1360px;margin:0 auto;padding:0 28px;min-height:58px;display:flex;align-items:center;gap:4px}
+.nav .navwrap{max-width:1360px;margin:0 auto;padding:0 28px;height:58px;display:flex;align-items:center;gap:4px;flex-wrap:nowrap}
 .nav .brand{font-weight:700;font-size:16px;margin-right:14px;display:flex;align-items:center;gap:11px;letter-spacing:.2px}
 .nav .brand .applogo{height:30px;width:auto;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.4))}
 .nav .brand .elogo{height:34px;width:auto;max-width:150px;object-fit:contain;border-radius:5px;background:#fff;padding:3px;display:block}
@@ -3119,7 +3119,7 @@ font:15px system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 2px 10px rgba
 .nav a.tab{position:relative;color:#c9d2dd;text-decoration:none;padding:11px 15px;margin:9px 1px;border-radius:8px;
 font-size:15px;font-weight:500;transition:background .15s,color .15s}
 .nav a.tab:hover{color:#fff;background:rgba(255,255,255,.08)}
-.nav a.tab.on{color:#fff;background:rgba(42,120,214,.22);font-weight:600}
+.nav a.tab.on{color:#fff;background:rgba(42,120,214,.22)}  /* sin cambiar el grosor: evita que la pestana activa ensanche y recoloque la barra */
 .nav a.tab.on::after{content:"";position:absolute;left:15px;right:15px;bottom:-9px;height:3px;background:#2a78d6;border-radius:2px}
 .nav .push{margin-left:auto}
 .nav .out{margin-left:14px;color:#f3b0b0;text-decoration:none;font-weight:600;padding:9px 17px;border-radius:8px;font-size:15px;

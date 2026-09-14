@@ -2238,7 +2238,7 @@ def top_page():
     body = (f"<!doctype html><html lang=es><head><meta charset=utf-8>"
             f"<link rel=icon type=image/png href=/favicon.ico>"
             f"<meta name=viewport content='width=device-width,initial-scale=1'>"
-            f"<meta http-equiv=refresh content=60><title>Top origenes</title>{css}</head><body>"
+            f"<meta http-equiv=refresh content=60><title>Suricata</title>{css}</head><body>"
             + nav("/top") +
             f"<main><h1>Top 5 IPs origen que mas peticionan</h1>"
             f"<p class='subx'>Quien ataca mas, hacia que IP destino, desde que puerto origen y hacia que puerto destino. "
@@ -3736,7 +3736,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
              "setTimeout(function(){n.classList.add('show');},60);"
              "setTimeout(function(){n.classList.remove('show');},3400);})();</script>")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
-            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Ajustes</title>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>"
             f"<style>{css}</style>" + hubcss + "</head><body>"
             + nav("/ajustes") +
             "<main><h1>Ajustes</h1>"
@@ -3783,7 +3783,7 @@ def exclusiones_page(msg="", ok=False, edit_idx=None):
     btn_txt = "Guardar cambios" if ed else "Agregar"
     cancelar = '<a class="cancel" href="/exclusiones">Cancelar</a>' if ed else ""
     body = f"""<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>
-<meta name=viewport content='width=device-width,initial-scale=1'><title>Exclusiones</title>
+<meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>
 <style>body{{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}}
 main{{max-width:820px;margin:0 auto;padding:24px 20px}}h1{{font-size:21px;margin:0 0 4px}}
 .sub{{color:#52514e;font-size:13px;margin:0 0 18px}}h2{{font-size:15px;margin:24px 0 10px}}
@@ -4251,7 +4251,7 @@ router deja de responder, se detiene y avisa). Cada IP queda con su <b>TTL</b> y
         "border:1px solid #eaecf0;border-radius:8px;padding:12px 14px;background:#f8f9fa}}")
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>" + refresh_meta +
-            "<title>Documentacion</title><style>" + wcss + "</style></head><body>"
+            "<title>Suricata</title><style>" + wcss + "</style></head><body>"
             + ("" if embed else nav("/documentacion")) +
             "<div class=wiki>"
             "<aside class=toc><div class=toch>Contenido</div><nav><ol>" + toc + "</ol></nav></aside>"
@@ -4328,7 +4328,7 @@ def log_page(embed=False):
               "window.lprev=function(){page--;render();};window.lnext=function(){page++;render();};"
               "if(rows.length)render();})();</script>")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
-            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Log de actividad</title>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>"
             f"<style>{css}</style></head><body>" + ("" if embed else nav("/log")) +
             "<main><h1>Log de actividad</h1>"
             "<p class=sub2>Accesos al panel y acciones de cuarentena (quien envio o quito una IP). "
@@ -4360,7 +4360,7 @@ def historico_page():
               "if(rows.length)render();})();</script>") if rows else ""
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
-            "<title>Historico</title><style>body{margin:0;background:#fcfcfb;"
+            "<title>Suricata</title><style>body{margin:0;background:#fcfcfb;"
             "font:14px system-ui,sans-serif;color:#0b0b0b}main{max-width:800px;margin:0 auto;padding:20px}"
             "table{width:100%;border-collapse:collapse}td{padding:8px;border-bottom:1px solid #e7e6e2}"
             "a{color:#2a78d6}"
@@ -4509,7 +4509,7 @@ def cuarentena_page(msg="", es_admin=False):
            "</style>")
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
-            "<title>Cuarentena</title>" + css + "</head><body><main>"
+            "<title>Suricata</title>" + css + "</head><body><main>"
             "<h1>Cuarentena y control de CPEs</h1>"
             f"<p class='sub'>Ventana {vmin} min · lista de hace {edad}. Dos categorias: <b>infectados</b> (malware/CnC) "
             "y <b>DNS sospechoso</b> (consultan dominios de botnet), cada una a su address-list del MikroTik.</p>"
@@ -4660,7 +4660,7 @@ class H(BaseHTTPRequestHandler):
                            "El feed de abajo ya esta en vivo.</p></main>")
             page = (f"<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
                     f"<meta name=viewport content='width=device-width,initial-scale=1'>"
-                    f"<meta http-equiv=refresh content=20><title>Estadisticas Suricata</title>"
+                    f"<meta http-equiv=refresh content=20><title>Suricata</title>"
                     f"{_PAGEH_CSS}{head_css}"
                     "<style>main{max-width:1360px;margin:0 auto;padding-top:8px}</style>"
                     f"</head><body>{nav('/')}{resumen}{feed}"
@@ -4680,7 +4680,7 @@ class H(BaseHTTPRequestHandler):
                     # se recarga solo cada 2 min para tomar el reporte nuevo (cada 5 min);
                     # el filtro de busqueda persiste en sessionStorage, no se pierde al recargar
                     f"<meta http-equiv=refresh content=120>"
-                    f"<title>Detalle de ataques</title>{head_css}</head><body>{nav('/detalle')}"
+                    f"<title>Suricata</title>{head_css}</head><body>{nav('/detalle')}"
                     f"<main>{detalle}</main></body></html>")
             return self._html(page)
         if path == "/historico":

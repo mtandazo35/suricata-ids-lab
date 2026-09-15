@@ -1780,6 +1780,7 @@ reportes diarios, con login basico. Solo biblioteca estandar. Corre como servici
 Config: /etc/suricata-dashboard.conf  (PORT, USER, PASS)
 """
 import base64, glob, hashlib, html, json, os, re, secrets, subprocess, threading, time
+import urllib.request, urllib.parse, urllib.error
 from datetime import datetime, timezone, timedelta
 
 TZ_EC = timezone(timedelta(hours=-5))   # hora de Ecuador (America/Guayaquil)

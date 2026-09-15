@@ -2897,9 +2897,9 @@ def _sha_local():
     except OSError:
         return None
 
-def chequear_update():
+def chequear_update(timeout=15):
     """Consulta la API de GitHub (best-effort) y cachea si hay commits nuevos y cuales.
-    No lanza: si no hay red o la API falla, deja el cache como estaba."""
+    No lanza: si no hay red o la API falla, deja el cache como estaba (con el motivo)."""
     local = _sha_local()
     def _err(motivo):   # deja rastro del fallo en vez de salir mudo (rate limit, sin red, etc.)
         try:
@@ -2917,7 +2917,7 @@ def chequear_update():
         req = urllib.request.Request(
             f"https://api.github.com/repos/{_UPD_REPO}/commits?sha=main&per_page=20",
             headers={"User-Agent": "suricata-panel", "Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.load(r)
     except urllib.error.HTTPError as e:
         _err("limite de la API de GitHub (403)" if e.code == 403 else f"HTTP {e.code}")
@@ -3213,7 +3213,13 @@ def nav(active=""):
     # boton + modal de 'actualizacion disponible' (solo admin y solo si el chequeo lo marca)
     upd_btn = ""; upd_modal = ""
     if getattr(CTX, "role", None) == "admin":
-        _kick_update_check()      # refresco oportunista (guardado a 30 min, en segundo plano)
+        # si el cache esta viejo/ausente, consultar GitHub EN EL MOMENTO (timeout corto)
+        # para que el aviso salga en el primer load; como mucho 1 vez cada 30 min por caja
+        # (un chequeo fallido tambien actualiza 'checked', asi no repite la espera).
+        _info = update_info()
+        if (not _info) or (time.time() - _info.get("checked", 0) > 1800):
+            try: chequear_update(timeout=6)
+            except Exception: pass
         ue = update_estado()
         if ue:
             mej = ue.get("mejoras") or []

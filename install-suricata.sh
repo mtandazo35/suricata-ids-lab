@@ -3188,7 +3188,7 @@ border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0
 @keyframes udpulse{0%{box-shadow:0 0 0 0 rgba(255,255,255,.6)}70%{box-shadow:0 0 0 8px rgba(255,255,255,0)}100%{box-shadow:0 0 0 0 rgba(255,255,255,0)}}
 .updov{display:none;position:fixed;inset:0;background:rgba(11,11,11,.5);z-index:120;align-items:center;justify-content:center;padding:24px}
 .updov .updbox{position:relative;background:#fff;color:#0b0b0b;border-radius:14px;max-width:560px;width:100%;max-height:calc(100vh - 48px);overflow:auto;padding:22px 24px;box-shadow:0 14px 50px rgba(0,0,0,.4)}
-.updov .updx{position:absolute;top:10px;right:12px;border:0;background:#eceae6;width:32px;height:32px;border-radius:50%;font-size:20px;line-height:1;cursor:pointer}
+.updov .updx{position:absolute;top:8px;right:8px;border:0;background:#eceae6;width:30px;height:30px;border-radius:50%;font-size:19px;line-height:1;cursor:pointer;z-index:3}
 .updov h3{margin:2px 0 6px;font-size:20px}
 .updov .updsub{color:#52514e;margin:0 0 14px;font-size:14px;line-height:1.5}
 .updov .updlist{margin:0 0 18px;padding-left:20px;max-height:44vh;overflow:auto}
@@ -3822,7 +3822,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
     def _modal(sid, contenido):
         return (f"<div class=aptmodal id=m-{sid} onclick=\"if(event.target===this)closem()\">"
                 f"<div class=aptbox><button type=button class=aptx onclick=closem() title=Cerrar>&times;</button>"
-                f"{contenido}</div></div>")
+                f"<div class=aptscroll>{contenido}</div></div></div>")
     def _mcard(sid, card):
         return _modal(sid, card) if card else ""
     modals = (_mcard("perfil", card_pw) + _mcard("empresa", card_empresa) + _mcard("usuarios", card_users)
@@ -3836,8 +3836,9 @@ def perfil_page(msg="", ok=False, edit_user=None):
               ".hubt:hover .hubc{transform:translateY(-3px);box-shadow:0 9px 20px rgba(16,156,142,.4)}"
               ".hubl{font-size:13px;font-weight:600;text-align:center;line-height:1.2}"
               ".aptmodal{display:none;position:fixed;inset:0;background:rgba(11,11,11,.5);z-index:90;align-items:center;justify-content:center;padding:24px;overflow:auto}"
-              ".aptmodal .aptbox{position:relative;margin:auto;background:#fcfcfb;border-radius:14px;max-width:980px;width:100%;max-height:calc(100vh - 48px);overflow:auto;padding:16px 20px 24px;box-shadow:0 12px 48px rgba(0,0,0,.35)}"
-              ".aptmodal .aptx{position:absolute;top:10px;right:12px;border:0;background:#eceae6;color:#33322f;width:32px;height:32px;border-radius:50%;font-size:20px;line-height:1;cursor:pointer;z-index:2}"
+              ".aptmodal .aptbox{position:relative;margin:auto;background:#fcfcfb;border-radius:14px;max-width:980px;width:100%;max-height:calc(100vh - 48px);overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.35)}"
+              ".aptmodal .aptscroll{max-height:calc(100vh - 48px);overflow:auto;padding:16px 20px 24px}"
+              ".aptmodal .aptx{position:absolute;top:8px;right:8px;border:0;background:#eceae6;color:#33322f;width:30px;height:30px;border-radius:50%;font-size:19px;line-height:1;cursor:pointer;z-index:3}"
               ".aptmodal .aptx:hover{background:#e34948;color:#fff}"
               ".aptmodal .aptframe{width:100%;height:74vh;border:0;border-radius:8px;background:#fff}"
               ".notifm{position:fixed;top:18px;left:50%;transform:translateX(-50%) translateY(-16px);z-index:140;"

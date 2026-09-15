@@ -3436,12 +3436,17 @@ def perfil_page(msg="", ok=False, edit_user=None):
                  else "<span class='verbadge ok'>estas al dia</span>")
         estado = ("<div class='verstatus new'>&#9432; Hay actualizaciones disponibles</div>" if disp
                   else "<div class='verstatus ok'>&#10003; Estas en la ultima version</div>")
+        # el boton de aplicar esta SIEMPRE disponible (para poder forzar la actualizacion a
+        # mano), no solo cuando el chequeo marca 'disponible': primario si hay update,
+        # secundario ('Actualizar de todos modos') si ya se esta al dia.
+        _lbl = "&#8681; Actualizar ahora" if disp else "&#8681; Actualizar de todos modos"
+        _cls = "primary" if disp else "verbtn2"
         btn_upd = ("<form method=post action='/update-panel' "
-                   "onsubmit=\"return confirm('Actualizar el panel a la ultima version? Se reiniciara en unos segundos.')\">"
-                   "<button class=primary type=submit>&#8681; Actualizar ahora</button></form>")
+                   "onsubmit=\"return confirm('Bajar y aplicar la ultima version del panel? Se reiniciara en unos segundos.')\">"
+                   f"<button class={_cls} type=submit>{_lbl}</button></form>")
         btn_buscar = ("<form method=post action='/buscar-update'>"
                       "<button class=verbtn2 type=submit>Buscar actualizaciones</button></form>")
-        acciones = "<div class=veractions>" + (btn_upd if disp else "") + btn_buscar + "</div>"
+        acciones = "<div class=veractions>" + btn_upd + btn_buscar + "</div>"
         linea_last = ""
         if last.get("from") and local:
             linea_last = (f"<div class=verlast>&#10003; Actualizado de <b>{esc(last['from'][:7])}</b> a "

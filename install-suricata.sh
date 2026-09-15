@@ -3195,6 +3195,15 @@ border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0
 .updov .updlist li{margin:5px 0;font-size:14px;line-height:1.45}
 .updov .updgo{background:#2a78d6;color:#fff;border:0;padding:11px 18px;border-radius:9px;font:600 15px system-ui;cursor:pointer}
 .updov .updgo:hover{background:#1c5cab}
+.updask{display:none;position:fixed;inset:0;background:rgba(11,11,11,.55);z-index:150;align-items:center;justify-content:center;padding:24px}
+.updask .updaskbox{background:#fff;color:#0b0b0b;border-radius:14px;max-width:440px;width:100%;padding:22px 24px;box-shadow:0 16px 54px rgba(0,0,0,.45)}
+.updask h3{margin:0 0 8px;font-size:19px}
+.updask p{margin:0 0 18px;color:#52514e;font-size:14px;line-height:1.5}
+.updask .updaskacts{display:flex;gap:10px;justify-content:flex-end}
+.updask .updaskno{background:#eef0f2;color:#33322f;border:1px solid #d7d6d2;padding:10px 16px;border-radius:9px;font:600 14px system-ui;cursor:pointer}
+.updask .updaskno:hover{background:#e2e5e8}
+.updask .updaskok{background:#2a78d6;color:#fff;border:0;padding:10px 18px;border-radius:9px;font:600 14px system-ui;cursor:pointer}
+.updask .updaskok:hover{background:#1c5cab}
 .empbar{background:#fff;border-bottom:1px solid #ececec}
 .empbar .empwrap{max-width:1360px;margin:0 auto;padding:7px 28px;display:flex;justify-content:flex-end;align-items:center;gap:10px}
 .empbar .elogo{height:30px;width:auto;max-width:150px;object-fit:contain;display:block}
@@ -3238,13 +3247,29 @@ def nav(active=""):
                 "<p class=updsub>Hay una version nueva del panel en GitHub. Solo se actualiza el codigo "
                 "(no toca tu configuracion). Mejoras incluidas:</p>"
                 f"<ul class=updlist>{items}</ul>"
-                "<form method=post action=/update-panel "
-                "onsubmit=\"return confirm('Actualizar el panel a la ultima version? Se reiniciara en unos segundos.')\">"
-                "<button class=updgo type=submit>&#8681; Actualizar ahora</button>"
+                "<form id=updform_nav method=post action=/update-panel>"
+                "<button class=updgo type=button onclick=\"updaskShow('updform_nav')\">&#8681; Actualizar ahora</button>"
                 "</form></div></div>")
+    # modal propio de confirmacion (reemplaza el confirm() del navegador); solo admin
+    updask = ""
+    if getattr(CTX, "role", None) == "admin":
+        updask = (
+            "<div id=updask class=updask onclick=\"if(event.target===this)updaskHide()\">"
+            "<div class=updaskbox><h3>Actualizar el panel</h3>"
+            "<p>Se bajara y aplicara la ultima version del panel desde GitHub. "
+            "El panel se reiniciara en unos segundos.</p>"
+            "<div class=updaskacts>"
+            "<button type=button class=updaskno onclick=updaskHide()>Cancelar</button>"
+            "<button type=button class=updaskok id=updaskok>&#8681; Actualizar</button>"
+            "</div></div></div>"
+            "<script>function updaskShow(f){var m=document.getElementById('updask');m.dataset.f=f;m.style.display='flex';}"
+            "function updaskHide(){var m=document.getElementById('updask');if(m)m.style.display='none';}"
+            "document.getElementById('updaskok').addEventListener('click',function(){"
+            "var m=document.getElementById('updask');var f=document.getElementById(m.dataset.f||'');if(f)f.submit();});"
+            "document.addEventListener('keydown',function(e){if(e.key==='Escape')updaskHide();});</script>")
     navbar = ('<div class="nav"><div class="navwrap">' + brand + '<span class="push"></span>'
               + "".join(parts) + '<span class="push"></span>' + upd_btn
-              + '<a href="/logout" class="out">Salir</a></div></div>' + upd_modal)
+              + '<a href="/logout" class="out">Salir</a></div></div>' + upd_modal + updask)
     # marca de la empresa (logo + nombre) en una franja debajo, alineada a la derecha (bajo Salir)
     emp = cargar_empresa()
     tiene_logo = emp.get("logo", "").startswith("data:image/")
@@ -3478,9 +3503,8 @@ def perfil_page(msg="", ok=False, edit_user=None):
         # secundario ('Actualizar de todos modos') si ya se esta al dia.
         _lbl = "&#8681; Actualizar ahora" if disp else "&#8681; Actualizar de todos modos"
         _cls = "primary" if disp else "verbtn2"
-        btn_upd = ("<form method=post action='/update-panel' "
-                   "onsubmit=\"return confirm('Bajar y aplicar la ultima version del panel? Se reiniciara en unos segundos.')\">"
-                   f"<button class={_cls} type=submit>{_lbl}</button></form>")
+        btn_upd = ("<form id=updform_hub method=post action='/update-panel'>"
+                   f"<button class={_cls} type=button onclick=\"updaskShow('updform_hub')\">{_lbl}</button></form>")
         btn_buscar = ("<form method=post action='/buscar-update'>"
                       "<button class=verbtn2 type=submit>Buscar actualizaciones</button></form>")
         btn_hist = ("<button type=button class=verbtn2 "

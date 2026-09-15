@@ -3435,6 +3435,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
         upd_err = info.get("error") if not disp else None
         sha_corto = (local[:7] if local else None)
         ultimo = info.get("ultimo") or ""
+        mejoras = info.get("mejoras") or []
         changelog = info.get("changelog") or []
         last = update_last()
         _vcss = ("<style>"
@@ -3446,6 +3447,9 @@ def perfil_page(msg="", ok=False, edit_user=None):
                  ".verblk{margin:0 0 12px}.vermsg{font-size:14px;color:#33322f;margin-top:3px}"
                  ".versep{border:0;border-top:1px solid #ececea;margin:14px 0}"
                  ".verstatus{display:flex;align-items:center;justify-content:center;gap:8px;font-weight:700;font-size:15px;margin:2px 0 14px}"
+                 ".vermej{list-style:none;margin:0 auto 14px;padding:0;max-width:640px;display:flex;flex-direction:column;gap:6px}"
+                 ".vermej li{background:#eef7f1;border:1px solid #cfe8d9;border-radius:8px;padding:8px 12px 8px 32px;position:relative;font-size:13.5px;color:#245c3c;line-height:1.4}"
+                 ".vermej li::before{content:'\\2713';position:absolute;left:12px;top:8px;color:#1a7f37;font-weight:700}"
                  ".verstatus.new{color:#1a7f37}.verstatus.ok{color:#52514e}.verstatus.warn{color:#b06a00}"
                  ".verbadge.warn{background:#fdf1dc;color:#8a5a00}"
                  ".veractions{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-bottom:12px}.veractions form{margin:0}"
@@ -3507,7 +3511,10 @@ def perfil_page(msg="", ok=False, edit_user=None):
             f"<div class=verbuild>build {esc(sha_corto) if sha_corto else '&mdash;'}</div></div>{badge}</div>"
             f"<div class=verblk><div class=verlbl>Ultimo cambio</div>"
             f"<div class=vermsg>{esc(ultimo) if ultimo else 'Pulsa <b>Buscar actualizaciones</b> para consultar GitHub.'}</div></div>"
-            "<hr class=versep>" + estado + acciones + linea_last + tabla +
+            "<hr class=versep>" + estado
+            + (("<ul class=vermej>" + "".join(f"<li>{esc(m)}</li>" for m in mejoras) + "</ul>")
+               if (disp and mejoras) else "")
+            + acciones + linea_last + tabla +
             "<p class=sub2 style='margin-top:14px;color:#8a8a86'>Solo actualiza el codigo del panel y de los reportes; "
             "no toca tu configuracion (usuarios, exclusiones, empresa, IPs de confianza, clave, ni HOME_NET/Suricata).</p>"
             "</section>")

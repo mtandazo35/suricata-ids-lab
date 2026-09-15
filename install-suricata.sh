@@ -362,7 +362,7 @@ fi
 cat > /usr/local/bin/suricata-report <<'REP'
 #!/usr/bin/env python3
 """Informe diario de Suricata en lenguaje claro: quien esta infectado y que hacer."""
-import glob, gzip, io, json, os, socket, time, urllib.request, urllib.parse
+import glob, gzip, io, json, os, socket, time, urllib.request, urllib.parse, urllib.error
 from collections import Counter, defaultdict
 
 CONF = "/etc/suricata-report.conf"
@@ -2900,15 +2900,32 @@ def chequear_update():
     """Consulta la API de GitHub (best-effort) y cachea si hay commits nuevos y cuales.
     No lanza: si no hay red o la API falla, deja el cache como estaba."""
     local = _sha_local()
+    def _err(motivo):   # deja rastro del fallo en vez de salir mudo (rate limit, sin red, etc.)
+        try:
+            prev = {}
+            try:
+                prev = json.load(open(UPDCHK_FILE, encoding="utf-8"))
+            except Exception:
+                pass
+            prev.update({"disponible": bool(prev.get("disponible")), "local": local,
+                         "error": str(motivo)[:200], "checked": int(time.time())})
+            json.dump(prev, open(UPDCHK_FILE, "w", encoding="utf-8"))
+        except OSError:
+            pass
     try:
         req = urllib.request.Request(
             f"https://api.github.com/repos/{_UPD_REPO}/commits?sha=main&per_page=20",
             headers={"User-Agent": "suricata-panel", "Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=15) as r:
             data = json.load(r)
-    except Exception:
+    except urllib.error.HTTPError as e:
+        _err("limite de la API de GitHub (403)" if e.code == 403 else f"HTTP {e.code}")
+        return
+    except Exception as e:
+        _err(e)
         return
     if not isinstance(data, list) or not data:
+        _err("respuesta inesperada de GitHub")
         return
     def _subj(c):
         return (c.get("commit", {}).get("message", "") or "").split("\n", 1)[0].strip()
@@ -3408,6 +3425,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
         info = update_info()
         local = _sha_local()
         disp = bool(info.get("disponible"))
+        upd_err = info.get("error") if not disp else None
         sha_corto = (local[:7] if local else None)
         ultimo = info.get("ultimo") or ""
         changelog = info.get("changelog") or []
@@ -3421,7 +3439,8 @@ def perfil_page(msg="", ok=False, edit_user=None):
                  ".verblk{margin:0 0 12px}.vermsg{font-size:14px;color:#33322f;margin-top:3px}"
                  ".versep{border:0;border-top:1px solid #ececea;margin:14px 0}"
                  ".verstatus{display:flex;align-items:center;justify-content:center;gap:8px;font-weight:700;font-size:15px;margin:2px 0 14px}"
-                 ".verstatus.new{color:#1a7f37}.verstatus.ok{color:#52514e}"
+                 ".verstatus.new{color:#1a7f37}.verstatus.ok{color:#52514e}.verstatus.warn{color:#b06a00}"
+                 ".verbadge.warn{background:#fdf1dc;color:#8a5a00}"
                  ".veractions{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-bottom:12px}.veractions form{margin:0}"
                  ".verbtn2{background:#eef0f2;color:#33322f;border:1px solid #d7d6d2;padding:11px 16px;border-radius:9px;font:600 14px system-ui;cursor:pointer}"
                  ".verbtn2:hover{background:#e2e5e8}"
@@ -3434,10 +3453,15 @@ def perfil_page(msg="", ok=False, edit_user=None):
                  ".vnew{color:#1a7f37;font-weight:700}"
                  ".verbuild{font:12px ui-monospace,Consolas,monospace;color:#9a9a95;margin-top:3px}"
                  "</style>")
-        badge = ("<span class='verbadge new'>hay una version nueva</span>" if disp
-                 else "<span class='verbadge ok'>estas al dia</span>")
-        estado = ("<div class='verstatus new'>&#9432; Hay actualizaciones disponibles</div>" if disp
-                  else "<div class='verstatus ok'>&#10003; Estas en la ultima version</div>")
+        if disp:
+            badge = "<span class='verbadge new'>hay una version nueva</span>"
+            estado = "<div class='verstatus new'>&#9432; Hay actualizaciones disponibles</div>"
+        elif upd_err:
+            badge = "<span class='verbadge warn'>sin verificar</span>"
+            estado = f"<div class='verstatus warn'>&#9888; No se pudo consultar GitHub: {esc(upd_err)}</div>"
+        else:
+            badge = "<span class='verbadge ok'>estas al dia</span>"
+            estado = "<div class='verstatus ok'>&#10003; Estas en la ultima version</div>"
         # el boton de aplicar esta SIEMPRE disponible (para poder forzar la actualizacion a
         # mano), no solo cuando el chequeo marca 'disponible': primario si hay update,
         # secundario ('Actualizar de todos modos') si ya se esta al dia.

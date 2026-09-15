@@ -2888,6 +2888,7 @@ def firma_panel():
 COMMIT_FILE = "/etc/suricata-dashboard.commit"      # SHA del commit aplicado (lo escribe el updater)
 UPDCHK_FILE = "/var/log/suricata-update-check.json"  # cache del ultimo chequeo contra GitHub
 _UPD_REPO = "mtandazo35/suricata-ids-lab"
+PANEL_VERSION = "1.1"   # version visible del panel (se sube a mano en cada release); el SHA es el 'build' exacto
 
 def _sha_local():
     try:
@@ -3512,6 +3513,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
                  ".verchgt td{padding:9px 12px;border-top:1px solid #f0efec;vertical-align:top}"
                  ".verchgt td.c1{width:66px}.verchgt td.c3{width:94px;color:#8a8a86;white-space:nowrap;text-align:right}"
                  ".vnew{color:#1a7f37;font-weight:700}"
+                 ".verbuild{font:12px ui-monospace,Consolas,monospace;color:#9a9a95;margin-top:3px}"
                  "</style>")
         badge = ("<span class='verbadge new'>hay una version nueva</span>" if disp
                  else "<span class='verbadge ok'>estas al dia</span>")
@@ -3527,24 +3529,32 @@ def perfil_page(msg="", ok=False, edit_user=None):
                    f"<button class={_cls} type=submit>{_lbl}</button></form>")
         btn_buscar = ("<form method=post action='/buscar-update'>"
                       "<button class=verbtn2 type=submit>Buscar actualizaciones</button></form>")
-        acciones = "<div class=veractions>" + btn_upd + btn_buscar + "</div>"
+        btn_hist = ("<button type=button class=verbtn2 "
+                    "onclick=\"var e=document.getElementById('histwrap');e.hidden=!e.hidden\">Historial de cambios</button>")
+        acciones = "<div class=veractions>" + btn_upd + btn_buscar + btn_hist + "</div>"
         linea_last = ""
         if last.get("from") and local:
             linea_last = (f"<div class=verlast>&#10003; Actualizado de <b>{esc(last['from'][:7])}</b> a "
                           f"<b>{esc(local[:7])}</b>" + (f" por {esc(last.get('by',''))}" if last.get('by') else "") + ".</div>")
-        tabla = ""
+        # historial de cambios (colapsable, se abre con el boton 'Historial de cambios')
         if changelog:
             filas = ""
             for c in changelog:
                 et = "<span class=vnew>Nuevo</span>" if c.get("nuevo") else ""
                 filas += (f"<tr><td class=c1>{et}</td><td>{esc(c.get('subject',''))}</td>"
                           f"<td class=c3>{esc(c.get('fecha',''))}</td></tr>")
-            tabla = ("<div class=verchg><div class=verchgh>Registro de cambios</div>"
-                     f"<table class=verchgt><tbody>{filas}</tbody></table></div>")
+            cuerpo_hist = f"<table class=verchgt><tbody>{filas}</tbody></table>"
+        else:
+            cuerpo_hist = ("<p class=sub2 style='padding:12px;margin:0'>Sin historial cargado todavia. "
+                           "Pulsa <b>Buscar actualizaciones</b> para traerlo desde GitHub.</p>")
+        tabla = ("<div id=histwrap hidden style='margin-top:12px'>"
+                 "<div class=verchg><div class=verchgh>Registro de cambios</div>"
+                 f"{cuerpo_hist}</div></div>")
         card_update = (
             _vcss + "<section class=card><h2>Version y actualizaciones</h2>"
             "<div class=verhead><div><div class=verlbl>Version desplegada</div>"
-            f"<div class=versha>{esc(sha_corto) if sha_corto else '&mdash;'}</div></div>{badge}</div>"
+            f"<div class=versha>{PANEL_VERSION}</div>"
+            f"<div class=verbuild>build {esc(sha_corto) if sha_corto else '&mdash;'}</div></div>{badge}</div>"
             f"<div class=verblk><div class=verlbl>Ultimo cambio</div>"
             f"<div class=vermsg>{esc(ultimo) if ultimo else 'Pulsa <b>Buscar actualizaciones</b> para consultar GitHub.'}</div></div>"
             "<hr class=versep>" + estado + acciones + linea_last + tabla +

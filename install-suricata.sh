@@ -136,7 +136,7 @@ ok "HOME_NET: $HOME_NET"
 info "Instalando suricata y utilidades..."
 # </dev/null: bajo 'curl | bash' el stdin es el propio script; un prompt de dpkg se lo comeria
 apt-get update -qq </dev/null
-apt-get install -y -qq -o Dpkg::Options::=--force-confold suricata suricata-update jq python3 curl ca-certificates ethtool logrotate openssh-client </dev/null >/dev/null
+apt-get install -y -qq -o Dpkg::Options::=--force-confold suricata suricata-update jq python3 curl ca-certificates ethtool logrotate </dev/null >/dev/null
 ok "Suricata instalado: $(suricata -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 
 # comprobar capacidades compiladas
@@ -3001,86 +3001,6 @@ def _kick_update_check():
             _UPD_KICK_LOCK.release()
     threading.Thread(target=_run, daemon=True).start()
 
-# --- flota: actualizar OTROS paneles de la flota por SSH desde este panel (central) ---
-FLEET_FILE = "/etc/suricata-fleet.json"   # nodos + ultimos resultados (chmod 600)
-FLEET_KEY = "/etc/suricata-fleet-key"     # clave SSH privada del panel para llegar a los clientes
-
-def cargar_flota():
-    try:
-        d = json.load(open(FLEET_FILE, encoding="utf-8"))
-        if not isinstance(d, dict):
-            raise ValueError
-        d.setdefault("nodes", [])
-        d.setdefault("resultados", {})
-        return d
-    except Exception:
-        return {"nodes": [], "resultados": {}}
-
-def guardar_flota(d):
-    try:
-        json.dump(d, open(FLEET_FILE, "w", encoding="utf-8"))
-        os.chmod(FLEET_FILE, 0o600)
-    except OSError:
-        pass
-
-def flota_key_pub():
-    try:
-        return open(FLEET_KEY + ".pub", encoding="utf-8").read().strip()
-    except OSError:
-        return None
-
-def flota_generar_key():
-    if os.path.exists(FLEET_KEY):
-        return True, "La clave ya existe."
-    try:
-        subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", FLEET_KEY, "-C", "suricata-fleet"],
-                       capture_output=True, timeout=30, check=True)
-        os.chmod(FLEET_KEY, 0o600)
-        return True, "Clave SSH generada. Copiala en cada cliente."
-    except Exception as e:
-        return False, f"No se pudo generar la clave (ssh-keygen): {e}"
-
-def flota_ssh(node, cmd, timeout=120):
-    """Ejecuta cmd en el nodo por SSH con la clave de la flota. Sin verificar host key
-    (el user reutiliza IPs). Devuelve (rc, stdout, stderr)."""
-    if not os.path.exists(FLEET_KEY):
-        return 255, "", "sin clave SSH (genera la clave en este apartado)"
-    args = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-i", FLEET_KEY,
-            "-p", str(node.get("port", 22) or 22),
-            f"{node.get('user', 'root')}@{node['host']}", cmd]
-    try:
-        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-        return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
-    except subprocess.TimeoutExpired:
-        return 124, "", "tiempo de espera agotado"
-    except Exception as e:
-        return 1, "", str(e)
-
-def flota_actualizar_uno(node):
-    """Corre el updater en el nodo y lee el SHA aplicado. Devuelve un dict de resultado."""
-    cmd = ("/usr/local/bin/suricata-panel-update >/dev/null 2>&1; "
-           "cat /etc/suricata-dashboard.commit 2>/dev/null")
-    rc, out, err = flota_ssh(node, cmd)
-    ok = (rc == 0)
-    return {"ts": int(time.time()), "ok": ok, "commit": (out[:10] if out else ""),
-            "msg": ("actualizado" if ok else (err or f"error {rc}")[:120])}
-
-def flota_actualizar(host=None):
-    """Actualiza un nodo (host) o toda la flota. Guarda los resultados. Devuelve (n_ok, n_total)."""
-    d = cargar_flota()
-    res = d.get("resultados", {})
-    nodos = [n for n in d.get("nodes", []) if (host is None or n.get("host") == host)]
-    nok = 0
-    for n in nodos:
-        r = flota_actualizar_uno(n)
-        res[n["host"]] = r
-        if r["ok"]:
-            nok += 1
-    d["resultados"] = res
-    guardar_flota(d)
-    return nok, len(nodos)
-
 TRUST_FILE = "/etc/suricata-dashboard-trust.json"
 
 def cargar_confianza():
@@ -3394,7 +3314,6 @@ _IC_RTR   = _ic("M19 15h-1v-3a1 1 0 0 0-1-1h-4V9h1a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1
 _IC_DL    = _ic("M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z")
 _IC_LOG   = _ic("M3 5h18v2H3V5zm0 6h18v2H3v-2zm0 6h12v2H3v-2z")
 _IC_BOOK  = _ic("M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z")
-_IC_FLEET = _ic("M4 4h16v5H4V4zm0 7h16v5H4v-5zm2-5.5h2v2H6v-2zm0 7h2v2H6v-2z")
 
 def _card_politicas(m):
     """Sub-bloque de la tarjeta MikroTik: politicas por banda de riesgo del Top origenes."""
@@ -3561,87 +3480,6 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<p class=sub2 style='margin-top:14px;color:#8a8a86'>Solo actualiza el codigo del panel y de los reportes; "
             "no toca tu configuracion (usuarios, exclusiones, empresa, IPs de confianza, clave, ni HOME_NET/Suricata).</p>"
             "</section>")
-    # --- tarjeta: flota (actualizar los demas paneles por SSH desde este) ---
-    card_flota = ""
-    if es_admin and yo:
-        fl = cargar_flota()
-        pub = flota_key_pub()
-        res = fl.get("resultados", {})
-        _fcss = ("<style>"
-                 ".flt{width:100%;border-collapse:collapse;font-size:13.5px;margin:6px 0 4px}"
-                 ".flt th,.flt td{padding:8px 10px;border-top:1px solid #f0efec;text-align:left;vertical-align:middle}"
-                 ".flt th{color:#8a8a86;font-size:12px;border-top:0}"
-                 ".flt .rok{color:#1a7f37;font-weight:700}.flt .rbad{color:#b52a2a;font-weight:700}"
-                 ".flt .rna{color:#8a8a86}"
-                 ".fltacts{display:flex;gap:6px}.fltacts form{margin:0}"
-                 ".fbtn{border:1px solid #d7d6d2;background:#eef0f2;color:#33322f;border-radius:7px;padding:6px 10px;font:600 12.5px system-ui;cursor:pointer}"
-                 ".fbtn:hover{background:#e2e5e8}.fbtn.dng:hover{background:#e34948;color:#fff;border-color:#e34948}"
-                 ".fkey{width:100%;box-sizing:border-box;font:12px ui-monospace,Consolas,monospace;padding:9px;border:1px solid #d7d6d2;border-radius:8px;background:#f7f7f5;resize:vertical}"
-                 "</style>")
-        # tabla de nodos
-        if fl.get("nodes"):
-            filas = ""
-            for n in fl["nodes"]:
-                h = esc(n.get("host", "")); nm = esc(n.get("nombre", "") or n.get("host", ""))
-                dest = f"{esc(n.get('user','root'))}@{h}:{n.get('port',22)}"
-                r = res.get(n.get("host", ""), {})
-                if not r:
-                    rcell = "<span class=rna>sin datos</span>"
-                elif r.get("ok"):
-                    cuando = time.strftime("%d/%m %H:%M", time.localtime(r.get("ts", 0)))
-                    sha = f" &middot; {esc(r.get('commit',''))}" if r.get("commit") else ""
-                    rcell = f"<span class=rok>&#10003; OK</span> <span class=rna>{cuando}{sha}</span>"
-                else:
-                    cuando = time.strftime("%d/%m %H:%M", time.localtime(r.get("ts", 0)))
-                    rcell = f"<span class=rbad>&#10007; {esc(r.get('msg',''))}</span> <span class=rna>{cuando}</span>"
-                filas += (
-                    f"<tr><td><b>{nm}</b><div class=rna style='font-size:12px'>{dest}</div></td>"
-                    f"<td>{rcell}</td><td><div class=fltacts>"
-                    f"<form method=post action='/flota-run'><input type=hidden name=host value=\"{h}\">"
-                    "<button class=fbtn type=submit>Actualizar</button></form>"
-                    f"<form method=post action='/flota-del' onsubmit=\"return confirm('Quitar este nodo de la flota?')\">"
-                    f"<input type=hidden name=host value=\"{h}\">"
-                    "<button class='fbtn dng' type=submit>Quitar</button></form>"
-                    "</div></td></tr>")
-            tabla_nodos = (f"<table class=flt><thead><tr><th>Nodo</th><th>Ultimo resultado</th><th></th></tr></thead>"
-                           f"<tbody>{filas}</tbody></table>")
-        else:
-            tabla_nodos = "<p class=sub2>Todavia no agregaste nodos. Agrega el primero abajo.</p>"
-        # seccion de la clave SSH
-        if pub:
-            key_sec = ("<p class=sub2 style='margin-top:6px'>Para que este panel pueda actualizar a los demas, "
-                       "agrega esta <b>clave publica</b> en cada cliente, en "
-                       "<code>/root/.ssh/authorized_keys</code>:</p>"
-                       f"<textarea class=fkey rows=2 readonly onclick='this.select()'>{esc(pub)}</textarea>")
-        else:
-            key_sec = ("<p class=sub2 style='margin-top:6px'>Primero genera la clave SSH de la flota "
-                       "(se guarda solo en este servidor):</p>"
-                       "<form method=post action='/flota-key'><button class=primary type=submit>Generar clave SSH</button></form>")
-        # formulario para agregar un nodo
-        add_form = (
-            "<h3 style='margin:16px 0 6px;font-size:15px'>Agregar nodo</h3>"
-            "<form method=post action='/flota-add'><div class=grid2>"
-            "<div class=field><label>Nombre (referencia)</label>"
-            "<input type=text name=nombre placeholder='Nodo Norte'></div>"
-            "<div class=field><label>Host / IP</label>"
-            "<input type=text name=host required placeholder='192.0.2.10'></div>"
-            "<div class=field><label>Usuario SSH</label>"
-            "<input type=text name=usuario value='root'></div>"
-            "<div class=field><label>Puerto SSH</label>"
-            "<input type=number name=puerto value='22' min='1' max='65535'></div>"
-            "</div><div class=actions><button class=primary type=submit>Agregar nodo</button></div></form>")
-        # boton actualizar toda la flota
-        btn_todo = ""
-        if fl.get("nodes") and pub:
-            btn_todo = ("<form method=post action='/flota-run' style='margin:4px 0 2px' "
-                        "onsubmit=\"return confirm('Actualizar TODOS los nodos de la flota ahora? Cada panel se reiniciara unos segundos.')\">"
-                        "<button class=primary type=submit>&#8681; Actualizar toda la flota</button></form>")
-        card_flota = (
-            _fcss + "<section class=card><h2>Flota de paneles</h2>"
-            "<p class=sub2>Actualiza los <b>demas paneles</b> de la flota por SSH desde este. "
-            "Corre el actualizador en cada cliente (baja la ultima version de GitHub y reinicia su panel). "
-            "La clave SSH se guarda solo en este servidor (permisos 600).</p>"
-            + tabla_nodos + btn_todo + "<hr class=versep>" + key_sec + add_form + "</section>")
     # --- tarjeta: conexion al MikroTik para la cuarentena (solo admin) ---
     card_mk = ""
     if es_admin and yo:
@@ -3953,7 +3791,6 @@ def perfil_page(msg="", ok=False, edit_user=None):
              + _tile("acceso", "IPs de confianza", _IC_SHIELD, bool(card_acceso))
              + _tile("mikrotik", "MikroTik", _IC_RTR, bool(card_mk))
              + _tile("update", "Actualizaciones", _IC_DL, bool(card_update))
-             + _tile("flota", "Flota", _IC_FLEET, bool(card_flota))
              + _tile("log", "Log", _IC_LOG, es_admin)
              + _tile("doc", "Documentacion", _IC_BOOK, True))
     hub = f"<div class=hubgrid>{tiles}</div>"
@@ -3964,8 +3801,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
     def _mcard(sid, card):
         return _modal(sid, card) if card else ""
     modals = (_mcard("perfil", card_pw) + _mcard("empresa", card_empresa) + _mcard("usuarios", card_users)
-              + _mcard("acceso", card_acceso) + _mcard("mikrotik", card_mk) + _mcard("update", card_update)
-              + _mcard("flota", card_flota))
+              + _mcard("acceso", card_acceso) + _mcard("mikrotik", card_mk) + _mcard("update", card_update))
     if es_admin:
         modals += _modal("log", "<iframe class=aptframe data-src='/log?embed=1'></iframe>")
     modals += _modal("doc", "<iframe class=aptframe data-src='/documentacion?embed=1'></iframe>")
@@ -5067,49 +4903,6 @@ class H(BaseHTTPRequestHandler):
                 ok = True
             except Exception:
                 msg, ok = "No se pudo consultar GitHub (sin red o limite de la API).", False
-            return self._html(perfil_page(msg, ok=ok))
-        if ruta == "/flota-key":
-            if not self._admin():
-                return self._deny()
-            ok, msg = flota_generar_key()
-            return self._html(perfil_page(msg, ok=ok))
-        if ruta == "/flota-add":
-            if not self._admin():
-                return self._deny()
-            host = q.get("host", [""])[0].strip()
-            if not host:
-                return self._html(perfil_page("Falta el host/IP del nodo.", ok=False))
-            try:
-                puerto = int(q.get("puerto", ["22"])[0] or 22)
-            except ValueError:
-                puerto = 22
-            d = cargar_flota()
-            if any(n.get("host") == host for n in d["nodes"]):
-                return self._html(perfil_page("Ese host ya esta en la flota.", ok=False))
-            d["nodes"].append({"host": host, "port": puerto,
-                               "user": (q.get("usuario", ["root"])[0].strip() or "root"),
-                               "nombre": q.get("nombre", [""])[0].strip()})
-            guardar_flota(d)
-            return self._html(perfil_page(f"Nodo {host} agregado a la flota.", ok=True))
-        if ruta == "/flota-del":
-            if not self._admin():
-                return self._deny()
-            host = q.get("host", [""])[0].strip()
-            d = cargar_flota()
-            d["nodes"] = [n for n in d["nodes"] if n.get("host") != host]
-            d.get("resultados", {}).pop(host, None)
-            guardar_flota(d)
-            return self._html(perfil_page(f"Nodo {host} quitado de la flota.", ok=True))
-        if ruta == "/flota-run":
-            if not self._admin():
-                return self._deny()
-            host = q.get("host", [""])[0].strip() or None
-            nok, ntot = flota_actualizar(host)
-            if ntot == 0:
-                msg, ok = "No hay nodos que actualizar.", False
-            else:
-                msg = f"Flota actualizada: {nok}/{ntot} nodo(s) OK."
-                ok = (nok == ntot)
             return self._html(perfil_page(msg, ok=ok))
         if ruta == "/update-panel":
             if not self._admin():

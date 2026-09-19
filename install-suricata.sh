@@ -3265,7 +3265,7 @@ def refrescador():
             try: podar_reportes()
             except Exception: pass
             ult_poda = time.time()
-        if time.time() - ult_updchk > 21600:   # cada 6h: mirar si hay actualizacion en GitHub
+        if time.time() - ult_updchk > 3600:    # cada 1h: mirar si hay actualizacion en GitHub
             try: chequear_update()
             except Exception: pass
             ult_updchk = time.time()
@@ -3366,10 +3366,10 @@ def nav(active=""):
     upd_btn = ""; upd_modal = ""
     if getattr(CTX, "role", None) == "admin":
         # si el cache esta viejo/ausente, consultar GitHub EN EL MOMENTO (timeout corto)
-        # para que el aviso salga en el primer load; como mucho 1 vez cada 30 min por caja
+        # para que el aviso salga en el primer load; como mucho 1 vez cada 10 min por caja
         # (un chequeo fallido tambien actualiza 'checked', asi no repite la espera).
         _info = update_info()
-        if (not _info) or (time.time() - _info.get("checked", 0) > 1800):
+        if (not _info) or (time.time() - _info.get("checked", 0) > 600):
             try: chequear_update(timeout=6)
             except Exception: pass
         ue = update_estado()

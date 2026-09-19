@@ -3405,6 +3405,54 @@ def conf_dash_set(key, val):
     except OSError:
         pass
 
+# --- feeds de reputacion: Auth-Key (abuse.ch) y estado por fuente ---
+FEEDS_CONF = "/etc/suricata-feeds.conf"
+FEEDS_META = "/var/lib/suricata-feeds/reputation.meta"
+
+def feeds_auth_configurada():
+    """La Auth-Key esta puesta? (nunca se devuelve el valor, solo si existe)."""
+    try:
+        for l in open(FEEDS_CONF, encoding="utf-8"):
+            l = l.strip()
+            if l.startswith("ABUSE_CH_AUTH_KEY=") and l.split("=", 1)[1].strip():
+                return True
+    except OSError:
+        pass
+    return False
+
+def feeds_auth_set(val):
+    """Guarda/actualiza (o borra) ABUSE_CH_AUTH_KEY en /etc/suricata-feeds.conf (permisos 600).
+    Solo-escritura: el valor NO se muestra despues. Conserva los comentarios/plantilla."""
+    try:
+        lineas = open(FEEDS_CONF, encoding="utf-8").read().splitlines()
+    except OSError:
+        lineas = []
+    out = [l for l in lineas if not l.strip().startswith("ABUSE_CH_AUTH_KEY=")]  # quita la activa vieja
+    v = (val or "").strip()
+    if v:
+        out.append(f"ABUSE_CH_AUTH_KEY={v}")
+    try:
+        tmp = FEEDS_CONF + ".tmp"
+        open(tmp, "w", encoding="utf-8").write("\n".join(out) + "\n")
+        os.chmod(tmp, 0o600); os.replace(tmp, FEEDS_CONF); os.chmod(FEEDS_CONF, 0o600)
+        return True
+    except OSError:
+        return False
+
+def cargar_feeds_meta():
+    try:
+        return json.load(open(FEEDS_META, encoding="utf-8"))
+    except Exception:
+        return {}
+
+def actualizar_feeds_async():
+    try:
+        subprocess.Popen(["/usr/local/bin/suricata-feeds-update"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
+
 def guardar_usuarios(lst):
     tmp = USERS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -3960,6 +4008,7 @@ _IC_DL    = _ic("M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z")
 _IC_LOG   = _ic("M3 5h18v2H3V5zm0 6h18v2H3v-2zm0 6h12v2H3v-2z")
 _IC_BOOK  = _ic("M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z")
 _IC_AUDIT = _ic("M19 3h-4.18C14.4 1.84 13.3 1 12 1c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm-2 14l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z")
+_IC_FEED  = _ic("M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 4.5a2.5 2.5 0 0 1 2.5 2.5c0 1-.6 1.9-1.5 2.3V17h-2v-4.7A2.5 2.5 0 0 1 9.5 8 2.5 2.5 0 0 1 12 5.5z")
 
 def _card_politicas(m):
     """Sub-bloque de la tarjeta MikroTik: politicas por banda de riesgo del Top origenes."""
@@ -4148,6 +4197,55 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<p class=sub2 style='margin-top:14px;color:#8a8a86'>Solo actualiza el codigo del panel y de los reportes; "
             "no toca tu configuracion (usuarios, exclusiones, empresa, IPs de confianza, clave, ni HOME_NET/Suricata).</p>"
             "</section>")
+    # --- tarjeta: reputacion / feeds (Auth-Key abuse.ch + estado por fuente; solo admin) ---
+    card_feeds = ""
+    if es_admin and yo:
+        meta = cargar_feeds_meta()
+        srcs = meta.get("sources", {})
+        auth_ok = feeds_auth_configurada()
+        def _estb(e):
+            c = {"valido": "#1a7f37", "vacio": "#e58a00", "error": "#b52a2a",
+                 "sin-clave": "#7a4a12", "caducado": "#b52a2a"}.get(e, "#8a8a86")
+            return (f"<span style='background:{c};color:#fff;font-size:10.5px;font-weight:700;"
+                    f"padding:2px 8px;border-radius:20px'>{esc(e)}</span>")
+        filas = ""
+        for name, s in srcs.items():
+            fv = s.get("fetched_valid", 0)
+            ult = time.strftime("%d/%m %H:%M", time.localtime(fv)) if fv else "&mdash;"
+            exp = time.strftime("%d/%m %H:%M", time.localtime(s.get("expira", 0))) if s.get("expira") else "&mdash;"
+            vig = "si" if s.get("vigente") else "no"
+            filas += (f"<tr><td class=mono>{esc(name)}</td><td>{_estb(s.get('estado', '?'))}</td>"
+                      f"<td>{vig}</td><td class=num>{s.get('count', 0):,}</td>"
+                      f"<td class=mono>{ult}</td><td class=mono>{exp}</td></tr>")
+        if not filas:
+            filas = ("<tr><td colspan=6 class=hint style='padding:12px'>Sin datos de feeds todavia. "
+                     "Pulsa 'Actualizar feeds ahora'.</td></tr>")
+        gen = meta.get("generated", 0)
+        genT = time.strftime("%d/%m %H:%M", time.localtime(gen)) if gen else "nunca"
+        card_feeds = (
+            "<style>.feedt{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0 2px}"
+            ".feedt th,.feedt td{padding:7px 10px;border-top:1px solid #f0efec;text-align:left}"
+            ".feedt th{color:#8a8a86;font-size:12px;border-top:0}.feedt .num{text-align:right}</style>"
+            "<section class=card><h2>Reputacion / feeds</h2>"
+            "<p class=sub2>Fuentes de reputacion (IPs y dominios de C2/malware) que respaldan el riesgo. "
+            "URLhaus y ThreatFox de abuse.ch exigen una <b>Auth-Key</b> gratis "
+            "(<a href='https://auth.abuse.ch/' target=_blank>auth.abuse.ch</a>). La clave se guarda solo "
+            "en este servidor (permisos 600) y <b>no se vuelve a mostrar</b>.</p>"
+            "<form method=post action='/feeds'>"
+            "<div class=field><label>Auth-Key de abuse.ch "
+            + ("<span style='color:#3a9d5d'>(configurada)</span>" if auth_ok else "<span style='color:#b06a00'>(sin configurar)</span>")
+            + "</label>"
+            "<input type=password name=authkey autocomplete=new-password placeholder='"
+            + ("dejar vacio para conservar" if auth_ok else "pega tu Auth-Key") + "'>"
+            "<div class=hint>Solo escritura. Para <b>quitarla</b>, escribe <code>BORRAR</code>.</div></div>"
+            "<div class=actions><button class=primary type=submit>Guardar clave</button></div></form>"
+            "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px'>"
+            "<form method=post action='/feeds/actualizar' style='margin:0'>"
+            "<button class=cancelbtn type=submit>Actualizar feeds ahora</button></form>"
+            f"<span class=hint>Ultima corrida del actualizador: {genT}</span></div>"
+            "<table class=feedt><thead><tr><th>Fuente</th><th>Estado</th><th>Vigente</th>"
+            "<th class=num>Indicadores</th><th>Ultima valida</th><th>Caduca</th></tr></thead>"
+            f"<tbody>{filas}</tbody></table></section>")
     # --- tarjeta: conexion al MikroTik para la cuarentena (solo admin) ---
     card_mk = ""
     if es_admin and yo:
@@ -4472,6 +4570,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
              + _tile("usuarios", "Usuarios y roles", _IC_USERS, bool(card_users))
              + _tile("acceso", "IPs de confianza", _IC_SHIELD, bool(card_acceso))
              + _tile("mikrotik", "MikroTik", _IC_RTR, bool(card_mk))
+             + _tile("feeds", "Reputacion", _IC_FEED, bool(card_feeds))
              + _tile("update", "Actualizaciones", _IC_DL, bool(card_update))
              + _tile("log", "Log", _IC_LOG, es_admin)
              + _tile("bitacora", "Bitacora", _IC_AUDIT, es_admin)
@@ -4484,7 +4583,8 @@ def perfil_page(msg="", ok=False, edit_user=None):
     def _mcard(sid, card):
         return _modal(sid, card) if card else ""
     modals = (_mcard("perfil", card_pw) + _mcard("empresa", card_empresa) + _mcard("usuarios", card_users)
-              + _mcard("acceso", card_acceso) + _mcard("mikrotik", card_mk) + _mcard("update", card_update))
+              + _mcard("acceso", card_acceso) + _mcard("mikrotik", card_mk) + _mcard("feeds", card_feeds)
+              + _mcard("update", card_update))
     if es_admin:
         modals += _modal("log", "<iframe class=aptframe data-src='/log?embed=1'></iframe>")
         modals += _modal("bitacora", "<iframe class=aptframe data-src='/bitacora?embed=1'></iframe>")
@@ -5946,6 +6046,25 @@ class H(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(b)))
                 self.end_headers(); self.wfile.write(b); return
             return self._html(perfil_page(("Prueba: " + msg), ok=ok))
+        if ruta == "/feeds":
+            if not self._admin():
+                return self._deny()
+            ak = q.get("authkey", [""])[0]
+            if ak.strip() == "BORRAR":
+                feeds_auth_set(""); bitacora("CONFIG-FEEDS-AUTHKEY", "borrada")
+                msg = "Auth-Key borrada. URLhaus/ThreatFox quedaran 'sin-clave'."
+            elif ak.strip():
+                feeds_auth_set(ak); bitacora("CONFIG-FEEDS-AUTHKEY", "actualizada")
+                actualizar_feeds_async()
+                msg = "Auth-Key guardada (solo en este servidor). Actualizando feeds en segundo plano."
+            else:
+                msg = "Sin cambios en la Auth-Key."
+            return self._html(perfil_page(msg, ok=True))
+        if ruta == "/feeds/actualizar":
+            if not self._admin():
+                return self._deny()
+            actualizar_feeds_async(); bitacora("ACTUALIZAR-FEEDS", "manual")
+            return self._html(perfil_page("Actualizando feeds en segundo plano; recarga en un momento para ver el estado.", ok=True))
         if ruta == "/cuarentena/enviar":
             if not self._operador():
                 return self._deny()

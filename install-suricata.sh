@@ -591,102 +591,197 @@ chmod 644 /etc/suricata-exclusiones.json
 # Alimentan la senal de "reputacion" del puntaje de riesgo por CPE. Falla suave.
 cat > /usr/local/bin/suricata-feeds-update <<'FEEDS'
 #!/usr/bin/env python3
-"""Baja feeds de reputacion IP y arma /var/lib/suricata-feeds/reputation.lst + .meta
-con version (fecha) y caducidad (ttl_days). Sin dependencias externas; un feed caido
-no rompe a los demas. Fuentes gratis, orientadas a ISP (IPs de C2/botnet/atacantes)."""
-import ipaddress, json, os, sys, time, urllib.request
+"""Baja feeds de reputacion (IPs y dominios) CON PROCEDENCIA y CADUCIDAD POR FUENTE.
+Cada fuente se guarda por separado en src/<fuente>.lst (indicador por linea); si una
+descarga falla o no es valida, se CONSERVA la ultima version valida de esa fuente y se
+marca su estado (valido/vacio/error/sin-clave). reputation.lst/domains.lst se rearman
+uniendo solo las fuentes NO caducadas, con la fuente en cada linea (indicador<TAB>fuente).
+Auth-Key de abuse.ch (URLhaus/ThreatFox) opcional en /etc/suricata-feeds.conf."""
+import ipaddress, json, os, sys, time, urllib.request, urllib.error
 
 DIR = "/var/lib/suricata-feeds"
-TTL_DAYS = 7
-FEEDS = [
-    ("feodo",          "https://feodotracker.abuse.ch/downloads/ipblocklist.txt"),
-    ("cins",           "https://cinsscore.com/list/ci-badguys.txt"),
-    ("spamhaus-drop",  "https://www.spamhaus.org/drop/drop.txt"),
-    ("spamhaus-edrop", "https://www.spamhaus.org/drop/edrop.txt"),
-]
-os.makedirs(DIR, exist_ok=True)
+SRCDIR = os.path.join(DIR, "src")
+CONF = "/etc/suricata-feeds.conf"
+os.makedirs(SRCDIR, exist_ok=True)
 
-def bajar(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "suricata-feeds/1.0"})
+def _conf(k, d=""):
+    try:
+        for l in open(CONF, encoding="utf-8"):
+            l = l.strip()
+            if l.startswith(k + "="):
+                return l.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return d
+
+AUTH_KEY = _conf("ABUSE_CH_AUTH_KEY", "")
+# fuente: (nombre, url, ttl_horas[caducidad], tipo[ip|dom], categoria, requiere_auth, min_min[intervalo minimo de descarga])
+# EDROP se ELIMINO como fuente aparte: se fusiono en Spamhaus DROP (abr-2024).
+# Feodo: lista RECOMENDADA (servidores C2 activos/recientes), refresca cada 5 min upstream.
+IPF = [
+    ("feodo",         _conf("FEODO_URL", "https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt"), 6, "ip", "c2-activo", False, 10),
+    ("cins",          _conf("CINS_URL", "https://cinsscore.com/list/ci-badguys.txt"), 48, "ip", "atacante-observado", False, 720),
+    ("spamhaus-drop", _conf("SPAMHAUS_DROP_URL", "https://www.spamhaus.org/drop/drop.txt"), 192, "cidr", "infra-delictiva", False, 1440),
+]
+DOMF = [
+    ("urlhaus",   _conf("URLHAUS_URL", "https://urlhaus.abuse.ch/downloads/hostfile/"), 24, "dom", "distribucion-malware", True, 60),
+    ("threatfox", _conf("THREATFOX_URL", "https://threatfox.abuse.ch/downloads/hostfile/"), 24, "dom", "c2-ioc", True, 60),
+]
+
+def _fetch(url):
+    hdrs = {"User-Agent": "suricata-feeds/2.0"}
+    if AUTH_KEY:
+        hdrs["Auth-Key"] = AUTH_KEY                     # abuse.ch: cabecera Auth-Key
+    url = url.replace("{AUTH}", AUTH_KEY)               # o clave en la URL, si la fuente la usa asi
+    req = urllib.request.Request(url, headers=hdrs)
     with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read().decode("utf-8", "replace")
+        ctype = (r.headers.get("Content-Type", "") or "").lower()
+        body = r.read().decode("utf-8", "replace")
+    return body, ctype
 
-entradas = set()
+def _es_html(body):
+    b = body.lstrip()[:400].lower()
+    return b.startswith("<!doctype html") or b.startswith("<html") or "<head" in b or "<title" in b
+
+def _parse_ip(body):
+    out = set()
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line[0] in "#;":
+            continue
+        tok = line.split(";")[0].split()[0].strip()
+        try:
+            if "/" in tok:
+                net = ipaddress.ip_network(tok, strict=False)
+                if net.version == 4:
+                    out.add(str(net))
+            else:
+                ip = ipaddress.ip_address(tok)
+                if ip.version == 4:
+                    out.add(str(ip))
+        except ValueError:
+            continue
+    return out
+
+def _parse_dom(body):
+    out = set()
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line[0] == "#":
+            continue
+        parts = line.split()
+        dom = (parts[-1] if len(parts) >= 2 else parts[0]).strip().lower().rstrip(".")
+        if not dom or "." not in dom or dom in ("localhost", "0.0.0.0", "127.0.0.1", "::1"):
+            continue
+        # dominio plausible: labels validos, TLD alfabetico
+        labs = dom.split(".")
+        if len(labs) < 2 or not labs[-1].isalpha() or any(not l or len(l) > 63 for l in labs):
+            continue
+        out.add(dom)
+    return out
+
+def _cargar_meta():
+    try:
+        return json.load(open(os.path.join(DIR, "reputation.meta"), encoding="utf-8"))
+    except Exception:
+        return {}
+
+meta_prev = _cargar_meta()
+src_prev = meta_prev.get("sources", {})
 sources = {}
-for name, url in FEEDS:
-    ok = False; n = 0
-    try:
-        for line in bajar(url).splitlines():
-            line = line.strip()
-            if not line or line[0] in "#;":
-                continue
-            tok = line.split(";")[0].split()[0].strip()   # spamhaus: "1.2.3.0/24 ; SBL.."
-            try:
-                if "/" in tok:
-                    net = ipaddress.ip_network(tok, strict=False)
-                    if net.version != 4:
-                        continue
-                    entradas.add(str(net)); n += 1
+now = int(time.time())
+
+def procesar(name, url, ttl_h, tipo, cat, auth, min_min):
+    prev = src_prev.get(name, {})
+    estado = "error"; n = prev.get("count", 0); fv = prev.get("fetched_valid", 0)
+    parse = _parse_dom if tipo == "dom" else _parse_ip
+    if fv and prev.get("estado") == "valido" and (now - fv) < min_min * 60 \
+            and os.path.exists(os.path.join(SRCDIR, name + ".lst")):
+        estado = "valido"                   # descargado hace poco: no re-bajar (respeta el upstream)
+    elif auth and not AUTH_KEY:
+        estado = "sin-clave"                # necesita Auth-Key y no hay -> se conserva lo viejo
+    else:
+        try:
+            body, ctype = _fetch(url)
+            if "text/html" in ctype or _es_html(body):
+                estado = "error"            # respuesta HTML (login/portal/error), NO una lista
+            else:
+                items = parse(body)
+                if not items:
+                    estado = "vacio"        # descarga OK pero sin entradas validas
                 else:
-                    ip = ipaddress.ip_address(tok)
-                    if ip.version != 4:
-                        continue
-                    entradas.add(str(ip)); n += 1
-            except Exception:
-                continue
-        ok = True
-    except Exception as e:
-        sys.stderr.write(f"{name}: fallo {e}\n")
-    sources[name] = {"ok": ok, "count": n, "url": url, "fetched": int(time.time()) if ok else 0}
+                    tmp = os.path.join(SRCDIR, name + ".lst.tmp")
+                    open(tmp, "w", encoding="utf-8").write("\n".join(sorted(items)) + "\n")
+                    os.replace(tmp, os.path.join(SRCDIR, name + ".lst"))
+                    estado, n, fv = "valido", len(items), now
+        except urllib.error.HTTPError as e:
+            estado = "sin-clave" if e.code in (401, 403) and auth else "error"
+            sys.stderr.write(f"{name}: HTTP {e.code}\n")
+        except Exception as e:
+            estado = "error"; sys.stderr.write(f"{name}: {e}\n")
+    expira = (fv + ttl_h * 3600) if fv else 0
+    caducado = fv and now > expira
+    sources[name] = {"estado": estado, "count": n, "url": url, "tipo": tipo, "categoria": cat,
+                     "ttl_horas": ttl_h, "fetched_valid": fv, "expira": expira,
+                     "vigente": bool(fv and not caducado), "requiere_auth": auth}
 
-# --- feeds de DOMINIOS malos (Camino B: se cruzan con las consultas DNS del espejo) ---
-DOMFEEDS = [
-    ("urlhaus-dom",   "https://urlhaus.abuse.ch/downloads/hostfile/"),
-    ("threatfox-dom", "https://threatfox.abuse.ch/downloads/hostfile/"),
-]
-dominios = set()
-for name, url in DOMFEEDS:
-    ok = False; n = 0
+for f in IPF + DOMF:
+    procesar(*f)
+
+def _leer_src(name):
     try:
-        for line in bajar(url).splitlines():
-            line = line.strip()
-            if not line or line[0] == "#":
-                continue
-            parts = line.split()
-            dom = (parts[-1] if len(parts) >= 2 else parts[0]).strip().lower().rstrip(".")
-            if not dom or "." not in dom or dom in ("localhost", "0.0.0.0", "127.0.0.1"):
-                continue
-            dominios.add(dom); n += 1
-        ok = True
-    except Exception as e:
-        sys.stderr.write(f"{name}: fallo {e}\n")
-    sources[name] = {"ok": ok, "count": n, "url": url, "fetched": int(time.time()) if ok else 0}
+        return [l.strip() for l in open(os.path.join(SRCDIR, name + ".lst"), encoding="utf-8") if l.strip()]
+    except OSError:
+        return []
 
-if not entradas and not dominios:
-    sys.stderr.write("ningun feed dio datos; no se sobrescribe lo existente\n")
-    sys.exit(1)
-
-if entradas:
+# rearmar reputation.lst / domains.lst uniendo SOLO fuentes vigentes (no caducadas),
+# con la fuente en cada linea: "indicador<TAB>fuente".
+rep_lines = []; dom_lines = []; n_ip = 0; n_dom = 0
+for name, s in sources.items():
+    if not s["vigente"]:
+        continue
+    for ind in _leer_src(name):
+        if s["tipo"] == "dom":
+            dom_lines.append(f"{ind}\t{name}"); n_dom += 1
+        else:
+            rep_lines.append(f"{ind}\t{name}"); n_ip += 1
+if rep_lines:
     tmp = os.path.join(DIR, "reputation.lst.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write("\n".join(sorted(entradas)) + "\n")
+    open(tmp, "w", encoding="utf-8").write("\n".join(rep_lines) + "\n")
     os.replace(tmp, os.path.join(DIR, "reputation.lst"))
-if dominios:
-    tmpd = os.path.join(DIR, "domains.lst.tmp")
-    with open(tmpd, "w", encoding="utf-8") as f:
-        f.write("\n".join(sorted(dominios)) + "\n")
-    os.replace(tmpd, os.path.join(DIR, "domains.lst"))
-with open(os.path.join(DIR, "reputation.meta"), "w", encoding="utf-8") as f:
-    json.dump({"generated": int(time.time()), "ttl_days": TTL_DAYS,
-               "total": len(entradas), "total_dominios": len(dominios), "sources": sources}, f, indent=2)
-oks = sum(1 for s in sources.values() if s["ok"])
-print(f"reputation.lst: {len(entradas)} IPs; domains.lst: {len(dominios)} dominios; {oks}/{len(FEEDS)+len(DOMFEEDS)} feeds OK")
+if dom_lines:
+    tmp = os.path.join(DIR, "domains.lst.tmp")
+    open(tmp, "w", encoding="utf-8").write("\n".join(dom_lines) + "\n")
+    os.replace(tmp, os.path.join(DIR, "domains.lst"))
+
+meta = {"generated": now, "total": n_ip, "total_dominios": n_dom, "sources": sources}
+open(os.path.join(DIR, "reputation.meta"), "w", encoding="utf-8").write(json.dumps(meta, indent=2))
+vig = sum(1 for s in sources.values() if s["vigente"])
+print(f"reputation.lst: {n_ip} IPs; domains.lst: {n_dom} dominios; {vig}/{len(sources)} fuentes vigentes")
+for name, s in sources.items():
+    print(f"  {name}: {s['estado']} ({s['count']}) vigente={s['vigente']}")
+if not rep_lines and not dom_lines:
+    sys.exit(1)
 FEEDS
 chmod 755 /usr/local/bin/suricata-feeds-update
-# cron diario (04:17) para refrescar los feeds
+# config opcional de feeds: Auth-Key de abuse.ch (URLhaus/ThreatFox) y overrides de URL.
+if [ ! -f /etc/suricata-feeds.conf ]; then
+  cat > /etc/suricata-feeds.conf <<'FCONF'
+# Feeds de reputacion del panel Suricata. Tras editar: /usr/local/bin/suricata-feeds-update
+# abuse.ch (URLhaus y ThreatFox) EXIGE Auth-Key gratis: https://auth.abuse.ch/
+# Descomenta y pega tu clave (este archivo es 600, la clave NO sale del server):
+#ABUSE_CH_AUTH_KEY=tu-auth-key
+# Overrides de URL (opcional; si abuse.ch cambia el endpoint):
+#URLHAUS_URL=https://urlhaus.abuse.ch/downloads/hostfile/
+#THREATFOX_URL=https://threatfox.abuse.ch/downloads/hostfile/
+FCONF
+  chmod 600 /etc/suricata-feeds.conf
+fi
+# cron cada 15 min: cada fuente respeta su propio intervalo minimo (Feodo se refresca
+# seguido; DROP/CINS se bajan 1x/dia aunque el cron corra), asi no se martillan los feeds.
 cat > /etc/cron.d/suricata-feeds <<'CRON'
-# Refresca los feeds de reputacion IP del panel Suricata (falla suave)
-17 4 * * * root /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1
+# Refresca los feeds de reputacion del panel Suricata (falla suave, intervalo por fuente)
+*/15 * * * * root /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1
 CRON
 chmod 644 /etc/cron.d/suricata-feeds
 # primera carga ya (best-effort; si no hay internet, el score corre con reputacion=0)
@@ -962,28 +1057,35 @@ ts_min = None          # timestamp del evento mas antiguo dentro de la ventana (
 # --- Camino B: dominios malos (feeds URLhaus/ThreatFox) para cruzar con las consultas DNS.
 # DEBE definirse ANTES del bucle: el parseo de dns.json usa DOM_OK/dominio_malo. ---
 FEEDS_DIR = "/var/lib/suricata-feeds"
-DOM_MAL = set()
+DOM_MAL = {}          # dominio -> fuente (procedencia)
 DOM_OK = False
 try:
     _dm = json.load(open(os.path.join(FEEDS_DIR, "reputation.meta"), encoding="utf-8"))
-    if time.time() - _dm.get("generated", 0) <= _dm.get("ttl_days", 7) * 86400:
+    # caducidad fina por fuente ya aplicada al rearmar domains.lst; guarda gruesa de 3 dias
+    if time.time() - _dm.get("generated", 0) <= 3 * 86400:
         for _l in open(os.path.join(FEEDS_DIR, "domains.lst"), encoding="utf-8"):
-            _l = _l.strip().lower()
-            if _l and _l[0] not in "#;":
-                DOM_MAL.add(_l)
+            _l = _l.rstrip("\n")
+            if not _l or _l[0] in "#;":
+                continue
+            _d, _, _s = _l.partition("\t")
+            _d = _d.strip().lower()
+            if _d:
+                DOM_MAL[_d] = _s.strip() or "feed"
         DOM_OK = len(DOM_MAL) > 0
 except Exception:
     pass
 
 def dominio_malo(dom):
-    """El dominio (o su dominio padre) esta en la lista de dominios malos?"""
-    if dom in DOM_MAL:
-        return True
+    """Fuente que reporta el dominio (o su dominio padre), o '' si ninguna."""
+    s = DOM_MAL.get(dom)
+    if s:
+        return s
     p = dom.split(".")
     for i in range(1, len(p) - 1):          # a.b.evil.com -> b.evil.com -> evil.com (no el TLD solo)
-        if ".".join(p[i:]) in DOM_MAL:
-            return True
-    return False
+        s = DOM_MAL.get(".".join(p[i:]))
+        if s:
+            return s
+    return ""
 
 files = sorted(glob.glob(f"{LOGDIR}/eve.json*") + glob.glob(f"{LOGDIR}/dns.json*"),
                key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
@@ -1354,11 +1456,12 @@ def _org_celda(dst):
 
 # --- Reputacion: feeds de IPs/CIDR malos (suricata-feeds-update), con caducidad ---
 FEEDS_DIR = "/var/lib/suricata-feeds"
-REP_IPS = set()                 # IPs sueltas malas -> membresia O(1)
-REP_CIDR = defaultdict(list)    # primer octeto -> [(net_int, mask_int)] (prefijo >=8)
-REP_WIDE = []                   # CIDRs con prefijo <8 (raros) -> se revisan siempre
+REP_IPS = {}                    # ip -> fuente (procedencia)
+REP_CIDR = defaultdict(list)    # primer octeto -> [(net_int, mask_int, fuente)]
+REP_WIDE = []                   # CIDRs con prefijo <8 -> [(net, mask, fuente)]
 REP_OK = False                  # hay al menos un feed vigente?
 REP_INFO = "feeds no instalados"
+REP_META = {}                   # meta por fuente (estado, vigencia, caducidad) para la ficha
 
 def _ip4_int(ip):
     try:
@@ -1368,58 +1471,77 @@ def _ip4_int(ip):
         return None
 
 def _cargar_reputacion():
-    global REP_OK, REP_INFO
+    global REP_OK, REP_INFO, REP_META
     try:
         meta = json.load(open(os.path.join(FEEDS_DIR, "reputation.meta"), encoding="utf-8"))
     except Exception:
         REP_INFO = "feeds no instalados"; return
-    ttl = meta.get("ttl_days", 7) * 86400
-    if time.time() - meta.get("generated", 0) > ttl:
-        REP_INFO = f"feeds CADUCADOS (>{meta.get('ttl_days', 7)}d sin refrescar; no se usan)"; return
+    REP_META = meta.get("sources", {})
+    # guarda gruesa: si el actualizador no corre hace mucho, no confiar (la caducidad fina
+    # es por fuente y ya se aplico al rearmar reputation.lst -> solo trae fuentes vigentes)
+    if time.time() - meta.get("generated", 0) > 3 * 86400:
+        REP_INFO = "feeds sin refrescar (>3d; el actualizador no corre?)"; return
     try:
         for line in open(os.path.join(FEEDS_DIR, "reputation.lst"), encoding="utf-8"):
-            line = line.strip()
+            line = line.rstrip("\n")
             if not line or line[0] in "#;":
                 continue
-            if "/" in line:
+            ind, _, src = line.partition("\t")
+            ind = ind.strip(); src = src.strip() or "feed"
+            if "/" in ind:
                 try:
-                    ipp, pl = line.split("/"); pl = int(pl)
+                    ipp, pl = ind.split("/"); pl = int(pl)
                     base = _ip4_int(ipp)
                     if base is None:
                         continue
                     mask = (0xffffffff << (32 - pl)) & 0xffffffff if pl else 0
                     net = base & mask
                     if pl >= 8:
-                        REP_CIDR[(net >> 24) & 0xff].append((net, mask))
+                        REP_CIDR[(net >> 24) & 0xff].append((net, mask, src))
                     else:
-                        REP_WIDE.append((net, mask))
+                        REP_WIDE.append((net, mask, src))
                 except Exception:
                     continue
             else:
-                REP_IPS.add(line)
+                REP_IPS[ind] = src
     except Exception:
         pass
     n = len(REP_IPS) + sum(len(v) for v in REP_CIDR.values()) + len(REP_WIDE)
-    fuentes = ", ".join(k for k, s in meta.get("sources", {}).items() if s.get("ok"))
-    REP_INFO = f"{n:,} IOCs ({fuentes})" if n else "feeds vacios"
+    vig = ", ".join(k for k, s in REP_META.items() if s.get("vigente"))
+    REP_INFO = f"{n:,} IOCs ({vig})" if n else "feeds vacios"
     REP_OK = n > 0
 
 _cargar_reputacion()
 
 def es_malo(ip):
-    """La IP destino aparece en algun feed de reputacion?"""
-    if ip in REP_IPS:
-        return True
+    """Devuelve la FUENTE que reporta la IP destino (str no vacio) o '' si ninguna."""
+    s = REP_IPS.get(ip)
+    if s:
+        return s
     v = _ip4_int(ip)
     if v is None:
-        return False
-    for net, mask in REP_CIDR.get((v >> 24) & 0xff, ()):
+        return ""
+    for net, mask, src in REP_CIDR.get((v >> 24) & 0xff, ()):
         if (v & mask) == net:
-            return True
-    for net, mask in REP_WIDE:
+            return src
+    for net, mask, src in REP_WIDE:
         if (v & mask) == net:
-            return True
-    return False
+            return src
+    return ""
+
+def reputacion_de(ip):
+    """(fuente, cidr_exacto) que reporta la IP, para la ficha de evidencia; ('','') si ninguna."""
+    if ip in REP_IPS:
+        return (REP_IPS[ip], ip)
+    v = _ip4_int(ip)
+    if v is None:
+        return ("", "")
+    for tabla in (REP_CIDR.get((v >> 24) & 0xff, ()), REP_WIDE):
+        for net, mask, src in tabla:
+            if (v & mask) == net:
+                pl = bin(mask).count("1")
+                return (src, f"{(net >> 24) & 255}.{(net >> 16) & 255}.{(net >> 8) & 255}.{net & 255}/{pl}")
+    return ("", "")
 
 def riesgo(src):
     """Puntaje de riesgo 0-100 del CPE (IP origen) combinando senales, en vez de
@@ -6382,12 +6504,17 @@ mv /usr/local/bin/suricata-html-report.new   /usr/local/bin/suricata-html-report
 [ -f /usr/local/bin/suricata-feeds-update.new ] && mv /usr/local/bin/suricata-feeds-update.new /usr/local/bin/suricata-feeds-update
 chmod 755 /usr/local/bin/suricata-dashboard /usr/local/bin/suricata-html-report /usr/local/bin/suricata-panel-update
 [ -f /usr/local/bin/suricata-feeds-update ] && chmod 755 /usr/local/bin/suricata-feeds-update
-# cron de feeds y primera carga si el box aun no los tiene (boxes viejos)
-if [ ! -f /etc/cron.d/suricata-feeds ] && [ -f /usr/local/bin/suricata-feeds-update ]; then
-  printf '17 4 * * * root /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1\n' > /etc/cron.d/suricata-feeds
+# cron de feeds (cada 15 min; intervalo minimo por fuente) y primera carga; migra el cron viejo
+if [ -f /usr/local/bin/suricata-feeds-update ]; then
+  printf '# Refresca los feeds de reputacion del panel Suricata (falla suave, intervalo por fuente)\n*/15 * * * * root /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1\n' > /etc/cron.d/suricata-feeds
   chmod 644 /etc/cron.d/suricata-feeds
 fi
 [ -f /var/lib/suricata-feeds/reputation.lst ] || /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1 || true
+# re-generar reputation.lst con procedencia (indicador<TAB>fuente): si el box tiene el
+# formato viejo (sin TAB) y hay fuentes, correr el actualizador una vez para migrar.
+if [ -f /var/lib/suricata-feeds/reputation.lst ] && ! grep -q "$(printf '\t')" /var/lib/suricata-feeds/reputation.lst 2>/dev/null; then
+  /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1 || true
+fi
 date '+%Y-%m-%d %H:%M:%S' > /etc/suricata-dashboard.updated
 # registrar el SHA aplicado: el panel compara este valor con el ultimo commit de GitHub
 # para saber si hay actualizacion disponible y listar las mejoras nuevas.

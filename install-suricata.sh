@@ -2594,16 +2594,149 @@ def mk_sync_enviados():
             reales = mk_list_ips(lst)
         except Exception:
             continue                       # router no responde -> no tocar el registro
-        env = cargar_enviados(sent_path); cambiado = False
+        env = cargar_enviados(sent_path); cambiado = False; nowt = int(time.time())
         for ip in reales:
             if ip not in env:              # esta en el router pero no en el panel -> registrarlo
-                env[ip] = {"cuando": int(time.time()), "score": "", "por": "mikrotik", "manual": True}
-                cambiado = True
+                env[ip] = {"cuando": nowt, "score": "", "por": "mikrotik", "manual": True}
+            env[ip]["en_router"] = True; env[ip]["sync_ts"] = nowt   # confirmado en el router
+            cambiado = True
         for ip in list(env.keys()):
             if ip not in reales:           # ya no esta en el router (lo quitaron o expiro) -> soltar
                 env.pop(ip, None); cambiado = True
         if cambiado:
             guardar_enviados(env, sent_path)
+
+# --- cuarentena explicable: por que se bloqueo y cuando se reviso por ultima vez ---
+def _motivo_bloqueo(ip):
+    """Busca por que un CPE es candidato (firma, banda, score, conteos) en cuarentena.json,
+    para guardarlo AL bloquear y poder explicar el bloqueo aunque despues deje de atacar."""
+    try:
+        cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
+    except Exception:
+        return {}
+    for key, tipo, cnt, cntlbl, fir in (
+            ("candidatos", "infeccion", "alertas_cnc", "alertas CnC", "firmas_cnc"),
+            ("dns_candidatos", "dns", "alertas_dns", "alertas DNS", "firmas_dns")):
+        for c in cq.get(key, []):
+            if c.get("ip") == ip:
+                return {"tipo": tipo, "banda": c.get("banda", ""), "score": c.get("riesgo", 0),
+                        "firma": (c.get("firma", "") or "")[:120],
+                        "conteo": f"{c.get(cnt, 0)} {cntlbl}, {c.get(fir, 0)} firma(s)"}
+    return {}
+
+def evaluar_bloqueos():
+    """Sella en cada entrada de cuarentena la ultima evaluacion (last_eval) y si el CPE
+    SIGUE activo. Barato (solo lee cuarentena.json); corre cada ciclo del hilo de fondo."""
+    try:
+        cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
+    except Exception:
+        return
+    activos = ({c.get("ip") for c in cq.get("candidatos", [])}
+               | {c.get("ip") for c in cq.get("dns_candidatos", [])})
+    now = int(time.time())
+    for path in (MK_SENT, MK_SENT_DNS):
+        env = cargar_enviados(path)
+        if not env:
+            continue
+        for ip, e in env.items():
+            e["last_eval"] = now
+            e["sigue"] = ip in activos
+        guardar_enviados(env, path)
+
+# --- salud del sensor: distinguir "sin amenazas" de "sin trafico / perdidas / reporte viejo" ---
+SENSOR_FILE = "/var/log/suricata-sensor.json"
+
+def _suricatasc(cmd):
+    try:
+        r = subprocess.run(["suricatasc", "-c", cmd], capture_output=True, text=True, timeout=8)
+        return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None
+    except Exception:
+        return None
+
+def _svc_activo(nombre):
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", nombre],
+                              timeout=5).returncode == 0
+    except Exception:
+        return False
+
+def medir_sensor():
+    """Mide el estado real del sensor (captura, perdidas, servicios, frescura del reporte).
+    Corre en el hilo de fondo y cachea en SENSOR_FILE; el request solo lee el cache."""
+    prev = {}
+    try:
+        prev = json.load(open(SENSOR_FILE, encoding="utf-8"))
+    except Exception:
+        pass
+    now = time.time()
+    o = {"ts": int(now)}
+    o["suricata"] = _svc_activo("suricata")
+    o["tzsp_mode"] = os.path.exists("/etc/systemd/system/tzsp-decap.service")
+    o["tzsp"] = _svc_activo("tzsp-decap") if o["tzsp_mode"] else None
+    # interfaces capturadas + contadores acumulados
+    ifl = _suricatasc("iface-list")
+    ifaces = ((ifl or {}).get("message", {}) or {}).get("ifaces", []) or []
+    o["ifaces"] = ifaces
+    pkts = drop = 0
+    for i in ifaces:
+        st = _suricatasc(f"iface-stat {i}")
+        msg = (st or {}).get("message", {}) or {}
+        try:
+            pkts += int(msg.get("pkts", 0)); drop += int(msg.get("drop", 0))
+        except (TypeError, ValueError):
+            pass
+    o["pkts"] = pkts; o["drop"] = drop
+    # tasas: delta desde la medicion anterior
+    dt = now - prev.get("ts", 0) if prev.get("ts") else 0
+    dpkts = pkts - prev.get("pkts", pkts)
+    o["pps"] = round(dpkts / dt, 1) if dt > 0 and dpkts >= 0 else None
+    ddrop = drop - prev.get("drop", drop)
+    o["drop_ratio"] = round(ddrop / dpkts, 4) if dt > 0 and dpkts > 0 and ddrop >= 0 else 0.0
+    # crecimiento de eve.json (respaldo por si iface-stat no da paquetes)
+    try:
+        sz = os.path.getsize(f"{LOGDIR}/eve.json")
+    except OSError:
+        sz = prev.get("eve_size", 0)
+    o["eve_size"] = sz
+    o["eve_bps"] = round((sz - prev.get("eve_size", sz)) / dt, 0) if dt > 0 and sz >= prev.get("eve_size", sz) else None
+    # frescura del reporte
+    nr = newest_report()
+    o["reporte_edad"] = int(now - os.path.getmtime(nr)) if nr and os.path.exists(nr) else None
+    # amenazas activas (para separar "sano sin amenazas" de "con CPEs en riesgo")
+    try:
+        cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
+        o["candidatos"] = len(cq.get("candidatos", [])) + len(cq.get("dns_candidatos", []))
+    except Exception:
+        o["candidatos"] = 0
+    # clasificacion en un nivel + titulo legible
+    hay_trafico = (o["pps"] is not None and o["pps"] >= 1) or (o["eve_bps"] is not None and o["eve_bps"] >= 1)
+    if not o["suricata"]:
+        o["nivel"], o["titulo"] = "down", "Sensor detenido"
+    elif o["tzsp_mode"] and not o["tzsp"]:
+        o["nivel"], o["titulo"] = "warn", "Receptor TZSP caido"
+    elif not ifaces:
+        o["nivel"], o["titulo"] = "warn", "Sin interfaz de captura"
+    elif dt > 0 and not hay_trafico:
+        o["nivel"], o["titulo"] = "warn", "Sin trafico"
+    elif o["drop_ratio"] and o["drop_ratio"] > 0.02:
+        o["nivel"], o["titulo"] = "warn", "Captura con perdidas"
+    elif o["reporte_edad"] is not None and o["reporte_edad"] > 2 * REFRESH_SECS:
+        o["nivel"], o["titulo"] = "warn", "Reporte desactualizado"
+    else:
+        o["nivel"] = "ok"
+        o["titulo"] = "Viendo trafico" + (" · sin amenazas" if o["candidatos"] == 0 else f" · {o['candidatos']} CPE en riesgo")
+    try:
+        tmp = SENSOR_FILE + ".tmp"
+        json.dump(o, open(tmp, "w", encoding="utf-8"))
+        os.replace(tmp, SENSOR_FILE)
+    except OSError:
+        pass
+
+def estado_sensor():
+    try:
+        return json.load(open(SENSOR_FILE, encoding="utf-8"))
+    except Exception:
+        return {}
 
 POL_NOTIF = "/var/log/suricata-politica-notif.json"   # dedupe de la accion 'notificar'
 POL_ACCIONES = ("nada", "cuarentena", "dns", "notificar")
@@ -2666,7 +2799,8 @@ def aplicar_politicas():
             except Exception:
                 ok = False
             if ok:
-                env[ip] = {"cuando": int(time.time()), "score": sc, "por": "politica", "manual": False, "pol": True}
+                env[ip] = {"cuando": int(time.time()), "score": sc, "por": "politica", "manual": False, "pol": True,
+                           "motivo": _motivo_bloqueo(ip)}
                 mk_log("POLITICA-ENVIADO", ip, "politica", f"lista={lst} riesgo={sc}"); cambiado = True
         for ip in list(env.keys()):        # sacar los que entraron por politica y ya no califican
             if env[ip].get("pol") and ip not in deseado:
@@ -3122,6 +3256,7 @@ def refrescador():
     Asi 'En vivo' sirve siempre el ultimo archivo al instante aunque generar tarde."""
     ult_poda = 0.0
     ult_updchk = 0.0
+    ult_sensor = 0.0
     while True:
         global FORCE_REGEN
         if time.time() - ult_poda > 86400:     # 1x/dia: podar logs (15d) y reportes guardados (3d)
@@ -3134,6 +3269,10 @@ def refrescador():
             try: chequear_update()
             except Exception: pass
             ult_updchk = time.time()
+        if time.time() - ult_sensor > 60:      # cada ~60s: medir salud del sensor (trafico/perdidas)
+            try: medir_sensor()
+            except Exception: pass
+            ult_sensor = time.time()
         nr = newest_report()
         stale = FORCE_REGEN or (nr is None) or (time.time() - os.path.getmtime(nr) >= REFRESH_SECS)
         if stale:
@@ -3151,6 +3290,10 @@ def refrescador():
                 pass
             try:
                 reconciliar_cuarentena()   # libera de la cuarentena a los que dejaron de atacar
+            except Exception:
+                pass
+            try:
+                evaluar_bloqueos()         # sella ultima evaluacion + si el CPE sigue activo
             except Exception:
                 pass
             try:
@@ -4540,6 +4683,53 @@ def historico_page():
             + "</tbody></table>" + pager + script + "</main></body></html>")
     return wrap(body, refresh=False, active="/historico")
 
+def _salud_html():
+    """Tarjeta de salud del sensor: responde de un vistazo si esta VIENDO trafico, con
+    perdidas, si el reporte esta fresco y si los servicios estan vivos. Autocontenida."""
+    esc = html.escape
+    s = estado_sensor()
+    css = ("<style>.saludc{border:1px solid #e7e6e2;border-radius:12px;background:#fff;margin:0 0 14px;overflow:hidden}"
+           ".saludh{display:flex;align-items:center;gap:10px;padding:12px 15px;font-size:15px}"
+           ".saludh .sdot{width:12px;height:12px;border-radius:50%;flex:none}"
+           ".saludh .verde{background:#2ea44f;box-shadow:0 0 0 4px rgba(46,164,79,.18)}"
+           ".saludh .ambar{background:#e58a00;box-shadow:0 0 0 4px rgba(229,138,0,.18)}"
+           ".saludh .rojo{background:#e34948;box-shadow:0 0 0 4px rgba(227,73,72,.18)}"
+           ".saludh .gris{background:#9a9a95}"
+           ".saludh b{font-size:15px}.saludh .stit{color:#52514e;font-weight:600}"
+           ".saludb{display:flex;flex-wrap:wrap;gap:8px;padding:0 15px 13px}"
+           ".schip{font-size:12.5px;background:#f4f4f2;border:1px solid #e7e6e2;border-radius:20px;padding:4px 11px;color:#33322f}"
+           ".schip.bad{background:#fdecec;border-color:#f3c4c4;color:#b52a2a;font-weight:700}"
+           ".schip.warn{background:#fff7ed;border-color:#f2d3ad;color:#7a4a12;font-weight:700}"
+           "</style>")
+    if not s:
+        return css + ("<div class='saludc'><div class='saludh'><span class='sdot gris'></span>"
+                      "<b>Salud del sensor</b><span class='stit'>&mdash; aun sin medicion (vuelve en ~1 min)</span>"
+                      "</div></div>")
+    niv = s.get("nivel", "warn")
+    dot = {"ok": "verde", "warn": "ambar", "down": "rojo"}.get(niv, "ambar")
+    chips = []
+    chips.append(("Suricata activo" if s.get("suricata") else "Suricata DETENIDO",
+                  "" if s.get("suricata") else "bad"))
+    if s.get("tzsp_mode"):
+        chips.append(("Receptor TZSP activo" if s.get("tzsp") else "Receptor TZSP CAIDO",
+                      "" if s.get("tzsp") else "bad"))
+    if s.get("ifaces"):
+        chips.append(("Captura: " + ", ".join(s["ifaces"]), ""))
+    pps = s.get("pps")
+    if pps is not None:
+        chips.append((f"Trafico: {pps:,.0f} pkts/s", "" if pps >= 1 else "warn"))
+    dr = s.get("drop_ratio") or 0
+    chips.append((f"Perdidas: {dr*100:.2f}%", "warn" if dr > 0.02 else ""))
+    ed = s.get("reporte_edad")
+    if ed is not None:
+        chips.append((f"Reporte: hace {ed//60} min", "warn" if ed > 2 * REFRESH_SECS else ""))
+    hace = int(time.time() - s.get("ts", 0))
+    chip_html = "".join(f"<span class='schip {c}'>{esc(t)}</span>" for t, c in chips)
+    return css + (f"<div class='saludc'><div class='saludh'><span class='sdot {dot}'></span>"
+                  f"<b>{esc(s.get('titulo',''))}</b>"
+                  f"<span class='stit'>&mdash; medido hace {hace}s</span></div>"
+                  f"<div class='saludb'>{chip_html}</div></div>")
+
 def cuarentena_page(msg="", es_admin=False):
     """Cuarentena: CPEs INFECTADOS CONFIRMADOS. Si el MikroTik esta configurado y HABILITADO
     y quien mira es admin, aparece el boton Enviar (a la address-list) / Quitar. Si no, dry-run.
@@ -4561,6 +4751,28 @@ def cuarentena_page(msg="", es_admin=False):
     def _col(b):
         return {"ALTO": "#e34948", "MEDIO": "#e58a00"}.get(b, "#3a9d5d")
 
+    def _rev(mm):
+        """Meta legible: cuando se reviso por ultima vez, si sigue activo y si esta en el router."""
+        p = []
+        le = mm.get("last_eval")
+        if le:
+            p.append("revisado " + time.strftime("%d/%m %H:%M", time.localtime(le)))
+        if "sigue" in mm:
+            p.append("sigue activo" if mm.get("sigue") else "sin actividad reciente")
+        if mm.get("en_router"):
+            p.append("en router ✓")
+        return " · ".join(p)
+
+    def _mot_txt(mm):
+        """Por que se bloqueo, a partir del motivo guardado al enviar (sobrevive aunque el CPE calle)."""
+        mt = mm.get("motivo") or {}
+        if not mt:
+            return ""
+        tp = {"infeccion": "Infeccion CnC", "dns": "DNS malicioso"}.get(mt.get("tipo"), "Bloqueo")
+        fw = esc((mt.get("firma") or "")[:70])
+        return (f"<b>{tp}</b> riesgo {esc(str(mt.get('score', '')))} {esc(mt.get('banda', ''))}<br>"
+                f"<span class='fw'>{esc(mt.get('conteo', ''))}{(' · ' + fw) if fw else ''}</span>")
+
     def _seccion(titulo, sub, candidatos, env_map, pref, lista_name, cnt_key, cnt_lbl, fir_key, vacio):
         """Arma una seccion (titulo + tabla + boton 'enviar todos') para una categoria."""
         pend = [c for c in candidatos if c.get("ip") not in env_map]
@@ -4572,7 +4784,9 @@ def cuarentena_page(msg="", es_admin=False):
                           f"<input type=hidden name=ip value='{esc(ip)}'>"
                           f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de la lista {esc(lista_name)}?')\">Quitar</button></form>"
                           ) if es_admin else ""
-                return f"<span class='enq' title='En {esc(lista_name)} desde {cuando}'>En lista</span> {quitar}"
+                meta = _rev(env_map[ip])
+                meta_html = f"<div class='rowmeta'>desde {cuando}{(' · ' + meta) if meta else ''}</div>"
+                return f"<span class='enq' title='En {esc(lista_name)} desde {cuando}'>En lista</span> {quitar}{meta_html}"
             if es_admin and activo:
                 return (f"<form method=post action='/{pref}/enviar' style='display:inline'>"
                         f"<input type=hidden name=ip value='{esc(ip)}'><input type=hidden name=score value='{c.get('riesgo',0)}'>"
@@ -4615,9 +4829,12 @@ def cuarentena_page(msg="", es_admin=False):
                   f"<input type=hidden name=ip value='{esc(ip)}'>"
                   f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de {esc(lista)}?')\">Quitar</button></form>"
                   ) if es_admin else ""
+        mot = _mot_txt(mm) or "<span class='muted'>manual / sin motivo registrado</span>"
         return (f"<tr><td class='mono ipx'>{esc(ip)}</td><td class='mono'>{esc(lista)}</td>"
-                f"<td>{esc(str(mm.get('score','')))}</td><td>{esc(mm.get('por','?'))}</td>"
-                f"<td class='mono'>{cuando}</td><td>{quitar}</td></tr>")
+                f"<td class='mot'>{mot}</td><td>{esc(mm.get('por','?'))}</td>"
+                f"<td class='mono'>{cuando}</td>"
+                f"<td class='rowmeta' style='margin:0'>{_rev(mm) or '&mdash;'}</td>"
+                f"<td>{quitar}</td></tr>")
     _ci = {c.get("ip") for c in cand}; _cd = {c.get("ip") for c in dns_cand}
     manual_rows = "".join(_fila_manual(ip, mm, "cuarentena", m.get("LIST", "")) for ip, mm in enviados.items() if ip not in _ci)
     manual_rows += "".join(_fila_manual(ip, mm, "cuarentena/dns", m.get("LIST_DNS", "")) for ip, mm in enviados_dns.items() if ip not in _cd)
@@ -4625,8 +4842,9 @@ def cuarentena_page(msg="", es_admin=False):
         sec_manual = ("<div class='seccion'><div class='shead'><div><h2>Enviados manualmente</h2>"
                       "<p class='sub'>IPs que pusiste a mano (p.ej. desde Top origenes) y no son candidatos actuales. "
                       "Con auto-mantener <b>no</b> se liberan solas: quitalas tu aqui cuando quieras.</p></div></div>"
-                      "<div class='card'><table><thead><tr><th>CPE (IP origen)</th><th>Lista</th><th>Riesgo</th>"
-                      "<th>Por</th><th>Enviado</th><th>Accion</th></tr></thead>"
+                      "<div class='card'><table><thead><tr><th>CPE (IP origen)</th><th>Lista</th>"
+                      "<th>Motivo (por que se bloqueo)</th><th>Por</th><th>Enviado</th>"
+                      "<th>Ultima revision</th><th>Accion</th></tr></thead>"
                       f"<tbody>{manual_rows}</tbody></table></div></div>")
     else:
         sec_manual = ""
@@ -4659,7 +4877,8 @@ def cuarentena_page(msg="", es_admin=False):
            "tbody tr:hover{background:#faf9f6}.num{text-align:right;font-variant-numeric:tabular-nums}"
            ".mono{font-family:ui-monospace,Consolas,monospace}.ipx{font-weight:700}"
            ".rb{color:#fff;font-weight:800;font-size:12px;padding:2px 9px;border-radius:20px;white-space:nowrap}"
-           ".fw{color:#7a4a12;font-size:12px}.mot{max-width:280px}"
+           ".fw{color:#7a4a12;font-size:12px}.mot{max-width:300px}"
+           ".rowmeta{font-size:11.5px;color:#6b6a66;margin-top:3px}.muted{color:#9a9a95}"
            ".dry{background:#eef4fd;color:#2a5fa0;border:1px solid #cfe0f6;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap}"
            ".enq{background:#fdecec;color:#b52a2a;border:1px solid #f3c4c4;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap}"
            ".qbtn{font:12px system-ui;font-weight:700;border:0;border-radius:7px;padding:5px 11px;cursor:pointer;color:#fff}"
@@ -4677,7 +4896,7 @@ def cuarentena_page(msg="", es_admin=False):
             "<h1>Cuarentena y control de CPEs</h1>"
             f"<p class='sub'>Ventana {vmin} min · lista de hace {edad}. Dos categorias: <b>infectados</b> (malware/CnC) "
             "y <b>DNS sospechoso</b> (consultan dominios de botnet), cada una a su address-list del MikroTik.</p>"
-            + flash + estado + sec_inf + sec_dns + sec_manual +
+            + _salud_html() + flash + estado + sec_inf + sec_dns + sec_manual +
             "<script>(function(){var n=document.getElementById('notif');if(!n)return;"
             "setTimeout(function(){n.classList.add('show');},60);"
             "setTimeout(function(){n.classList.remove('show');},3600);})();</script>"
@@ -5141,7 +5360,7 @@ class H(BaseHTTPRequestHandler):
             if ok:
                 env = cargar_enviados()
                 env[ip] = {"cuando": int(time.time()), "score": score, "por": getattr(CTX, "user", "?"),
-                           "manual": ip not in cand_ips}
+                           "manual": ip not in cand_ips, "motivo": _motivo_bloqueo(ip)}
                 guardar_enviados(env)
                 mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} ttl={m.get('TTL')}" + (" (manual)" if ip not in cand_ips else ""))
                 globals()["FORCE_REGEN"] = True   # regenerar pronto para que el Top muestre 'En cuarentena'
@@ -5173,7 +5392,8 @@ class H(BaseHTTPRequestHandler):
                 except Exception as ex:
                     ok, err = False, str(ex)
                 if ok:
-                    env[ip] = {"cuando": int(time.time()), "score": c.get("riesgo", 0), "por": getattr(CTX, "user", "?")}
+                    env[ip] = {"cuando": int(time.time()), "score": c.get("riesgo", 0), "por": getattr(CTX, "user", "?"),
+                               "motivo": _motivo_bloqueo(ip)}
                     mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} (masivo)")
                     ok_n += 1
                 else:
@@ -5221,7 +5441,8 @@ class H(BaseHTTPRequestHandler):
                 except Exception as ex: ok, err = False, str(ex)
                 if ok:
                     env = cargar_enviados(MK_SENT_DNS)
-                    env[ip] = {"cuando": int(time.time()), "score": score, "por": getattr(CTX, "user", "?")}
+                    env[ip] = {"cuando": int(time.time()), "score": score, "por": getattr(CTX, "user", "?"),
+                               "motivo": _motivo_bloqueo(ip)}
                     guardar_enviados(env, MK_SENT_DNS)
                     mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={lst} (dns)")
                     return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} enviado a la lista {lst}"))
@@ -5242,7 +5463,8 @@ class H(BaseHTTPRequestHandler):
                 try: ok, err = mk_add(ip, comment=f"suricata DNS-sospechoso riesgo {c.get('riesgo',0)} {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl=ttl)
                 except Exception as ex: ok, err = False, str(ex)
                 if ok:
-                    env[ip] = {"cuando": int(time.time()), "score": c.get("riesgo", 0), "por": getattr(CTX, "user", "?")}
+                    env[ip] = {"cuando": int(time.time()), "score": c.get("riesgo", 0), "por": getattr(CTX, "user", "?"),
+                               "motivo": _motivo_bloqueo(ip)}
                     mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={lst} (dns masivo)"); ok_n += 1
                 else:
                     mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), f"lista={lst} {err}"); err_n += 1; ult_err = err

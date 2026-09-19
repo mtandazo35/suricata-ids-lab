@@ -3650,6 +3650,15 @@ def perfil_page(msg="", ok=False, edit_user=None):
         local = _sha_local()
         disp = bool(info.get("disponible"))
         upd_err = info.get("error") if not disp else None
+        try:
+            _ures = json.load(open("/var/log/suricata-update-result.json", encoding="utf-8"))
+        except Exception:
+            _ures = {}
+        rollback_aviso = ("<div style='background:#fdecec;border:1px solid #f3c4c4;color:#b52a2a;"
+                          "border-radius:9px;padding:10px 13px;margin:0 0 12px;font-size:13px'>"
+                          "&#9888; La ultima actualizacion se <b>revirtio automaticamente</b>: el codigo nuevo no "
+                          "levanto y se restauro la version previa. Reintenta mas tarde o revisa el cambio."
+                          "</div>") if (_ures and not _ures.get("ok") and _ures.get("rollback")) else ""
         sha_corto = (local[:7] if local else None)
         ultimo = info.get("ultimo") or ""
         mejoras = info.get("mejoras") or []
@@ -3721,7 +3730,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
                  "<div class=verchg><div class=verchgh>Registro de cambios</div>"
                  f"{cuerpo_hist}</div></div>")
         card_update = (
-            _vcss + "<section class=card><h2>Version y actualizaciones</h2>"
+            _vcss + "<section class=card><h2>Version y actualizaciones</h2>" + rollback_aviso +
             "<div class=verhead><div><div class=verlbl>Version desplegada</div>"
             f"<div class=versha>{PANEL_VERSION}</div>"
             f"<div class=verbuild>build {esc(sha_corto) if sha_corto else '&mdash;'}</div></div>{badge}</div>"
@@ -5895,6 +5904,16 @@ extraer "cat > /usr/local/bin/suricata-html-report <<'HREP'" "HREP" /usr/local/b
 extraer "cat > /usr/local/bin/suricata-feeds-update <<'FEEDS'" "FEEDS" /usr/local/bin/suricata-feeds-update py || log "no se autoactualizo feeds-update"
 # el actualizador se auto-actualiza tambien (si falla, se sigue con lo demas)
 extraer "cat > /usr/local/bin/suricata-panel-update <<'UPDSH'" "UPDSH" /usr/local/bin/suricata-panel-update sh || log "no se autoactualizo el updater"
+# respaldo de la version ACTUAL antes de sobrescribir, para poder revertir si el panel no levanta
+BKP="/root/backups/panel/$(date +%F-%H%M%S)"
+mkdir -p "$BKP"
+for f in suricata-dashboard suricata-html-report suricata-panel-update suricata-feeds-update; do
+  [ -f "/usr/local/bin/$f" ] && cp -p "/usr/local/bin/$f" "$BKP/$f" 2>/dev/null
+done
+[ -f /etc/suricata-dashboard.commit ] && cp -p /etc/suricata-dashboard.commit "$BKP/commit" 2>/dev/null
+[ -f /etc/suricata-dashboard.updated ] && cp -p /etc/suricata-dashboard.updated "$BKP/updated" 2>/dev/null
+ls -1dt /root/backups/panel/*/ 2>/dev/null | tail -n +6 | xargs -r rm -rf --   # conservar 5 respaldos
+log "respaldo previo en $BKP"
 # aplicar (dashboard y report son obligatorios; el updater si se pudo)
 mv /usr/local/bin/suricata-dashboard.new     /usr/local/bin/suricata-dashboard
 mv /usr/local/bin/suricata-html-report.new   /usr/local/bin/suricata-html-report
@@ -5919,6 +5938,33 @@ log "actualizado OK (${SHA:-main}); regenerando reporte y reiniciando panel"
 VMIN=$(awk -F= '/^VENTANA_MIN=/{print $2}' /etc/suricata-dashboard.conf 2>/dev/null); [ -n "$VMIN" ] || VMIN=1440
 /usr/local/bin/suricata-html-report "$VMIN" >/dev/null 2>&1 || true
 systemctl restart suricata-dashboard
+# health-check: esperar a que el panel LEVANTE y RESPONDA por su puerto; si no, revertir.
+# Atrapa errores de ejecucion que la validacion ast/sh -n no ve (p.ej. un import que falla).
+PORT=$(awk -F= '/^PORT=/{print $2}' /etc/suricata-dashboard.conf 2>/dev/null); [ -n "$PORT" ] || PORT=5637
+ok=0; i=0
+while [ "$i" -lt 15 ]; do
+  sleep 2
+  if systemctl is-active --quiet suricata-dashboard && \
+     curl -s -o /dev/null --max-time 3 "http://127.0.0.1:${PORT}/login"; then
+    ok=1; break
+  fi
+  i=$((i + 1))
+done
+if [ "$ok" = 1 ]; then
+  log "panel OK tras actualizar (${SHA:-main})"
+  printf '{"ok":true,"ts":%s,"to":"%s"}' "$(date +%s)" "${SHA:-main}" > /var/log/suricata-update-result.json 2>/dev/null || true
+else
+  log "EL PANEL NO LEVANTO tras actualizar -> ROLLBACK desde $BKP"
+  printf '{"ok":false,"rollback":true,"ts":%s,"to":"%s"}' "$(date +%s)" "${SHA:-main}" > /var/log/suricata-update-result.json 2>/dev/null || true
+  for f in suricata-dashboard suricata-html-report suricata-panel-update suricata-feeds-update; do
+    [ -f "$BKP/$f" ] && cp -p "$BKP/$f" "/usr/local/bin/$f" && chmod 755 "/usr/local/bin/$f"
+  done
+  [ -f "$BKP/commit" ] && cp -p "$BKP/commit" /etc/suricata-dashboard.commit
+  [ -f "$BKP/updated" ] && cp -p "$BKP/updated" /etc/suricata-dashboard.updated
+  rm -f /var/log/suricata-update-check.json
+  systemctl restart suricata-dashboard
+  log "ROLLBACK aplicado: panel restaurado a la version previa (revisa el codigo nuevo antes de reintentar)"
+fi
 UPDSH
 chmod 755 /usr/local/bin/suricata-panel-update
 

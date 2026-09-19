@@ -745,6 +745,49 @@ def es_dns_sospechoso(sig, cat):
         return False
     return any(k in s for k in DNS_MAL) or "c2" in c or "command and control" in c
 
+# --- Allowlist "nunca bloquear": IPs/CIDR que JAMAS entran a cuarentena (infra, clientes
+# criticos). El panel las gestiona; aqui solo se excluyen de las listas de candidatos. ---
+import ipaddress as _ipm
+NUNCA_FILE = "/etc/suricata-nunca-bloquear.lst"
+_NUNCA_IPS = set(); _NUNCA_NETS = []
+try:
+    for _l in open(NUNCA_FILE, encoding="utf-8"):
+        _l = _l.split("#", 1)[0].strip()
+        if not _l:
+            continue
+        try:
+            if "/" in _l:
+                _NUNCA_NETS.append(_ipm.ip_network(_l, strict=False))
+            else:
+                _NUNCA_IPS.add(_l)
+        except ValueError:
+            pass
+except OSError:
+    pass
+def nunca_bloquear(ip):
+    if ip in _NUNCA_IPS:
+        return True
+    if _NUNCA_NETS:
+        try:
+            a = _ipm.ip_address(ip)
+            return any(a in n for n in _NUNCA_NETS)
+        except ValueError:
+            pass
+    return False
+
+def _conf_key(k, default):
+    try:
+        for _l in open("/etc/suricata-dashboard.conf", encoding="utf-8"):
+            if _l.strip().startswith(k + "="):
+                return _l.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return default
+# Doble senal: para CONFIRMAR infeccion se exigen >=2 senales independientes (repeticion,
+# variedad de firmas, fan-out, volumen), o una senal abrumadora. Menos falsos positivos.
+# Se apaga con DOBLE_SENAL=0 en /etc/suricata-dashboard.conf.
+DOBLE_SENAL = _conf_key("DOBLE_SENAL", "1") == "1"
+
 def campos(line):
     def g(k):
         m = _RE[k].search(line)
@@ -1491,9 +1534,28 @@ top_sec = top_origenes_section()
 # --- Cuarentena (Fase A, dry-run): CPEs INFECTADOS CONFIRMADOS (repeticion/contexto).
 # Solo se ESCRIBE la lista de candidatos; NO se toca el MikroTik. El panel la muestra.
 try:
+    def _senales_inf(src):
+        """Cuenta senales INDEPENDIENTES de infeccion (para exigir 'doble senal')."""
+        s = 0
+        if inf_hits[src] >= UMBRAL_INFECTADO:                                   # repeticion
+            s += 1
+        if len(inf_sids.get(src, ())) >= 2:                                     # varias firmas
+            s += 1
+        if len(dst_by_src.get(src, ())) >= 3 or len(dpt_by_src.get(src, ())) >= 3:  # fan-out
+            s += 1
+        if by_src.get(src, 0) >= UMBRAL_INFECTADO * 3:                          # volumen alto
+            s += 1
+        return s
     cand = []
     for src in inf_hits:
-        if inf_hits[src] >= UMBRAL_INFECTADO or len(inf_sids[src]) >= 2:
+        if nunca_bloquear(src):
+            continue                                    # allowlist: nunca a cuarentena
+        _ns = _senales_inf(src)
+        if DOBLE_SENAL:
+            _es = _ns >= 2 or inf_hits[src] >= UMBRAL_INFECTADO * 4   # 2 senales o una abrumadora
+        else:
+            _es = inf_hits[src] >= UMBRAL_INFECTADO or len(inf_sids[src]) >= 2
+        if _es:
             sc, band, _c, _d = riesgo(src)
             cand.append({
                 "ip": src,
@@ -1505,11 +1567,14 @@ try:
                 "destinos": len(dst_by_src.get(src, ())),
                 "puertos": len(dpt_by_src.get(src, ())),
                 "total_alertas": by_src.get(src, 0),
+                "senales": _ns,
             })
     cand.sort(key=lambda c: (c["riesgo"], c["alertas_cnc"]), reverse=True)
     # DNS sospechoso: CPEs que consultaron dominios de botnet/C2 (Camino A: alertas DNS)
     cand_dns = []
     for src in dns_hits:
+        if nunca_bloquear(src):
+            continue                                    # allowlist: nunca a cuarentena
         if dns_hits[src] >= UMBRAL_DNS or len(dns_sids[src]) >= 2:
             sc, band, _c, _d = riesgo(src)
             cand_dns.append({
@@ -1527,6 +1592,8 @@ try:
     # top con su banda de riesgo, para el motor de politicas del panel (tope 50 CPEs)
     top_r = []
     for _s, _t in by_src.most_common(50):
+        if nunca_bloquear(_s):
+            continue                                    # allowlist: fuera del motor de politicas
         _sc, _bd, _c2, _d2 = riesgo(_s)
         top_r.append({"ip": _s, "riesgo": _sc, "banda": _bd})
     _cq = {"generado": int(time.time()), "ventana_min": VENTANA_MIN,
@@ -1780,7 +1847,7 @@ reportes diarios, con login basico. Solo biblioteca estandar. Corre como servici
 Config: /etc/suricata-dashboard.conf  (PORT, USER, PASS)
 """
 import base64, glob, hashlib, html, json, os, re, secrets, subprocess, threading, time
-import urllib.request, urllib.parse, urllib.error
+import urllib.request, urllib.parse, urllib.error, ipaddress
 from datetime import datetime, timezone, timedelta
 
 TZ_EC = timezone(timedelta(hours=-5))   # hora de Ecuador (America/Guayaquil)
@@ -2606,6 +2673,57 @@ def mk_sync_enviados():
         if cambiado:
             guardar_enviados(env, sent_path)
 
+# --- allowlist "nunca bloquear": IPs/CIDR que jamas van a cuarentena (infra, clientes clave) ---
+NUNCA_FILE = "/etc/suricata-nunca-bloquear.lst"
+
+def cargar_nunca():
+    try:
+        return open(NUNCA_FILE, encoding="utf-8").read()
+    except OSError:
+        return ""
+
+def guardar_nunca(texto):
+    """Guarda la allowlist; conserva solo lineas validas (IP o CIDR) o comentarios."""
+    limpio = []
+    for l in (texto or "").splitlines():
+        s = l.split("#", 1)[0].strip()
+        if not s:
+            if l.strip().startswith("#"):
+                limpio.append(l.strip()[:120])
+            continue
+        try:
+            ipaddress.ip_network(s, strict=False) if "/" in s else ipaddress.ip_address(s)
+            limpio.append(s)
+        except ValueError:
+            pass
+    try:
+        tmp = NUNCA_FILE + ".tmp"
+        open(tmp, "w", encoding="utf-8").write("\n".join(limpio) + ("\n" if limpio else ""))
+        os.replace(tmp, NUNCA_FILE)
+    except OSError:
+        pass
+
+def nunca_bloquear(ip):
+    ips = set(); nets = []
+    for l in cargar_nunca().splitlines():
+        s = l.split("#", 1)[0].strip()
+        if not s:
+            continue
+        try:
+            if "/" in s:
+                nets.append(ipaddress.ip_network(s, strict=False))
+            else:
+                ips.add(s)
+        except ValueError:
+            pass
+    if ip in ips:
+        return True
+    try:
+        a = ipaddress.ip_address(ip)
+        return any(a in n for n in nets)
+    except ValueError:
+        return False
+
 # --- cuarentena explicable: por que se bloqueo y cuando se reviso por ultima vez ---
 def _motivo_bloqueo(ip):
     """Busca por que un CPE es candidato (firma, banda, score, conteos) en cuarentena.json,
@@ -3003,6 +3121,36 @@ def set_ventana(minutos):
     os.chmod(tmp, 0o600)
     os.replace(tmp, CONF)
     CFG["VENTANA_MIN"] = str(minutos)
+
+def conf_dash_get(key, default=""):
+    try:
+        for l in open(CONF, encoding="utf-8"):
+            if l.strip().startswith(key + "="):
+                return l.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return default
+
+def conf_dash_set(key, val):
+    """Escribe/actualiza una clave en /etc/suricata-dashboard.conf (lo lee el generador)."""
+    try:
+        lineas = open(CONF, encoding="utf-8").read().splitlines()
+    except OSError:
+        lineas = []
+    out, hecho = [], False
+    for l in lineas:
+        if l.strip().startswith(key + "="):
+            out.append(f"{key}={val}"); hecho = True
+        else:
+            out.append(l)
+    if not hecho:
+        out.append(f"{key}={val}")
+    try:
+        tmp = CONF + ".tmp"
+        open(tmp, "w", encoding="utf-8").write("\n".join(out) + "\n")
+        os.chmod(tmp, 0o600); os.replace(tmp, CONF)
+    except OSError:
+        pass
 
 def guardar_usuarios(lst):
     tmp = USERS_FILE + ".tmp"
@@ -3789,6 +3937,17 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "Mantener la cuarentena automaticamente</label>"
             "<div class=hint>Activado: la IP entra SIN caducidad y se <b>libera sola</b> cuando el CPE deja de atacar "
             "(mientras siga enviando virus, sigue en cuarentena). Apagado: la IP caduca sola con el TTL de arriba.</div></div>"
+            "<div class=field style='margin-top:6px'><label class=chk>"
+            f"<input type=checkbox name=doble value=1 {'checked' if conf_dash_get('DOBLE_SENAL','1') == '1' else ''}> "
+            "Doble senal para confirmar infeccion</label>"
+            "<div class=hint>Exige <b>2 indicios independientes</b> (repeticion, varias firmas, fan-out, volumen) "
+            "o una senal abrumadora antes de marcar un CPE como infectado. Menos falsos positivos.</div></div>"
+            "<div class=field><label>Nunca bloquear (una IP o CIDR por linea)</label>"
+            "<textarea name=nunca rows=3 style='width:100%;box-sizing:border-box;font:12px ui-monospace,Consolas,monospace;"
+            "padding:8px;border:1px solid #d7d6d2;border-radius:8px' "
+            f"placeholder='192.0.2.10&#10;198.51.100.0/24'>{esc(cargar_nunca())}</textarea>"
+            "<div class=hint>Estas IPs/redes <b>jamas</b> entran a cuarentena (infra, DNS, clientes criticos), "
+            "ni por politica ni a mano.</div></div>"
             + _card_politicas(m) +
             "<div class=actions>"
             "<button class=primary type=submit>Guardar</button>"
@@ -5349,6 +5508,8 @@ class H(BaseHTTPRequestHandler):
                 guardar_mk(m)
             except OSError as ex:
                 return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            conf_dash_set("DOBLE_SENAL", "1" if q.get("doble") else "0")   # doble senal (lo lee el generador)
+            guardar_nunca(q.get("nunca", [""])[0])                         # allowlist 'nunca bloquear'
             return self._html(perfil_page("Conexion al MikroTik guardada.", ok=True))
         if ruta == "/mikrotik/test":
             if not self._admin():
@@ -5404,6 +5565,8 @@ class H(BaseHTTPRequestHandler):
                 ipaddress.ip_address(ip)
             except Exception:
                 return _fin(False, "IP invalida")
+            if nunca_bloquear(ip):
+                return _fin(False, f"{ip} esta en la lista 'Nunca bloquear' (no se envia)")
             m = cargar_mk()
             if not (mk_configurado() and m.get("ENABLED") == "1"):
                 return _fin(False, "Configura y HABILITA el MikroTik en Ajustes primero")
@@ -5495,6 +5658,8 @@ class H(BaseHTTPRequestHandler):
                 ip = (q.get("ip", [""])[0]).strip(); score = (q.get("score", [""])[0]).strip()[:8]
                 try: ipaddress.ip_address(ip)
                 except Exception: return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+                if nunca_bloquear(ip):
+                    return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} esta en la lista 'Nunca bloquear'"))
                 try: ok, err = mk_add(ip, comment=f"suricata DNS-sospechoso riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl=ttl)
                 except Exception as ex: ok, err = False, str(ex)
                 if ok:

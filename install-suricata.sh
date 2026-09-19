@@ -2586,12 +2586,25 @@ def guardar_enviados(d, path=MK_SENT):
     except OSError:
         pass
 
+BITACORA_LOG = "/var/log/suricata-bitacora.log"   # auditoria: quien hizo que y cuando
+
+def bitacora(accion, detalle="", quien=None, ip=None):
+    """Registra una accion en la bitacora auditable (una linea por accion)."""
+    q = quien if quien is not None else getattr(CTX, "user", "?") or "?"
+    ipx = ip if ip is not None else (getattr(CTX, "ip", "") or "")
+    try:
+        with open(BITACORA_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\t{q}\t{ipx}\t{accion}\t{detalle}\n")
+    except OSError:
+        pass
+
 def mk_log(accion, ip, quien, detalle=""):
     try:
         with open(MK_LOG, "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {accion} {ip} por={quien} {detalle}\n")
     except OSError:
         pass
+    bitacora(accion, f"{ip} {detalle}".strip(), quien=quien)   # tambien a la bitacora general
 
 def _ttl_efectivo(m, ttl_key):
     """Con auto-mantener, las entradas van SIN TTL (permanentes) y las libera el
@@ -3021,7 +3034,7 @@ def actividad_reciente(n=800):
 def podar_logs():
     """Borra del log de accesos y del de cuarentena las lineas mas viejas que LOG_RETENCION_DIAS."""
     corte = time.time() - LOG_RETENCION_DIAS * 86400
-    for path, sep in ((LOGIN_LOG, "\t"), (MK_LOG, " ")):
+    for path, sep in ((LOGIN_LOG, "\t"), (MK_LOG, " "), (BITACORA_LOG, "\t")):
         try:
             if not os.path.exists(path):
                 continue
@@ -3067,7 +3080,7 @@ def podar_reportes():
 # ---------------------------------------------------------------- usuarios y roles
 USERS_FILE = "/etc/suricata-dashboard-users.json"
 CTX = threading.local()   # contexto por peticion: user/role del que la hace
-ROLES = ("admin", "lectura")
+ROLES = ("admin", "operador", "lectura")   # operador: gestiona incidentes y cuarentenas; no toca usuarios/conexiones/updates
 
 def _hash_pw(pw, salt=None):
     if not salt:
@@ -3551,11 +3564,12 @@ border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0
 </style>"""
 
 def nav(active=""):
-    es_lectura = getattr(CTX, "role", None) == "lectura"
+    _rl = getattr(CTX, "role", None)
+    es_admin_nav = _rl in (None, "admin")   # exclusiones/tuning: solo admin (ni operador ni lectura)
     parts = []
     for h, t in _NAV_LINKS:
-        if h in ("/exclusiones", "/log") and es_lectura:
-            continue   # solo lectura no ve exclusiones ni el log de accesos
+        if h == "/exclusiones" and not es_admin_nav:
+            continue   # exclusiones (ajuste de deteccion) es solo de admin
         cls = "tab on" if h == active else "tab"
         parts.append(f'<a href="{h}" class="{cls}">{t}</a>')
     brand = '<span class="brand"><img class="applogo" src="/logo.png" alt="Suricata">Estadisticas Suricata</span>'
@@ -3666,6 +3680,8 @@ def save_conf(user, pw):
 def _rol_badge(rl):
     if rl == "admin":
         return '<span class="rbadge adm">Administrador</span>'
+    if rl == "operador":
+        return '<span class="rbadge ope">Operador</span>'
     if rl == "lectura":
         return '<span class="rbadge lec">Solo lectura</span>'
     return '<span class="rbadge">—</span>'
@@ -3703,6 +3719,7 @@ _IC_RTR   = _ic("M19 15h-1v-3a1 1 0 0 0-1-1h-4V9h1a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1
 _IC_DL    = _ic("M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z")
 _IC_LOG   = _ic("M3 5h18v2H3V5zm0 6h18v2H3v-2zm0 6h12v2H3v-2z")
 _IC_BOOK  = _ic("M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z")
+_IC_AUDIT = _ic("M19 3h-4.18C14.4 1.84 13.3 1 12 1c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm-2 14l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z")
 
 def _card_politicas(m):
     """Sub-bloque de la tarjeta MikroTik: politicas por banda de riesgo del Top origenes."""
@@ -3732,7 +3749,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
     esc = html.escape
     yo = getattr(CTX, "user", None)
     mirol = getattr(CTX, "role", None)
-    es_admin = mirol != "lectura"
+    es_admin = mirol in (None, "admin")   # operador NO ve tarjetas de admin (usuarios/mikrotik/updates/bitacora)
     mi = buscar_usuario(yo) if yo else None
     mi_foto = (mi or {}).get("avatar", "")
     big_av = (f'<img class=avatar src="{esc(mi_foto)}" alt="">' if mi_foto.startswith("data:image/")
@@ -4017,7 +4034,8 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<div class=field><label>Usuario</label><input type=text name=nuser autocomplete=off required></div></div>"
             "<div class=grid2><div class=field><label>Correo</label><input type=email name=ncorreo autocomplete=off></div>"
             "<div class=field><label>Rol</label><select name=nrole>"
-            "<option value=lectura>Solo lectura</option><option value=admin>Administrador</option></select></div></div>"
+            "<option value=lectura>Solo lectura</option><option value=operador>Operador (cuarentenas/incidentes)</option>"
+            "<option value=admin>Administrador</option></select></div></div>"
             "<div class=field><label>Clave</label><input type=password name=npass autocomplete=new-password required>"
             "<div class=hint>Minimo 6 caracteres. Nombre y correo son opcionales.</div></div>"
             "<div class=field><label>Foto (opcional)</label><div class=avup>"
@@ -4038,7 +4056,8 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<div class=grid2><div class=field><label>Nombre</label><input type=text name=nombre id=en></div>"
             "<div class=field><label>Correo</label><input type=email name=correo id=ec></div></div>"
             "<div class=field><label>Rol</label><select name=role id=er>"
-            "<option value=admin>Administrador</option><option value=lectura>Solo lectura</option></select></div>"
+            "<option value=admin>Administrador</option><option value=operador>Operador (cuarentenas/incidentes)</option>"
+            "<option value=lectura>Solo lectura</option></select></div>"
             "<div class=field><label>Clave nueva (opcional)</label>"
             "<input type=password name=npass autocomplete=new-password placeholder='dejar vacio para no cambiar'>"
             "<div class=hint>Si la escribes, minimo 6 caracteres.</div></div>"
@@ -4122,6 +4141,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
         ".aname{font-size:17px;font-weight:700}.arole{margin-top:3px}"
         ".rbadge{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;background:#ecebe7;color:#52514e}"
         ".rbadge.adm{background:#e7f0fb;color:#1c5cab}.rbadge.lec{background:#eceae6;color:#6b6a66}"
+        ".rbadge.ope{background:#e6f4ea;color:#1a7f37}"
         ".field{margin:12px 0 0}label{display:block;font-size:12.5px;color:#52514e;margin:0 0 5px;font-weight:600}"
         "input,select{width:100%;padding:9px 11px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui;box-sizing:border-box;background:#fff}"
         "label.chk{display:flex;align-items:center;gap:9px;font-weight:500;color:#33322f;margin:0;cursor:pointer}"
@@ -4214,6 +4234,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
              + _tile("mikrotik", "MikroTik", _IC_RTR, bool(card_mk))
              + _tile("update", "Actualizaciones", _IC_DL, bool(card_update))
              + _tile("log", "Log", _IC_LOG, es_admin)
+             + _tile("bitacora", "Bitacora", _IC_AUDIT, es_admin)
              + _tile("doc", "Documentacion", _IC_BOOK, True))
     hub = f"<div class=hubgrid>{tiles}</div>"
     def _modal(sid, contenido):
@@ -4226,6 +4247,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
               + _mcard("acceso", card_acceso) + _mcard("mikrotik", card_mk) + _mcard("update", card_update))
     if es_admin:
         modals += _modal("log", "<iframe class=aptframe data-src='/log?embed=1'></iframe>")
+        modals += _modal("bitacora", "<iframe class=aptframe data-src='/bitacora?embed=1'></iframe>")
     modals += _modal("doc", "<iframe class=aptframe data-src='/documentacion?embed=1'></iframe>")
     hubcss = ("<style>.hubgrid{display:flex;flex-wrap:wrap;gap:22px;margin:18px 0}"
               ".hubt{display:flex;flex-direction:column;align-items:center;gap:9px;width:118px;text-decoration:none;color:#33322f;cursor:pointer}"
@@ -4861,6 +4883,84 @@ def log_page(embed=False):
             "<input class=search id=lsearch placeholder='Buscar IP, usuario, accion...' oninput='lfiltrar()'></div>"
             + cuerpo + "</section></main>" + script + "</body></html>")
 
+def bitacora_page(embed=False):
+    """Bitacora auditable: quien hizo que y cuando (logins, cuarentenas, config, usuarios, updates)."""
+    esc = html.escape
+    lineas = []
+    try:
+        with open(BITACORA_LOG, encoding="utf-8", errors="replace") as f:
+            lineas = f.readlines()[-1500:]
+    except OSError:
+        pass
+    lineas.reverse()
+    def accb(a):
+        au = a.upper(); c = "#8a8a86"
+        if au.startswith("LOGIN"): c = "#12b886"
+        elif "ELIMINA" in au or au.startswith("ERROR"): c = "#e34948"
+        elif au.startswith("USUARIO"): c = "#7048e8"
+        elif au.startswith("CONFIG") or au.startswith("ACTUALIZAR"): c = "#2a78d6"
+        elif au.startswith("ENVIADO") or "CUARENTENA" in au or au.startswith("QUITADO") or au.startswith("AUTO"): c = "#b52a2a"
+        return (f'<span style="background:{c};color:#fff;font-size:10px;font-weight:700;'
+                f'padding:2px 8px;border-radius:20px">{esc(a)}</span>')
+    rows = ""
+    for ln in lineas:
+        p = ln.rstrip("\n").split("\t")
+        if len(p) < 4:
+            continue
+        ts, us, ip, acc = p[0], p[1], p[2], p[3]
+        det = p[4] if len(p) > 4 else ""
+        rows += (f"<tr data-f=\"{esc((ts + ' ' + us + ' ' + ip + ' ' + acc + ' ' + det).lower())}\">"
+                 f"<td class=mono>{esc(ts)}</td><td>{esc(us) or '&mdash;'}</td><td class=mono>{esc(ip)}</td>"
+                 f"<td>{accb(acc)}</td><td class=det>{esc(det)}</td></tr>")
+    if rows:
+        cuerpo = ("<div class=twrap><table class=ut><thead><tr><th>Fecha (Ecuador)</th><th>Usuario</th><th>IP</th>"
+                  f"<th>Accion</th><th>Detalle</th></tr></thead><tbody id=logbody>{rows}</tbody></table></div>"
+                  "<div class=pager><button id=lprev type=button onclick=lprev()>&larr; Anterior</button>"
+                  "<span id=lpi></span>"
+                  "<button id=lnext type=button onclick=lnext()>Siguiente &rarr;</button></div>")
+    else:
+        cuerpo = "<p class=sub2>Sin acciones registradas todavia.</p>"
+    css = (
+        "body{margin:0;background:#f6f6f4;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
+        "main{max-width:1000px;margin:0 auto;padding:22px 22px 40px}"
+        "h1{font-size:21px;margin:0 0 2px}.sub2{color:#6b6a66;font-size:13px;margin:0 0 14px}"
+        ".card{border:1px solid #e7e6e2;border-radius:14px;padding:20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.03)}"
+        ".uhead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}"
+        ".search{width:240px;padding:8px 12px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui}"
+        ".twrap{overflow-x:auto;border:1px solid #eee;border-radius:10px}"
+        ".ut{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}"
+        ".ut th{text-align:left;color:#8a8a86;font-weight:600;padding:10px 12px;background:#fafafa;border-bottom:1px solid #eee}"
+        ".ut td{padding:8px 12px;border-bottom:1px solid #f2f1ee}"
+        ".ut tbody tr:last-child td{border-bottom:0}.ut tbody tr:hover{background:#fafbfd}"
+        ".mono{font-family:ui-monospace,Consolas,monospace}"
+        ".det{white-space:normal;color:#6b6a66;font-size:12px;max-width:360px}"
+        ".pager{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}"
+        ".pager button{font:13px system-ui;padding:6px 12px;border:1px solid #d7d6d2;background:#fff;border-radius:8px;cursor:pointer;color:#0b0b0b}"
+        ".pager button:hover:not(:disabled){background:#eef4fd;border-color:#2a78d6}"
+        ".pager button:disabled{opacity:.4;cursor:default}.pager #lpi{font-weight:600;font-size:13px;color:#52514e}")
+    script = ("<script>(function(){var SIZE=50,page=0,"
+              "rows=[].slice.call(document.querySelectorAll('#logbody tr')),q='';"
+              "function filtered(){return rows.filter(function(r){return (r.getAttribute('data-f')||'').indexOf(q)>=0;});}"
+              "function render(){var f=filtered(),pages=Math.max(1,Math.ceil(f.length/SIZE));"
+              "if(page>=pages)page=pages-1;if(page<0)page=0;"
+              "rows.forEach(function(r){r.style.display='none';});"
+              "f.slice(page*SIZE,page*SIZE+SIZE).forEach(function(r){r.style.display='';});"
+              "var pi=document.getElementById('lpi');if(pi)pi.textContent='Pagina '+(page+1)+' de '+pages+' ('+f.length+' registros)';"
+              "var pv=document.getElementById('lprev'),nx=document.getElementById('lnext');"
+              "if(pv)pv.disabled=page<=0;if(nx)nx.disabled=page>=pages-1;}"
+              "window.lfiltrar=function(){q=(document.getElementById('lsearch').value||'').toLowerCase();page=0;render();};"
+              "window.lprev=function(){page--;render();};window.lnext=function(){page++;render();};"
+              "if(rows.length)render();})();</script>")
+    return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>"
+            f"<style>{css}</style></head><body>" + ("" if embed else nav("/ajustes")) +
+            "<main><h1>Bitacora de acciones</h1>"
+            "<p class=sub2>Auditoria: quien hizo que y cuando (accesos, cuarentenas, cambios de "
+            "configuracion, usuarios y actualizaciones).</p>"
+            "<section class=card><div class=uhead><h2 style='font-size:15px;margin:0'>Ultimas acciones</h2>"
+            "<input class=search id=lsearch placeholder='Buscar usuario, IP, accion...' oninput='lfiltrar()'></div>"
+            + cuerpo + "</section></main>" + script + "</body></html>")
+
 def historico_page():
     fs = sorted(glob.glob(f"{LOGDIR}/report-*.html"), key=os.path.getmtime, reverse=True)
     rows = []
@@ -5170,8 +5270,11 @@ class H(BaseHTTPRequestHandler):
     def _rol(self):
         return self._sesion().get("role")
     def _admin(self):
-        # admin real, o modo sin-auth (sin usuarios configurados). 'lectura' -> False.
-        return self._rol() != "lectura"
+        # admin real, o modo sin-auth (sin usuarios). operador/lectura -> False.
+        return self._rol() in (None, "admin")
+    def _operador(self):
+        # puede gestionar cuarentenas/incidentes: admin, operador o modo sin-auth.
+        return self._rol() in (None, "admin", "operador")
     def _set_ctx(self):
         s = self._sesion()
         CTX.user = s.get("user"); CTX.role = s.get("role"); CTX.ip = self._client_ip()
@@ -5235,7 +5338,7 @@ class H(BaseHTTPRequestHandler):
             ahora_ec = datetime.now(TZ_EC).strftime("%d/%m/%Y %H:%M")
             # selector de ventana (solo admin): elegir cuanto tiempo abarca el resumen
             wsel = ""
-            if getattr(CTX, "role", None) != "lectura":
+            if getattr(CTX, "role", None) in (None, "admin"):
                 va = ventana_actual()
                 opts = "".join(f"<option value={v}{' selected' if v == va else ''}>{t}</option>"
                                for v, t in VENTANAS)
@@ -5288,11 +5391,15 @@ class H(BaseHTTPRequestHandler):
         if path == "/cuarentena":
             import urllib.parse as _up
             _qs = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
-            return self._html(cuarentena_page(msg=_qs.get("msg", [""])[0], es_admin=self._admin()))
+            return self._html(cuarentena_page(msg=_qs.get("msg", [""])[0], es_admin=self._operador()))
         if path == "/log":
             if not self._admin():
                 return self._redirect("/")   # lectura no ve el log de accesos
             return self._html(log_page(embed=("embed=1" in (self.path.split("?", 1)[1] if "?" in self.path else ""))))
+        if path == "/bitacora":
+            if not self._admin():
+                return self._redirect("/")   # la bitacora (auditoria) es solo de admin
+            return self._html(bitacora_page(embed=("embed=1" in (self.path.split("?", 1)[1] if "?" in self.path else ""))))
         if path == "/perfil":
             return self._redirect("/ajustes")
         if path == "/ajustes":
@@ -5357,6 +5464,7 @@ class H(BaseHTTPRequestHandler):
             if role:
                 LOGIN_FAILS.pop(ip, None)   # login correcto: limpia el contador
                 login_registrar(ip, u, "OK")
+                bitacora("LOGIN", f"rol={role}", quien=u, ip=ip)
                 token = secrets.token_urlsafe(24)
                 SESSIONS[token] = {"user": u, "role": role, "exp": time.time() + SESSION_TTL}
                 for k in [k for k, v in SESSIONS.items() if v.get("exp", 0) < time.time()]:
@@ -5407,6 +5515,7 @@ class H(BaseHTTPRequestHandler):
             if not self._admin():
                 return self._deny()
             registrar_update_inicio(getattr(CTX, "user", ""))  # de-que-SHA y quien, para el registro
+            bitacora("ACTUALIZAR-PANEL", "disparo actualizacion del panel")
             # el actualizador reinicia el panel: se lanza DESACOPLADO (systemd-run) para
             # que sobreviva al reinicio; si no hay systemd-run, con setsid como respaldo.
             try:
@@ -5510,6 +5619,8 @@ class H(BaseHTTPRequestHandler):
                 return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
             conf_dash_set("DOBLE_SENAL", "1" if q.get("doble") else "0")   # doble senal (lo lee el generador)
             guardar_nunca(q.get("nunca", [""])[0])                         # allowlist 'nunca bloquear'
+            bitacora("CONFIG-MIKROTIK", f"host={m.get('HOST','')} enviar={'si' if m.get('ENABLED')=='1' else 'no'} "
+                                        f"doble_senal={'si' if q.get('doble') else 'no'}")
             return self._html(perfil_page("Conexion al MikroTik guardada.", ok=True))
         if ruta == "/mikrotik/test":
             if not self._admin():
@@ -5547,7 +5658,7 @@ class H(BaseHTTPRequestHandler):
                 self.end_headers(); self.wfile.write(b); return
             return self._html(perfil_page(("Prueba: " + msg), ok=ok))
         if ruta == "/cuarentena/enviar":
-            if not self._admin():
+            if not self._operador():
                 return self._deny()
             ajax = bool(q.get("ajax"))   # desde el Top: responde texto plano y NO redirige
             def _fin(okr, texto):
@@ -5590,7 +5701,7 @@ class H(BaseHTTPRequestHandler):
             mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), err)
             return _fin(False, f"No se pudo enviar {ip}: {err}")
         if ruta == "/cuarentena/enviar-todos":
-            if not self._admin():
+            if not self._operador():
                 return self._deny()
             m = cargar_mk()
             if not (mk_configurado() and m.get("ENABLED") == "1"):
@@ -5625,7 +5736,7 @@ class H(BaseHTTPRequestHandler):
             resumen = f"Enviados {ok_n} a cuarentena" + (f", {err_n} con error ({ult_err})" if err_n else "")
             return self._redirect("/cuarentena?msg=" + _up.quote(resumen))
         if ruta == "/cuarentena/quitar":
-            if not self._admin():
+            if not self._operador():
                 return self._deny()
             ip = (q.get("ip", [""])[0]).strip()
             try:
@@ -5640,7 +5751,7 @@ class H(BaseHTTPRequestHandler):
             mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), err)
             return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
         if ruta in ("/cuarentena/dns/enviar", "/cuarentena/dns/quitar", "/cuarentena/dns/enviar-todos"):
-            if not self._admin():
+            if not self._operador():
                 return self._deny()
             m = cargar_mk(); lst = m.get("LIST_DNS", "suricata-dns-sospechoso"); ttl = _ttl_efectivo(m, "TTL_DNS")
             if ruta == "/cuarentena/dns/quitar":
@@ -5800,6 +5911,7 @@ class H(BaseHTTPRequestHandler):
                 guardar_usuarios(us)
             except OSError as ex:
                 return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            bitacora("USUARIO-CREADO", f"{nu} rol={nrole}")
             return self._html(perfil_page(f"Usuario '{nu}' creado como {nrole}.", ok=True))
         if accion == "del_user":
             objetivo = q.get("user", [""])[0]
@@ -5815,6 +5927,7 @@ class H(BaseHTTPRequestHandler):
                 guardar_usuarios(us)
             except OSError as ex:
                 return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            bitacora("USUARIO-ELIMINADO", objetivo)
             # si borra su propia cuenta, cerrar su sesion
             if objetivo == yo:
                 SESSIONS.pop(self._sid(), None)
@@ -5837,6 +5950,7 @@ class H(BaseHTTPRequestHandler):
                 guardar_usuarios(us)
             except OSError as ex:
                 return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            bitacora("USUARIO-ROL", f"{objetivo} -> {nrole}")
             return self._html(perfil_page(f"'{objetivo}' ahora es {nrole}.", ok=True))
         if accion == "edit_user":
             objetivo = q.get("user", [""])[0]
@@ -5869,6 +5983,7 @@ class H(BaseHTTPRequestHandler):
                 guardar_usuarios(us)
             except OSError as ex:
                 return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            bitacora("USUARIO-EDITADO", f"{objetivo} rol={nrole}")
             return self._html(perfil_page(f"Usuario '{objetivo}' actualizado.", ok=True))
         if accion == "toggle_user":
             objetivo = q.get("user", [""])[0]

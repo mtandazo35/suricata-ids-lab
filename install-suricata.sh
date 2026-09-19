@@ -2645,6 +2645,35 @@ def evaluar_bloqueos():
 
 # --- salud del sensor: distinguir "sin amenazas" de "sin trafico / perdidas / reporte viejo" ---
 SENSOR_FILE = "/var/log/suricata-sensor.json"
+REPORT_CONF = "/etc/suricata-report.conf"   # comparte TELEGRAM_TOKEN/CHAT_ID con el informe
+
+def _hostname():
+    try:
+        return os.uname().nodename
+    except Exception:
+        return "suricata"
+
+def enviar_telegram(texto):
+    """Envia un aviso por Telegram si esta configurado en /etc/suricata-report.conf.
+    No lanza: si no hay token o falla la red, no pasa nada (el aviso igual queda en el panel)."""
+    tok = chat = None
+    try:
+        for ln in open(REPORT_CONF, encoding="utf-8"):
+            ln = ln.strip()
+            if ln.startswith("TELEGRAM_TOKEN="):
+                tok = ln.split("=", 1)[1].strip()
+            elif ln.startswith("TELEGRAM_CHAT_ID="):
+                chat = ln.split("=", 1)[1].strip()
+    except OSError:
+        return False
+    if not (tok and chat):
+        return False
+    try:
+        data = urllib.parse.urlencode({"chat_id": chat, "text": texto[:4000]}).encode()
+        urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage", data=data, timeout=15)
+        return True
+    except Exception:
+        return False
 
 def _suricatasc(cmd):
     try:
@@ -2725,6 +2754,26 @@ def medir_sensor():
     else:
         o["nivel"] = "ok"
         o["titulo"] = "Viendo trafico" + (" · sin amenazas" if o["candidatos"] == 0 else f" · {o['candidatos']} CPE en riesgo")
+    # avisos proactivos: notificar cuando el estado EMPEORA (ok->warn/down), cuando cambia el
+    # motivo del problema, o re-recordar cada 6h si sigue mal; y avisar la recuperacion.
+    o["alert_estado"] = prev.get("alert_estado", "ok")
+    o["alert_titulo"] = prev.get("alert_titulo", "")
+    o["alert_ts"] = prev.get("alert_ts", 0)
+    mal = o["nivel"] in ("warn", "down")
+    era_mal = prev.get("alert_estado", "ok") in ("warn", "down")
+    aviso = None
+    if mal and (not era_mal or o["titulo"] != o["alert_titulo"] or now - o["alert_ts"] > 6 * 3600):
+        ico = "⛔" if o["nivel"] == "down" else "⚠️"
+        det = []
+        if o.get("pps") is not None: det.append(f"{o['pps']:,.0f} pkts/s")
+        if o.get("drop_ratio"): det.append(f"perdidas {o['drop_ratio']*100:.1f}%")
+        if o.get("reporte_edad") is not None: det.append(f"reporte hace {o['reporte_edad']//60} min")
+        aviso = f"{ico} Suricata [{_hostname()}]: {o['titulo']}" + (" (" + ", ".join(det) + ")" if det else "")
+    elif era_mal and not mal:
+        aviso = f"✅ Suricata [{_hostname()}]: sensor recuperado ({o['titulo']})"
+    if aviso:
+        enviar_telegram(aviso)
+        o["alert_estado"] = o["nivel"]; o["alert_titulo"] = o["titulo"]; o["alert_ts"] = int(now)
     try:
         tmp = SENSOR_FILE + ".tmp"
         json.dump(o, open(tmp, "w", encoding="utf-8"))

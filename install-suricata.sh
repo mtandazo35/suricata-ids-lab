@@ -818,6 +818,8 @@ _RE = {k: re.compile(p) for k, p in {
     "cat": r'"category":"((?:[^"\\]|\\.)*)"',
     "sev": r'"severity":(\d+)',
     "sid": r'"signature_id":(\d+)',
+    "rev": r'"rev":(\d+)',
+    "flow_id": r'"flow_id":(\d+)',
     "rrname": r'"rrname":"([^"]+)"',
 }.items()}
 
@@ -1049,6 +1051,7 @@ inf_sig = {}                       # firma CnC mas reciente por CPE (para el mot
 dns_hits = Counter()               # alertas de DNS sospechoso por CPE
 dns_sids = defaultdict(set)        # firmas DNS distintas por CPE
 dns_sig = {}                       # firma DNS mas reciente por CPE
+pruebas_by_src = defaultdict(list)  # evidencia por alerta (SID/rev/flow_id/dst/ts) por CPE, tope 8
 MAX_CARD = 2500                    # tope por set (el score satura mucho antes; protege RAM)
 total = 0
 seen = 0
@@ -1156,14 +1159,25 @@ for p in files:
             if dport and len(patron_src[(sig, dport)]) < MAX_CARD:
                 patron_src[(sig, dport)].add(src)
             _sl = sig.lower()
-            if any(k in _sl for k in CNC_KW):     # firma de infeccion (CnC/botnet/troyano)
+            _es_cnc = any(k in _sl for k in CNC_KW)
+            _es_dns = es_dns_sospechoso(sig, cat)
+            if _es_cnc:                           # firma de infeccion (CnC/botnet/troyano)
                 inf_hits[src] += 1
                 inf_sids[src].add(g("sid") or sig)
                 inf_sig[src] = sig
-            if es_dns_sospechoso(sig, cat):        # consulta DNS a dominio malicioso
+            if _es_dns:                            # consulta DNS a dominio malicioso
                 dns_hits[src] += 1
                 dns_sids[src].add(g("sid") or sig)
                 dns_sig[src] = sig
+            # evidencia por alerta (para la ficha): guardar hasta 8 registros por CPE
+            if (_es_cnc or _es_dns) and len(pruebas_by_src[src]) < 8:
+                pruebas_by_src[src].append({
+                    "tipo": "cnc" if _es_cnc else "dns",
+                    "sid": g("sid"), "rev": g("rev"), "sig": sig[:120],
+                    "ts": int(ts) if ts else 0, "flow_id": g("flow_id"),
+                    "dst": dst, "dport": dport,
+                    "rrname": g("rrname") if _es_dns else "",
+                })
             if ts:
                 if ts >= NOW - 300:  n5_by_src[src] += 1
                 if ts >= NOW - 3600: n1h_by_src[src] += 1
@@ -1676,6 +1690,22 @@ try:
         if len(_srcs) >= 3:
             correlacionados |= _srcs
 
+    def _reputacion_src(src):
+        """Coincidencias de reputacion de los destinos del CPE: (fuente, CIDR exacto,
+        categoria, vigencia). Para la ficha de evidencia."""
+        out = []; vistos = set()
+        for d in dst_by_src.get(src, ()):
+            fuente, cidr = reputacion_de(d)
+            if fuente and (fuente, cidr) not in vistos:
+                vistos.add((fuente, cidr))
+                mm = REP_META.get(fuente, {})
+                out.append({"ip": d, "cidr": cidr, "fuente": fuente,
+                            "categoria": mm.get("categoria", ""), "vigente": mm.get("vigente", False),
+                            "fetched_valid": mm.get("fetched_valid", 0), "expira": mm.get("expira", 0)})
+                if len(out) >= 8:
+                    break
+        return out
+
     def _evidencias_inf(src):
         """Evidencias INDEPENDIENTES (tipos distintos) que respaldan una infeccion. La
         repeticion o el volumen del MISMO conjunto de alertas NO son evidencia independiente;
@@ -1722,6 +1752,8 @@ try:
             "destinos_ip": sorted(dst_by_src.get(src, set()))[:12],   # para atribuir falsos positivos
             "puertos": len(dpt_by_src.get(src, ())),
             "total_alertas": by_src.get(src, 0),
+            "pruebas": pruebas_by_src.get(src, []),
+            "reputacion": _reputacion_src(src),
         })
     # ordenar: primero alta confianza, luego por riesgo
     cand.sort(key=lambda c: (c["confianza"] == "alta", c["riesgo"], c["alertas_cnc"]), reverse=True)
@@ -1761,6 +1793,8 @@ try:
                 "destinos_ip": sorted(dst_by_src.get(src, set()))[:12],   # para atribuir falsos positivos
                 "puertos": len(dpt_by_src.get(src, ())),
                 "total_alertas": by_src.get(src, 0),
+                "pruebas": pruebas_by_src.get(src, []),
+                "reputacion": _reputacion_src(src),
             })
     cand_dns.sort(key=lambda c: (c["confianza"] == "alta", c["alertas_dns"], c["riesgo"]), reverse=True)
     # top con su banda de riesgo, para el motor de politicas del panel (tope 50 CPEs)
@@ -5387,6 +5421,113 @@ def _salud_html():
                   f"<span class='stit'>&mdash; medido hace {hace}s</span></div>"
                   f"<div class='saludb'>{chip_html}</div></div>")
 
+def ficha_page(ip, embed=False):
+    """Ficha de EVIDENCIA por CPE: por que tiene ese riesgo (alertas, coincidencias de
+    reputacion con su fuente/CIDR/vigencia, corroboracion independiente y decision)."""
+    esc = html.escape
+    ip = (ip or "").strip()
+    try:
+        data = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
+    except Exception:
+        data = {}
+    c = None; categoria = ""
+    for key, lbl in (("candidatos", "Infeccion CnC"), ("dns_candidatos", "DNS sospechoso")):
+        for x in data.get(key, []):
+            if x.get("ip") == ip:
+                c = x; categoria = lbl; break
+        if c:
+            break
+    env = cargar_enviados(MK_SENT); envd = cargar_enviados(MK_SENT_DNS)
+    ent = env.get(ip) or envd.get(ip)
+    en_lista = bool(ent)
+    def _fecha(t):
+        return time.strftime("%d/%m/%Y %H:%M", time.localtime(t)) if t else "&mdash;"
+    if not c and not en_lista:
+        cuerpo = "<p class=sub2>No hay evidencia para <b>" + esc(ip) + "</b> en la ventana actual.</p>"
+    else:
+        c = c or (ent or {}).get("motivo", {}) or {}
+        conf = c.get("confianza", "")
+        conf_b = ("<span class='cfb alta'>Alta confianza</span>" if conf == "alta"
+                  else "<span class='cfb sosp'>Sospechoso</span>" if conf == "sospechoso" else "")
+        # Actividad (de las pruebas)
+        act = []
+        for p in (c.get("pruebas") or [])[:8]:
+            if p.get("tipo") == "dns":
+                act.append("Consulta DNS a <span class=mono>" + esc(p.get("rrname") or p.get("dst", "")) + "</span>")
+            else:
+                dst = esc(p.get("dst", "")) + ((":" + esc(str(p.get("dport")))) if p.get("dport") else "")
+                act.append("Comunicacion a <span class=mono>" + dst + "</span>")
+        act_html = "<br>".join(dict.fromkeys(act)) or "&mdash;"
+        # Alertas
+        al = ""
+        for p in (c.get("pruebas") or [])[:8]:
+            al += (f"<tr><td class=mono>{esc(str(p.get('sid') or '-'))}</td>"
+                   f"<td class=mono>{esc(str(p.get('rev') or '-'))}</td>"
+                   f"<td>{esc(p.get('sig', ''))}</td>"
+                   f"<td class=mono>{_fecha(p.get('ts', 0))}</td>"
+                   f"<td class=mono>{esc(str(p.get('flow_id') or '-'))}</td></tr>")
+        al = (f"<table class=fichat><thead><tr><th>SID</th><th>rev</th><th>Firma</th>"
+              f"<th>Fecha</th><th>flow_id</th></tr></thead><tbody>{al}</tbody></table>") if al else "&mdash; (sin alertas guardadas)"
+        # Coincidencia + Vigencia (reputacion)
+        rep = c.get("reputacion") or []
+        if rep:
+            co = ""; vg = ""
+            for r in rep:
+                co += (f"<tr><td class=mono>{esc(r.get('cidr') or r.get('ip', ''))}</td>"
+                       f"<td>{esc(r.get('fuente', ''))}</td><td>{esc(r.get('categoria', ''))}</td></tr>")
+                vg += (f"<tr><td>{esc(r.get('fuente', ''))}</td><td class=mono>{_fecha(r.get('fetched_valid', 0))}</td>"
+                       f"<td class=mono>{_fecha(r.get('expira', 0))}</td>"
+                       f"<td>{'vigente' if r.get('vigente') else 'CADUCADA'}</td></tr>")
+            coincidencia = f"<table class=fichat><thead><tr><th>IP/CIDR</th><th>Fuente</th><th>Categoria</th></tr></thead><tbody>{co}</tbody></table>"
+            vigencia = f"<table class=fichat><thead><tr><th>Fuente</th><th>Ultima valida</th><th>Caduca</th><th>Estado</th></tr></thead><tbody>{vg}</tbody></table>"
+        else:
+            coincidencia = "&mdash; (ningun destino en listas de reputacion)"
+            vigencia = "&mdash;"
+        # Corroboracion
+        evs = c.get("evidencias") or []
+        corr = ("<ul class=evlist>" + "".join(f"<li>{esc(e)}</li>" for e in evs) + "</ul>"
+                + f"<div class=rowmeta>Confianza: <b>{esc(conf or '-')}</b> ({len(evs)} evidencia(s) independiente(s))</div>") \
+            if evs else "<div class=rowmeta>Sin evidencia independiente (solo repeticion) &rarr; vigilar</div>"
+        # Decision
+        if en_lista:
+            decision = f"<b>En cuarentena</b> desde {_fecha((ent or {}).get('cuando', 0))} (lista del MikroTik)"
+        elif conf == "alta":
+            decision = "<b>Investigar / poner en cuarentena</b> (alta confianza)"
+        else:
+            decision = "<b>Vigilar</b> (sospechoso; falta corroboracion independiente)"
+        def _row(k, v):
+            return f"<tr><th>{k}</th><td>{v}</td></tr>"
+        cuerpo = (
+            f"<div class=fichah><h2 style='margin:0'>{esc(ip)}</h2>{conf_b}"
+            f"<span class=sub2 style='margin-left:auto'>{esc(categoria)} · riesgo {c.get('riesgo', '')}</span></div>"
+            "<table class=ficha>"
+            + _row("Cliente", esc(ip) + " <span class=rowmeta>(mapeo a abonado PPPoE/DHCP: pendiente de integrar)</span>")
+            + _row("Actividad", act_html)
+            + _row("Alerta", al)
+            + _row("Coincidencia", coincidencia)
+            + _row("Vigencia", vigencia)
+            + _row("Corroboracion", corr)
+            + _row("Decision", decision)
+            + "</table>")
+    css = ("body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
+           "main{max-width:820px;margin:0 auto;padding:18px 20px 40px}h1{font-size:19px;margin:0 0 10px}"
+           ".sub2{color:#6b6a66;font-size:13px}.mono{font-family:ui-monospace,Consolas,monospace}"
+           ".fichah{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 12px}"
+           ".ficha{width:100%;border-collapse:collapse}"
+           ".ficha th{text-align:left;vertical-align:top;width:130px;color:#52514e;font-weight:700;padding:10px 12px;border-top:1px solid #eee;background:#faf9f6}"
+           ".ficha td{padding:10px 12px;border-top:1px solid #eee}"
+           ".fichat{width:100%;border-collapse:collapse;font-size:12.5px;margin:2px 0}"
+           ".fichat th{background:#f4f4f2;text-align:left;padding:6px 8px;color:#52514e;border-bottom:1px solid #e7e6e2}"
+           ".fichat td{padding:6px 8px;border-bottom:1px solid #f2f1ee;vertical-align:top}"
+           ".cfb{font-size:11px;font-weight:800;padding:2px 9px;border-radius:20px}"
+           ".cfb.alta{background:#fdecec;color:#b52a2a;border:1px solid #f3c4c4}"
+           ".cfb.sosp{background:#fff7ed;color:#7a4a12;border:1px solid #f2d3ad}"
+           ".evlist{margin:2px 0;padding-left:16px;color:#245c3c}.rowmeta{font-size:12px;color:#6b6a66;margin-top:4px}")
+    return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>"
+            f"<style>{css}</style></head><body>" + ("" if embed else nav("/cuarentena")) +
+            "<main><h1>Ficha de evidencia</h1>" + cuerpo + "</main></body></html>")
+
 def cuarentena_page(msg="", es_admin=False):
     """Cuarentena: CPEs INFECTADOS CONFIRMADOS. Si el MikroTik esta configurado y HABILITADO
     y quien mira es admin, aparece el boton Enviar (a la address-list) / Quitar. Si no, dry-run.
@@ -5468,7 +5609,8 @@ def cuarentena_page(msg="", es_admin=False):
             f"<td><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {esc(c.get('banda',''))}</span>"
             f"<div style='margin-top:4px'>{_conf_badge(c)}</div></td>"
             f"<td class='mot'>{c.get(cnt_key,0)} {cnt_lbl} · {c.get(fir_key,0)} firma(s)<br>"
-            f"<span class='fw'>{esc((c.get('firma','') or '')[:70])}</span>{_ev_html(c)}</td>"
+            f"<span class='fw'>{esc((c.get('firma','') or '')[:70])}</span>{_ev_html(c)}"
+            f"<button type=button class=evbtn onclick=\"verFicha('{esc(c.get('ip',''))}')\">Ver evidencia</button></td>"
             f"<td class='num'>{c.get('destinos',0)}</td><td class='num'>{c.get('puertos',0)}</td>"
             f"<td class='num'>{c.get('total_alertas',0):,}</td>"
             f"<td>{_acc(c)}</td></tr>" for c in candidatos)
@@ -5583,6 +5725,12 @@ def cuarentena_page(msg="", es_admin=False):
            ".cfb.sosp{background:#fff7ed;color:#7a4a12;border:1px solid #f2d3ad}"
            ".evlist{margin:6px 0 0;padding-left:16px;font-size:11.5px;color:#3f7d55;line-height:1.5}"
            ".evlist li{margin:1px 0}"
+           ".evbtn{margin-top:7px;border:1px solid #cfe0f6;background:#eef4fd;color:#2a5fa0;border-radius:7px;padding:4px 10px;font:600 12px system-ui;cursor:pointer}"
+           ".evbtn:hover{background:#dbe9fb}"
+           ".fichaov{display:none;position:fixed;inset:0;background:rgba(11,11,11,.5);z-index:120;align-items:center;justify-content:center;padding:20px}"
+           ".fichabox{position:relative;background:#fcfcfb;border-radius:14px;max-width:880px;width:100%;height:min(88vh,820px);box-shadow:0 14px 50px rgba(0,0,0,.4);overflow:hidden}"
+           ".fichax{position:absolute;top:8px;right:8px;z-index:2;border:0;background:#eceae6;width:30px;height:30px;border-radius:50%;font-size:19px;line-height:1;cursor:pointer}.fichax:hover{background:#e34948;color:#fff}"
+           ".fichafr{width:100%;height:100%;border:0}"
            ".destchip{display:inline-flex;align-items:center;gap:4px;background:#eef4fd;border:1px solid #cfe0f6;color:#2a5fa0;border-radius:20px;padding:2px 4px 2px 10px;margin:2px 4px 2px 0;font-size:12px}"
            ".destx{border:0;background:transparent;color:#2a5fa0;cursor:pointer;font-size:15px;line-height:1;padding:0 4px}.destx:hover{color:#e34948}"
            ".dry{background:#eef4fd;color:#2a5fa0;border:1px solid #cfe0f6;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap}"
@@ -5603,7 +5751,16 @@ def cuarentena_page(msg="", es_admin=False):
             f"<p class='sub'>Ventana {vmin} min · lista de hace {edad}. Dos categorias: <b>infectados</b> (malware/CnC) "
             "y <b>DNS sospechoso</b> (consultan dominios de botnet), cada una a su address-list del MikroTik.</p>"
             + _salud_html() + flash + estado + sec_fp + sec_inf + sec_dns + sec_manual +
-            "<script>(function(){var n=document.getElementById('notif');if(!n)return;"
+            "<div id=fichamodal class=fichaov onclick=\"if(event.target===this)this.style.display='none'\">"
+            "<div class=fichabox><button type=button class=fichax "
+            "onclick=\"document.getElementById('fichamodal').style.display='none'\">&times;</button>"
+            "<iframe id=fichafr class=fichafr></iframe></div></div>"
+            "<script>function verFicha(ip){var m=document.getElementById('fichamodal');"
+            "document.getElementById('fichafr').src='/cuarentena/ficha?embed=1&ip='+encodeURIComponent(ip);"
+            "m.style.display='flex';}"
+            "document.addEventListener('keydown',function(e){if(e.key==='Escape')"
+            "document.getElementById('fichamodal').style.display='none';});"
+            "(function(){var n=document.getElementById('notif');if(!n)return;"
             "setTimeout(function(){n.classList.add('show');},60);"
             "setTimeout(function(){n.classList.remove('show');},3600);})();</script>"
             "</main></body></html>")
@@ -5781,6 +5938,13 @@ class H(BaseHTTPRequestHandler):
             import urllib.parse as _up
             _qs = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             return self._html(cuarentena_page(msg=_qs.get("msg", [""])[0], es_admin=self._operador()))
+        if path == "/cuarentena/ficha":
+            if not self._operador():
+                return self._redirect("/")
+            import urllib.parse as _up
+            _qs = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            return self._html(ficha_page(_qs.get("ip", [""])[0],
+                                         embed=("embed=1" in (self.path.split("?", 1)[1] if "?" in self.path else ""))))
         if path == "/log":
             if not self._admin():
                 return self._redirect("/")   # lectura no ve el log de accesos

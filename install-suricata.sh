@@ -1548,54 +1548,90 @@ top_sec = top_origenes_section()
 # --- Cuarentena (Fase A, dry-run): CPEs INFECTADOS CONFIRMADOS (repeticion/contexto).
 # Solo se ESCRIBE la lista de candidatos; NO se toca el MikroTik. El panel la muestra.
 try:
-    def _senales_inf(src):
-        """Cuenta senales INDEPENDIENTES de infeccion (para exigir 'doble senal')."""
-        s = 0
-        if inf_hits[src] >= UMBRAL_INFECTADO:                                   # repeticion
-            s += 1
-        if len(inf_sids.get(src, ())) >= 2:                                     # varias firmas
-            s += 1
-        if len(dst_by_src.get(src, ())) >= 3 or len(dpt_by_src.get(src, ())) >= 3:  # fan-out
-            s += 1
-        if by_src.get(src, 0) >= UMBRAL_INFECTADO * 3:                          # volumen alto
-            s += 1
-        return s
+    # correlacion de flota: CPEs que comparten un patron (misma firma+puerto) con >=3 CPEs
+    correlacionados = set()
+    for _k, _srcs in patron_src.items():
+        if len(_srcs) >= 3:
+            correlacionados |= _srcs
+
+    def _evidencias_inf(src):
+        """Evidencias INDEPENDIENTES (tipos distintos) que respaldan una infeccion. La
+        repeticion o el volumen del MISMO conjunto de alertas NO son evidencia independiente;
+        aqui se cuentan solo TIPOS distintos. Devuelve (n, lista de etiquetas)."""
+        ev = []
+        nsids = len(inf_sids.get(src, ()))
+        if nsids >= 2:
+            ev.append(f"{nsids} firmas CnC distintas")
+        _dm = [d for d in dst_by_src.get(src, ()) if es_malo(d)]
+        if _dm:
+            ev.append(f"destino en lista de reputacion ({len(_dm)})")
+        if (src in n5_by_src) and (n1h_by_src.get(src, 0) > n5_by_src.get(src, 0)):
+            ev.append("actividad sostenida (5 min y 1 h)")
+        if src in correlacionados:
+            ev.append("patron compartido con otros CPE (campana)")
+        if dns_hits.get(src, 0) >= 1:
+            ev.append("consulto dominio malicioso (DNS)")
+        return len(ev), ev
+
     cand = []
     for src in inf_hits:
         if nunca_bloquear(src):
             continue                                    # allowlist: nunca a cuarentena
-        _ns = _senales_inf(src)
-        if DOBLE_SENAL:
-            _es = _ns >= 2 or inf_hits[src] >= UMBRAL_INFECTADO * 4   # 2 senales o una abrumadora
-        else:
-            _es = inf_hits[src] >= UMBRAL_INFECTADO or len(inf_sids[src]) >= 2
-        if _es:
-            sc, band, _c, _d = riesgo(src)
-            cand.append({
-                "ip": src,
-                "riesgo": sc,
-                "banda": band,
-                "alertas_cnc": inf_hits[src],
-                "firmas_cnc": len(inf_sids[src]),
-                "firma": inf_sig.get(src, ""),
-                "destinos": len(dst_by_src.get(src, ())),
-                "destinos_ip": sorted(dst_by_src.get(src, set()))[:12],   # para atribuir falsos positivos
-                "puertos": len(dpt_by_src.get(src, ())),
-                "total_alertas": by_src.get(src, 0),
-                "senales": _ns,
-            })
-    cand.sort(key=lambda c: (c["riesgo"], c["alertas_cnc"]), reverse=True)
+        # gatillo minimo para siquiera considerarlo (repeticion o >=2 firmas)
+        if not (inf_hits[src] >= UMBRAL_INFECTADO or len(inf_sids[src]) >= 2):
+            continue
+        n_ev, evid = _evidencias_inf(src)
+        # nivel de confianza: la evidencia INDEPENDIENTE manda, no el volumen.
+        #  - alta: >=2 tipos de evidencia independientes -> investigar / cuarentena
+        #  - sospechoso: solo repeticion o una sola pista -> vigilar (no auto-cuarentena)
+        confianza = "alta" if n_ev >= 2 else "sospechoso"
+        sc, band, _c, _d = riesgo(src)
+        cand.append({
+            "ip": src,
+            "riesgo": sc,
+            "banda": band,
+            "confianza": confianza,
+            "n_evidencias": n_ev,
+            "evidencias": evid,
+            "alertas_cnc": inf_hits[src],
+            "firmas_cnc": len(inf_sids[src]),
+            "firma": inf_sig.get(src, ""),
+            "destinos": len(dst_by_src.get(src, ())),
+            "destinos_ip": sorted(dst_by_src.get(src, set()))[:12],   # para atribuir falsos positivos
+            "puertos": len(dpt_by_src.get(src, ())),
+            "total_alertas": by_src.get(src, 0),
+        })
+    # ordenar: primero alta confianza, luego por riesgo
+    cand.sort(key=lambda c: (c["confianza"] == "alta", c["riesgo"], c["alertas_cnc"]), reverse=True)
     # DNS sospechoso: CPEs que consultaron dominios de botnet/C2 (Camino A: alertas DNS)
+    def _evidencias_dns(src):
+        ev = []
+        nd = len(dns_sids.get(src, ()))
+        if nd >= 2:
+            ev.append(f"{nd} firmas DNS distintas")
+        _dm = [d for d in dst_by_src.get(src, ()) if es_malo(d)]
+        if _dm:
+            ev.append(f"destino en lista de reputacion ({len(_dm)})")
+        if src in correlacionados:
+            ev.append("patron compartido con otros CPE (campana)")
+        if inf_hits.get(src, 0) >= 1:
+            ev.append("tambien alertas CnC")
+        return len(ev), ev
     cand_dns = []
     for src in dns_hits:
         if nunca_bloquear(src):
             continue                                    # allowlist: nunca a cuarentena
         if dns_hits[src] >= UMBRAL_DNS or len(dns_sids[src]) >= 2:
+            n_ev, evid = _evidencias_dns(src)
+            confianza = "alta" if n_ev >= 2 else "sospechoso"
             sc, band, _c, _d = riesgo(src)
             cand_dns.append({
                 "ip": src,
                 "riesgo": sc,
                 "banda": band,
+                "confianza": confianza,
+                "n_evidencias": n_ev,
+                "evidencias": evid,
                 "alertas_dns": dns_hits[src],
                 "firmas_dns": len(dns_sids[src]),
                 "firma": dns_sig.get(src, ""),
@@ -1604,7 +1640,7 @@ try:
                 "puertos": len(dpt_by_src.get(src, ())),
                 "total_alertas": by_src.get(src, 0),
             })
-    cand_dns.sort(key=lambda c: (c["alertas_dns"], c["riesgo"]), reverse=True)
+    cand_dns.sort(key=lambda c: (c["confianza"] == "alta", c["alertas_dns"], c["riesgo"]), reverse=True)
     # top con su banda de riesgo, para el motor de politicas del panel (tope 50 CPEs)
     top_r = []
     for _s, _t in by_src.most_common(50):
@@ -5172,6 +5208,20 @@ def cuarentena_page(msg="", es_admin=False):
         return (f"<b>{tp}</b> riesgo {esc(str(mt.get('score', '')))} {esc(mt.get('banda', ''))}<br>"
                 f"<span class='fw'>{esc(mt.get('conteo', ''))}{(' · ' + fw) if fw else ''}</span>")
 
+    def _conf_badge(c):
+        cf = c.get("confianza")
+        if cf == "alta":
+            return "<span class='cfb alta'>Alta confianza</span>"
+        if cf == "sospechoso":
+            return "<span class='cfb sosp'>Sospechoso</span>"
+        return ""
+
+    def _ev_html(c):
+        ev = c.get("evidencias") or []
+        if ev:
+            return "<ul class='evlist'>" + "".join(f"<li>{esc(e)}</li>" for e in ev) + "</ul>"
+        return "<div class='rowmeta'>sin evidencia independiente (solo repeticion)</div>"
+
     def _seccion(titulo, sub, candidatos, env_map, pref, lista_name, cnt_key, cnt_lbl, fir_key, vacio):
         """Arma una seccion (titulo + tabla + boton 'enviar todos') para una categoria."""
         pend = [c for c in candidatos if c.get("ip") not in env_map]
@@ -5193,30 +5243,35 @@ def cuarentena_page(msg="", es_admin=False):
             return "<span class='dry' title='Configura y habilita el MikroTik en Ajustes para activar el envio'>solo sugerencia</span>"
         filas = "".join(
             f"<tr><td class='mono ipx'>{esc(c.get('ip',''))}</td>"
-            f"<td><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {esc(c.get('banda',''))}</span></td>"
+            f"<td><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {esc(c.get('banda',''))}</span>"
+            f"<div style='margin-top:4px'>{_conf_badge(c)}</div></td>"
             f"<td class='mot'>{c.get(cnt_key,0)} {cnt_lbl} · {c.get(fir_key,0)} firma(s)<br>"
-            f"<span class='fw'>{esc((c.get('firma','') or '')[:70])}</span></td>"
+            f"<span class='fw'>{esc((c.get('firma','') or '')[:70])}</span>{_ev_html(c)}</td>"
             f"<td class='num'>{c.get('destinos',0)}</td><td class='num'>{c.get('puertos',0)}</td>"
             f"<td class='num'>{c.get('total_alertas',0):,}</td>"
             f"<td>{_acc(c)}</td></tr>" for c in candidatos)
         if not filas:
             filas = f"<tr><td colspan=7 class='muted' style='padding:18px;text-align:center'>{vacio}</td></tr>"
+        # 'Enviar todos' solo actua sobre ALTA CONFIANZA (evidencia independiente), no sospechosos
+        pend_alta = [c for c in pend if c.get("confianza") == "alta"]
         btn = ""
-        if es_admin and activo and pend:
+        if es_admin and activo and pend_alta:
             btn = (f"<form method=post action='/{pref}/enviar-todos' style='display:inline;margin-left:auto'>"
-                   f"<button class='qbtn send' onclick=\"return confirm('Enviar los {len(pend)} CPE de esta lista al MikroTik?')\">"
-                   f"&#9888; Enviar todos ({len(pend)})</button></form>")
+                   f"<button class='qbtn send' onclick=\"return confirm('Enviar los {len(pend_alta)} CPE de ALTA CONFIANZA al MikroTik?')\">"
+                   f"&#9888; Enviar alta confianza ({len(pend_alta)})</button></form>")
         return (f"<div class='seccion'><div class='shead'><div><h2>{titulo}</h2>"
                 f"<p class='sub'>{sub} · {len(candidatos)} candidato(s).</p></div>{btn}</div>"
                 "<div class='card'><table><thead><tr>"
-                "<th>CPE (IP origen)</th><th>Riesgo</th><th>Motivo</th>"
+                "<th>CPE (IP origen)</th><th>Riesgo / confianza</th><th>Motivo y evidencia</th>"
                 "<th class='num'>Destinos</th><th class='num'>Puertos</th><th class='num'>Alertas</th><th>Accion</th>"
                 f"</tr></thead><tbody>{filas}</tbody></table></div></div>")
 
     sec_inf = _seccion("Infectados (malware/CnC)",
-                       f"Infeccion confirmada (&ge;{umbral} alertas de CnC o &ge;2 firmas distintas) &rarr; lista <code>{esc(m.get('LIST',''))}</code>",
+                       "<b>Alta confianza</b> = ≥2 evidencias independientes (firmas distintas, reputacion del "
+                       f"destino, persistencia, campana, DNS) → investigar/cuarentena. <b>Sospechoso</b> = solo "
+                       f"repeticion → vigilar. Lista <code>{esc(m.get('LIST',''))}</code>",
                        cand, enviados, "cuarentena", m.get("LIST", ""), "alertas_cnc", "alertas CnC", "firmas_cnc",
-                       "Sin CPEs infectados confirmados en la ventana. (Un solo aviso de CnC aislado NO entra aqui.)")
+                       "Sin CPEs con alertas de CnC en la ventana.")
     sec_dns = _seccion("DNS sospechoso (consultan dominios de botnet/C2)",
                        f"Consultas DNS a dominios maliciosos (&ge;{umbral_dns} alertas DNS o &ge;2 firmas) &rarr; lista <code>{esc(m.get('LIST_DNS',''))}</code> (otro trato)",
                        dns_cand, enviados_dns, "cuarentena/dns", m.get("LIST_DNS", ""), "alertas_dns", "alertas DNS", "firmas_dns",
@@ -5301,6 +5356,11 @@ def cuarentena_page(msg="", es_admin=False):
            ".rb{color:#fff;font-weight:800;font-size:12px;padding:2px 9px;border-radius:20px;white-space:nowrap}"
            ".fw{color:#7a4a12;font-size:12px}.mot{max-width:300px}"
            ".rowmeta{font-size:11.5px;color:#6b6a66;margin-top:3px}.muted{color:#9a9a95}"
+           ".cfb{font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:20px;white-space:nowrap}"
+           ".cfb.alta{background:#fdecec;color:#b52a2a;border:1px solid #f3c4c4}"
+           ".cfb.sosp{background:#fff7ed;color:#7a4a12;border:1px solid #f2d3ad}"
+           ".evlist{margin:6px 0 0;padding-left:16px;font-size:11.5px;color:#3f7d55;line-height:1.5}"
+           ".evlist li{margin:1px 0}"
            ".destchip{display:inline-flex;align-items:center;gap:4px;background:#eef4fd;border:1px solid #cfe0f6;color:#2a5fa0;border-radius:20px;padding:2px 4px 2px 10px;margin:2px 4px 2px 0;font-size:12px}"
            ".destx{border:0;background:transparent;color:#2a5fa0;cursor:pointer;font-size:15px;line-height:1;padding:0 4px}.destx:hover{color:#e34948}"
            ".dry{background:#eef4fd;color:#2a5fa0;border:1px solid #cfe0f6;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap}"
@@ -5818,7 +5878,8 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 cq = []
             env = cargar_enviados()
-            pend = [c for c in cq if c.get("ip") not in env][:50]   # tope de seguridad por accion
+            # masivo: solo ALTA CONFIANZA (evidencia independiente); los sospechosos van a mano
+            pend = [c for c in cq if c.get("ip") not in env and c.get("confianza") == "alta"][:50]
             ok_n = err_n = 0; ult_err = ""
             for c in pend:
                 ip = c.get("ip", "")
@@ -5908,7 +5969,7 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 cq = []
             env = cargar_enviados(MK_SENT_DNS)
-            pend = [c for c in cq if c.get("ip") not in env][:50]
+            pend = [c for c in cq if c.get("ip") not in env and c.get("confianza") == "alta"][:50]
             ok_n = err_n = 0; ult_err = ""
             for c in pend:
                 ip = c.get("ip", "")

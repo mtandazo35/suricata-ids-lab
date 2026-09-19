@@ -788,6 +788,18 @@ def _conf_key(k, default):
 # Se apaga con DOBLE_SENAL=0 en /etc/suricata-dashboard.conf.
 DOBLE_SENAL = _conf_key("DOBLE_SENAL", "1") == "1"
 
+# Destinos CONFIABLES (falsos positivos): p.ej. un DNS que dispara alertas en muchos CPEs.
+# Las alertas HACIA estas IPs no cuentan -> los clientes dejan de ser candidatos por su culpa.
+DEST_OK_FILE = "/etc/suricata-destinos-confianza.lst"
+DEST_OK = set()
+try:
+    for _l in open(DEST_OK_FILE, encoding="utf-8"):
+        _l = _l.split("#", 1)[0].strip()
+        if _l:
+            DEST_OK.add(_l)
+except OSError:
+    pass
+
 def campos(line):
     def g(k):
         m = _RE[k].search(line)
@@ -1022,6 +1034,8 @@ for p in files:
             sport = g("src_port"); dport = g("dest_port")
             proto = g("proto")
             if excluido(src, dst, int(dport) if dport else None):   # exclusiones configuradas
+                continue
+            if dst in DEST_OK:     # destino marcado confiable (falso positivo): la alerta no cuenta
                 continue
             by_dst[dst] += 1
             by_src[src] += 1
@@ -1565,6 +1579,7 @@ try:
                 "firmas_cnc": len(inf_sids[src]),
                 "firma": inf_sig.get(src, ""),
                 "destinos": len(dst_by_src.get(src, ())),
+                "destinos_ip": sorted(dst_by_src.get(src, set()))[:12],   # para atribuir falsos positivos
                 "puertos": len(dpt_by_src.get(src, ())),
                 "total_alertas": by_src.get(src, 0),
                 "senales": _ns,
@@ -1585,6 +1600,7 @@ try:
                 "firmas_dns": len(dns_sids[src]),
                 "firma": dns_sig.get(src, ""),
                 "destinos": len(dst_by_src.get(src, ())),
+                "destinos_ip": sorted(dst_by_src.get(src, set()))[:12],   # para atribuir falsos positivos
                 "puertos": len(dpt_by_src.get(src, ())),
                 "total_alertas": by_src.get(src, 0),
             })
@@ -2737,6 +2753,71 @@ def nunca_bloquear(ip):
     except ValueError:
         return False
 
+# --- destinos confiables (falsos positivos): un DNS u otro destino que dispara alertas en
+# muchos CPEs. Al marcarlo, el generador deja de contar sus alertas y se liberan los CPEs
+# que fueron a la lista por su culpa. ---
+DEST_OK_FILE = "/etc/suricata-destinos-confianza.lst"
+
+def cargar_dest_ok():
+    try:
+        return open(DEST_OK_FILE, encoding="utf-8").read()
+    except OSError:
+        return ""
+
+def _dest_ok_set():
+    s = set()
+    for l in cargar_dest_ok().splitlines():
+        x = l.split("#", 1)[0].strip()
+        if x:
+            s.add(x)
+    return s
+
+def guardar_dest_ok_set(conjunto):
+    try:
+        tmp = DEST_OK_FILE + ".tmp"
+        open(tmp, "w", encoding="utf-8").write("\n".join(sorted(conjunto)) + ("\n" if conjunto else ""))
+        os.replace(tmp, DEST_OK_FILE)
+    except OSError:
+        pass
+
+def excluir_destino(d):
+    """Marca un destino como confiable (falso positivo) y libera de la cuarentena TODOS los
+    CPEs cuyo bloqueo se debe a ese destino. Devuelve (n_liberados, mensaje)."""
+    d = (d or "").strip()
+    try:
+        ipaddress.ip_address(d)
+    except ValueError:
+        return 0, "IP de destino invalida"
+    cur = _dest_ok_set(); cur.add(d)
+    guardar_dest_ok_set(cur)                       # 1) destino a la lista de confiables
+    m = cargar_mk(); liberados = 0
+    try:                                           # destinos por CPE del reporte actual (respaldo)
+        cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
+        cand_dst = {}
+        for key in ("candidatos", "dns_candidatos"):
+            for c in cq.get(key, []):
+                cand_dst[c.get("ip")] = c.get("destinos_ip", [])
+    except Exception:
+        cand_dst = {}
+    for list_key, sent_path in (("LIST", MK_SENT), ("LIST_DNS", MK_SENT_DNS)):
+        lst = m.get(list_key, "")
+        env = cargar_enviados(sent_path); cambiado = False
+        for ip in list(env.keys()):
+            dips = (env[ip].get("motivo") or {}).get("destinos_ip") or cand_dst.get(ip) or []
+            if d in dips:                          # 2) atribuible a ese destino -> liberar
+                try:
+                    if m.get("ENABLED") == "1":
+                        mk_remove(ip, lista=lst)
+                except Exception:
+                    pass
+                env.pop(ip, None); cambiado = True; liberados += 1
+                mk_log("LIBERADO-FALSO-POSITIVO", ip, getattr(CTX, "user", "?"), f"destino={d} lista={lst}")
+        if cambiado:
+            guardar_enviados(env, sent_path)
+    globals()["FORCE_REGEN"] = True                # 3) recalcular candidatos sin ese destino
+    bitacora("EXCLUIR-DESTINO", f"{d} -> {liberados} CPE liberado(s)")
+    return liberados, f"Destino {d} marcado confiable; {liberados} CPE liberado(s) por falso positivo."
+
 # --- cuarentena explicable: por que se bloqueo y cuando se reviso por ultima vez ---
 def _motivo_bloqueo(ip):
     """Busca por que un CPE es candidato (firma, banda, score, conteos) en cuarentena.json,
@@ -2752,7 +2833,8 @@ def _motivo_bloqueo(ip):
             if c.get("ip") == ip:
                 return {"tipo": tipo, "banda": c.get("banda", ""), "score": c.get("riesgo", 0),
                         "firma": (c.get("firma", "") or "")[:120],
-                        "conteo": f"{c.get(cnt, 0)} {cntlbl}, {c.get(fir, 0)} firma(s)"}
+                        "conteo": f"{c.get(cnt, 0)} {cntlbl}, {c.get(fir, 0)} firma(s)",
+                        "destinos_ip": c.get("destinos_ip", [])}   # para liberar por falso positivo
     return {}
 
 def evaluar_bloqueos():
@@ -5165,6 +5247,29 @@ def cuarentena_page(msg="", es_admin=False):
                       f"<tbody>{manual_rows}</tbody></table></div></div>")
     else:
         sec_manual = ""
+    # --- Excluir destino (falso positivo): un DNS u otro destino que dispara alertas en muchos CPEs ---
+    if es_admin:   # es_admin aqui = operador o admin (pueden operar la cuarentena)
+        dests_ok = sorted(_dest_ok_set())
+        chips = ("".join(
+            f"<span class=destchip><span class=mono>{esc(dp)}</span>"
+            f"<form method=post action='/cuarentena/quitar-destino' style='display:inline;margin:0'>"
+            f"<input type=hidden name=destino value='{esc(dp)}'>"
+            f"<button class=destx title='Quitar de confiables'>&times;</button></form></span>"
+            for dp in dests_ok) if dests_ok else "<span class=muted>ninguno todavia</span>")
+        sec_fp = ("<div class='seccion'><div class='card' style='padding:14px 16px'>"
+                  "<h2 style='font-size:15px;margin:0 0 4px'>Excluir destino (falso positivo)</h2>"
+                  "<p class='sub' style='margin:0 0 10px'>Si una IP <b>destino</b> (p.ej. un DNS) dispara falsos "
+                  "positivos en muchos CPEs, marcala como confiable: sus alertas dejan de contar y se "
+                  "<b>liberan automaticamente</b> los CPEs que fueron a la lista por su culpa.</p>"
+                  "<form method=post action='/cuarentena/excluir-destino' style='display:flex;gap:8px;flex-wrap:wrap'>"
+                  "<input type=text name=destino placeholder='200.63.105.194' "
+                  "style='flex:1;min-width:180px;padding:8px 11px;border:1px solid #d7d6d2;border-radius:8px;"
+                  "font:13px ui-monospace,Consolas,monospace'>"
+                  "<button class='qbtn' style='background:#2a78d6'>Excluir y liberar</button></form>"
+                  f"<div style='margin-top:10px;font-size:12px;color:#6b6a66'>Destinos confiables: {chips}</div>"
+                  "</div></div>")
+    else:
+        sec_fp = ""
     if activo:
         auto = m.get("AUTO_MANTENER") == "1"
         auto_txt = (" <b>Auto-mantener ON</b>: las IPs entran sin caducidad y se liberan solas cuando el CPE deja de atacar."
@@ -5196,6 +5301,8 @@ def cuarentena_page(msg="", es_admin=False):
            ".rb{color:#fff;font-weight:800;font-size:12px;padding:2px 9px;border-radius:20px;white-space:nowrap}"
            ".fw{color:#7a4a12;font-size:12px}.mot{max-width:300px}"
            ".rowmeta{font-size:11.5px;color:#6b6a66;margin-top:3px}.muted{color:#9a9a95}"
+           ".destchip{display:inline-flex;align-items:center;gap:4px;background:#eef4fd;border:1px solid #cfe0f6;color:#2a5fa0;border-radius:20px;padding:2px 4px 2px 10px;margin:2px 4px 2px 0;font-size:12px}"
+           ".destx{border:0;background:transparent;color:#2a5fa0;cursor:pointer;font-size:15px;line-height:1;padding:0 4px}.destx:hover{color:#e34948}"
            ".dry{background:#eef4fd;color:#2a5fa0;border:1px solid #cfe0f6;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap}"
            ".enq{background:#fdecec;color:#b52a2a;border:1px solid #f3c4c4;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap}"
            ".qbtn{font:12px system-ui;font-weight:700;border:0;border-radius:7px;padding:5px 11px;cursor:pointer;color:#fff}"
@@ -5213,7 +5320,7 @@ def cuarentena_page(msg="", es_admin=False):
             "<h1>Cuarentena y control de CPEs</h1>"
             f"<p class='sub'>Ventana {vmin} min · lista de hace {edad}. Dos categorias: <b>infectados</b> (malware/CnC) "
             "y <b>DNS sospechoso</b> (consultan dominios de botnet), cada una a su address-list del MikroTik.</p>"
-            + _salud_html() + flash + estado + sec_inf + sec_dns + sec_manual +
+            + _salud_html() + flash + estado + sec_fp + sec_inf + sec_dns + sec_manual +
             "<script>(function(){var n=document.getElementById('notif');if(!n)return;"
             "setTimeout(function(){n.classList.add('show');},60);"
             "setTimeout(function(){n.classList.remove('show');},3600);})();</script>"
@@ -5750,6 +5857,19 @@ class H(BaseHTTPRequestHandler):
             env = cargar_enviados(); env.pop(ip, None); guardar_enviados(env)
             mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), err)
             return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
+        if ruta == "/cuarentena/excluir-destino":
+            if not self._operador():
+                return self._deny()
+            n, msg = excluir_destino((q.get("destino", [""])[0]).strip())
+            return self._redirect("/cuarentena?msg=" + _up.quote(msg))
+        if ruta == "/cuarentena/quitar-destino":
+            if not self._operador():
+                return self._deny()
+            d = (q.get("destino", [""])[0]).strip()
+            cur = _dest_ok_set(); cur.discard(d); guardar_dest_ok_set(cur)
+            globals()["FORCE_REGEN"] = True
+            bitacora("QUITAR-DESTINO-CONFIABLE", d)
+            return self._redirect("/cuarentena?msg=" + _up.quote(f"'{d}' ya no es destino confiable"))
         if ruta in ("/cuarentena/dns/enviar", "/cuarentena/dns/quitar", "/cuarentena/dns/enviar-todos"):
             if not self._operador():
                 return self._deny()

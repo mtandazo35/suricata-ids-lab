@@ -2970,6 +2970,63 @@ def refrescar_abonados():
         os.replace(tmp, ABONADOS_FILE)
     except OSError:
         pass
+    _registrar_hist_abonados(mapa)
+
+ABON_HIST_FILE = "/var/log/suricata-abonados-hist.jsonl"
+_ABON_HIST_MAX = 40000                     # lineas a conservar tras rotar
+
+def _registrar_hist_abonados(mapa):
+    """Anexa a un JSONL SOLO los cambios de asignacion (ip -> nombre/mac/tipo) para poder
+    saber quien tenia una IP en el momento de un evento (historial punto-en-el-tiempo)."""
+    prev = {}
+    try:
+        for ln in open(ABON_HIST_FILE, encoding="utf-8"):
+            try: r = json.loads(ln)
+            except Exception: continue
+            if r.get("ip"): prev[r["ip"]] = r          # ultimo estado por ip
+    except FileNotFoundError:
+        pass
+    except Exception:
+        return
+    now = int(time.time()); nuevos = []
+    for ip, v in mapa.items():
+        firma = (v.get("nombre", ""), v.get("mac", ""), v.get("tipo", ""))
+        p = prev.get(ip)
+        if not p or (p.get("nombre", ""), p.get("mac", ""), p.get("tipo", "")) != firma:
+            nuevos.append({"ts": now, "ip": ip, "nombre": v.get("nombre", ""),
+                           "mac": v.get("mac", ""), "tipo": v.get("tipo", "")})
+    if not nuevos:
+        return
+    try:
+        with open(ABON_HIST_FILE, "a", encoding="utf-8") as f:
+            for r in nuevos:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    except OSError:
+        return
+    try:                                                # rotacion simple por tamaño
+        if os.path.getsize(ABON_HIST_FILE) > 6_000_000:
+            lineas = open(ABON_HIST_FILE, encoding="utf-8").readlines()
+            if len(lineas) > _ABON_HIST_MAX:
+                tmp = ABON_HIST_FILE + ".tmp"
+                open(tmp, "w", encoding="utf-8").writelines(lineas[-_ABON_HIST_MAX // 2:])
+                os.replace(tmp, ABON_HIST_FILE)
+    except OSError:
+        pass
+
+def historial_abonado(ip, ts):
+    """Quien tenia esa IP en el instante ts (ultimo cambio registrado con ts <= evento)."""
+    if not ip or not ts:
+        return {}
+    best = {}
+    try:
+        for ln in open(ABON_HIST_FILE, encoding="utf-8"):
+            try: r = json.loads(ln)
+            except Exception: continue
+            if r.get("ip") == ip and r.get("ts", 0) <= ts and r.get("ts", 0) >= best.get("ts", 0):
+                best = r
+    except Exception:
+        return {}
+    return best
 
 def cargar_abonados():
     try:
@@ -5680,6 +5737,27 @@ def ficha_page(ip, embed=False):
         ab = abonado_de(ip)
         _abinfo = cargar_abonados()
         _snap = time.strftime("%d/%m %H:%M", time.localtime(_abinfo.get("ts", 0))) if _abinfo.get("ts") else "—"
+        # Punto-en-el-tiempo: quien tenia esta IP cuando ocurrio el evento
+        ev_ts = 0
+        for p in (c.get("pruebas") or []):
+            try: ev_ts = max(ev_ts, int(p.get("ts") or 0))
+            except (TypeError, ValueError): pass
+        if not ev_ts and en_lista:
+            try: ev_ts = int((ent or {}).get("cuando", 0) or 0)
+            except (TypeError, ValueError): ev_ts = 0
+        _hist = historial_abonado(ip, ev_ts) if ev_ts else {}
+        pit = ""
+        if _hist:
+            _et = time.strftime("%d/%m %H:%M", time.localtime(ev_ts))
+            _dif = (_hist.get("nombre", "") != (ab.get("nombre", "") if ab else "")) or \
+                   (_hist.get("mac", "") != (ab.get("mac", "") if ab else ""))
+            if _dif:
+                pit = ("<div class=rowmeta style='color:#7a4a12'>&#9888; En el momento del evento (" + _et +
+                       ") esta IP la tenia <b>" + esc(_hist.get("nombre") or "(sin nombre)") + "</b> (" +
+                       esc(_hist.get("tipo", "")) + ", MAC " + esc(_hist.get("mac", "") or "—") +
+                       ") &mdash; distinta de la asignacion actual</div>")
+            else:
+                pit = "<div class=rowmeta>Misma asignacion en el momento del evento (" + _et + ")</div>"
         if ab:
             cliente = (f"<b>{esc(ab.get('nombre') or '(sin nombre)')}</b> "
                        f"<span class=cfb style='background:#e7f0fb;color:#1c5cab'>{esc(ab.get('tipo', ''))}</span>"
@@ -5690,6 +5768,7 @@ def ficha_page(ip, embed=False):
             cliente = f"{esc(ip)} <span class=rowmeta>sin asignacion PPPoE/DHCP conocida (snapshot {_snap})</span>"
         else:
             cliente = f"{esc(ip)} <span class=rowmeta>configura el MikroTik en Ajustes para ver el abonado</span>"
+        cliente += pit
         cuerpo = (
             f"<div class=fichah><h2 style='margin:0'>{esc(ip)}</h2>{conf_b}"
             f"<span class=sub2 style='margin-left:auto'>{esc(categoria)} · riesgo {c.get('riesgo', '')}</span></div>"

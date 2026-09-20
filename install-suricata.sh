@@ -3473,6 +3473,28 @@ def feeds_auth_set(val):
     except OSError:
         return False
 
+def feeds_auth_probar(key):
+    """Valida una Auth-Key contra abuse.ch (URLhaus). Devuelve (estado, msg):
+    True=valida, False=invalida (rechazada/HTML), None=no se pudo comprobar (sin red)."""
+    key = (key or "").strip()
+    if not key:
+        return False, "vacia"
+    try:
+        req = urllib.request.Request("https://urlhaus.abuse.ch/downloads/hostfile/",
+                                     headers={"Auth-Key": key, "User-Agent": "suricata-feeds/2.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = r.read(2048).decode("utf-8", "replace")
+        low = body.lstrip()[:200].lower()
+        if low.startswith("<!doctype html") or "<html" in low or "<title" in low:
+            return False, "abuse.ch respondio una pagina HTML (clave invalida o login requerido)"
+        return True, "valida"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return False, f"abuse.ch rechazo la clave (HTTP {e.code})"
+        return None, f"no se pudo comprobar (HTTP {e.code})"
+    except Exception:
+        return None, "no se pudo comprobar ahora (sin red?)"
+
 def cargar_feeds_meta():
     try:
         return json.load(open(FEEDS_META, encoding="utf-8"))
@@ -4271,7 +4293,8 @@ def perfil_page(msg="", ok=False, edit_user=None):
             + "</label>"
             "<input type=password name=authkey autocomplete=new-password placeholder='"
             + ("dejar vacio para conservar" if auth_ok else "pega tu Auth-Key") + "'>"
-            "<div class=hint>Solo escritura. Para <b>quitarla</b>, escribe <code>BORRAR</code>.</div></div>"
+            "<div class=hint>Al guardar se <b>valida contra abuse.ch</b> (una clave invalida se rechaza). "
+            "Solo escritura. Para <b>quitarla</b>, escribe <code>BORRAR</code>.</div></div>"
             "<div class=actions><button class=primary type=submit>Guardar clave</button></div></form>"
             "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px'>"
             "<form method=post action='/feeds/actualizar' style='margin:0'>"
@@ -6216,14 +6239,19 @@ class H(BaseHTTPRequestHandler):
             ak = q.get("authkey", [""])[0]
             if ak.strip() == "BORRAR":
                 feeds_auth_set(""); bitacora("CONFIG-FEEDS-AUTHKEY", "borrada")
-                msg = "Auth-Key borrada. URLhaus/ThreatFox quedaran 'sin-clave'."
-            elif ak.strip():
-                feeds_auth_set(ak); bitacora("CONFIG-FEEDS-AUTHKEY", "actualizada")
-                actualizar_feeds_async()
-                msg = "Auth-Key guardada (solo en este servidor). Actualizando feeds en segundo plano."
-            else:
-                msg = "Sin cambios en la Auth-Key."
-            return self._html(perfil_page(msg, ok=True))
+                return self._html(perfil_page("Auth-Key borrada. URLhaus/ThreatFox quedaran 'sin-clave'.", ok=True))
+            if not ak.strip():
+                return self._html(perfil_page("Sin cambios en la Auth-Key.", ok=True))
+            estado, det = feeds_auth_probar(ak)      # validar ANTES de guardar (rechaza basura)
+            if estado is False:
+                bitacora("CONFIG-FEEDS-AUTHKEY", f"rechazada ({det})")
+                return self._html(perfil_page(f"No se guardo: la Auth-Key no es valida — {det}.", ok=False))
+            feeds_auth_set(ak); actualizar_feeds_async()
+            if estado is True:
+                bitacora("CONFIG-FEEDS-AUTHKEY", "validada y guardada")
+                return self._html(perfil_page("Auth-Key VALIDA y guardada (solo en este servidor). Actualizando feeds.", ok=True))
+            bitacora("CONFIG-FEEDS-AUTHKEY", f"guardada sin validar ({det})")
+            return self._html(perfil_page(f"Auth-Key guardada, pero {det}. Se reintentara en la proxima actualizacion.", ok=True))
         if ruta == "/feeds/actualizar":
             if not self._admin():
                 return self._deny()

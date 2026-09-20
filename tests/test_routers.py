@@ -20,7 +20,8 @@ ARBOL = ast.parse(DASH)
 
 PIEZAS = ("_router_vacio", "_mk_globales", "cargar_routers", "guardar_routers",
           "router_por_id", "router_por_iface", "router_defecto", "cargar_mk",
-          "cargar_mk_de", "IFACE_BASE", "CAMPOS_ROUTER")
+          "cargar_mk_de", "IFACE_BASE", "CAMPOS_ROUTER", "publicar_routers_map",
+          "ROUTERS_MAP")
 
 
 def entorno(tmp):
@@ -37,6 +38,7 @@ def entorno(tmp):
     # las constantes de ruta no deben quedar pisadas por las del script
     ns["MK_CONF"] = os.path.join(tmp, "mikrotik.conf")
     ns["ROUTERS_CONF"] = os.path.join(tmp, "routers.json")
+    ns["ROUTERS_MAP"] = os.path.join(tmp, "routers-map.json")
     return ns
 
 
@@ -97,6 +99,14 @@ def main():
           [x["PASS"] for x in leidos] == ["clave-secreta", "otra"], leidos)
     check("el archivo de routers queda con permisos 600",
           (os.stat(ns["ROUTERS_CONF"]).st_mode & 0o777) in (0o600, 0o666), None)
+
+    # --- el mapa publico que lee el generador: sin claves ---
+    publico = json.load(open(ns["ROUTERS_MAP"], encoding="utf-8"))
+    check("se publica un mapa interfaz->router para el generador", len(publico) == 2, publico)
+    check("ese mapa NO lleva claves de la API",
+          all("PASS" not in x and "USER" not in x for x in publico), publico)
+    check("y si trae la interfaz de cada nodo",
+          [x["iface"] for x in publico] == ["ids-mon", "ids-mon2"], publico)
 
     # --- resolver por interfaz: de aqui sale "de que router vino esta alerta" ---
     check("una alerta por ids-mon es del primer nodo",

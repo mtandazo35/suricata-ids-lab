@@ -883,6 +883,10 @@ _RE = {k: re.compile(p) for k, p in {
     "rev": r'"rev":(\d+)',
     "flow_id": r'"flow_id":(\d+)',
     "rrname": r'"rrname":"([^"]+)"',
+    # por que interfaz entro la alerta: con varios MikroTik, cada uno espeja por la
+    # suya, asi que esto dice de QUE NODO es el CPE. Sin el, dos nodos que usan el
+    # mismo rango privado (10.0.0.x en los dos) serian el mismo cliente.
+    "iface": r'"in_iface":"([^"]+)"',
 }.items()}
 
 # Firmas de "infeccion" (CnC/botnet/troyano): mismas claves que el informe. Para marcar
@@ -998,6 +1002,40 @@ def campos(line):
     return g
 
 LOGDIR = "/var/log/suricata"
+
+# --- De que MikroTik es cada alerta ---
+# El panel publica aqui un mapa SIN claves (solo id, nombre e interfaz de espejo) para
+# que el generador no tenga que leer el archivo de routers, que lleva las contrasenas
+# de la API. Si no existe, se asume un solo nodo y todo se comporta como siempre.
+ROUTERS_MAP = "/var/log/suricata-routers-map.json"
+_IFACE_ROUTER = {}      # interfaz -> {"id","nombre"}
+_ROUTER_NOMBRE = {}     # id -> nombre
+try:
+    for _r in (json.load(open(ROUTERS_MAP, encoding="utf-8")) or []):
+        _rid = (_r.get("id") or "").strip()
+        if _rid:
+            _IFACE_ROUTER[(_r.get("iface") or "").strip()] = {"id": _rid, "nombre": _r.get("nombre") or _rid}
+            _ROUTER_NOMBRE[_rid] = _r.get("nombre") or _rid
+except Exception:
+    pass
+MULTI_ROUTER = len(_ROUTER_NOMBRE) > 1
+
+def router_de(iface):
+    """Id del router por cuya interfaz entro la alerta. Con un solo nodo devuelve ''
+    y todo sigue indexado por IP, como hasta ahora."""
+    if not MULTI_ROUTER:
+        return ""
+    r = _IFACE_ROUTER.get(iface or "")
+    return r["id"] if r else ""
+
+def nombre_router(rid):
+    return _ROUTER_NOMBRE.get(rid, rid or "")
+
+def clave_cpe(ip, rid):
+    """Identidad de un CPE. Con varios nodos es (router, IP): la IP sola no identifica
+    a nadie cuando dos routers usan el mismo rango privado."""
+    return (rid + "|" + ip) if rid else ip
+
 # IPs ya enviadas a la cuarentena del MikroTik (lo escribe el panel): para que el boton
 # del Top muestre "En cuarentena" en vez de "Cuarentena" cuando ya se envio.
 # Son DOS listas (infectados y DNS sospechoso): si solo se mira la primera, un CPE
@@ -3372,7 +3410,25 @@ def guardar_routers(lst):
     os.replace(tmp, ROUTERS_CONF)
     try: os.chmod(ROUTERS_CONF, 0o600)
     except OSError: pass
+    publicar_routers_map(limpia)
     return limpia
+
+ROUTERS_MAP = "/var/log/suricata-routers-map.json"
+
+def publicar_routers_map(lst=None):
+    """Publica id, nombre e interfaz de cada router para que lo lea el generador del
+    reporte. Va aparte a proposito: el archivo de routers lleva las CLAVES de la API y
+    el generador no tiene por que verlas."""
+    try:
+        lst = lst if lst is not None else cargar_routers()
+        datos = [{"id": r.get("id", ""), "nombre": r.get("nombre", "") or r.get("HOST", ""),
+                  "iface": r.get("iface", "")} for r in lst]
+        tmp = ROUTERS_MAP + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(datos, f, ensure_ascii=False)
+        os.replace(tmp, ROUTERS_MAP)
+    except Exception:
+        pass
 
 def router_por_id(rid):
     for r in cargar_routers():
@@ -5017,6 +5073,7 @@ def refrescador():
     """Hilo de fondo: regenera el reporte periodicamente, NUNCA en el request.
     Asi 'En vivo' sirve siempre el ultimo archivo al instante aunque generar tarde."""
     threading.Thread(target=_provisionar_geo, daemon=True).start()   # auto-cura mapa/GeoIP 1 vez
+    publicar_routers_map()   # que el generador sepa que interfaz es de que router
     ult_poda = 0.0
     ult_updchk = 0.0
     ult_sensor = 0.0

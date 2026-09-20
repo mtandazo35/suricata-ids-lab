@@ -420,26 +420,37 @@ def clasifica(sig):
 
 # Exclusiones (apartado Exclusiones del panel + lineas IGNORAR_* legacy)
 def cargar_exclusiones():
-    reglas = []
+    reglas = []; ahora = time.time()
     try:
         data = json.load(open("/etc/suricata-exclusiones.json", encoding="utf-8"))
         if isinstance(data, list):
             for r in data:
-                if r.get("ip"):
-                    reglas.append((r.get("tipo", "dst"), r["ip"],
-                                   [int(p) for p in (r.get("puertos") or []) if str(p).isdigit()]))
+                if not r.get("ip"):
+                    continue
+                try: hasta = float(r.get("hasta") or 0)
+                except (TypeError, ValueError): hasta = 0
+                if hasta and ahora > hasta:
+                    continue                             # exclusion temporal vencida
+                reglas.append((r.get("tipo", "dst"), r["ip"],
+                               [int(p) for p in (r.get("puertos") or []) if str(p).isdigit()],
+                               str(r.get("sid") or "")))
     except Exception:
         pass
     _c = conf()
-    reglas += [("dst", x.strip(), []) for x in _c.get("IGNORAR_DESTINOS", "").split(",") if x.strip()]
-    reglas += [("src", x.strip(), []) for x in _c.get("IGNORAR_ORIGENES", "").split(",") if x.strip()]
+    reglas += [("dst", x.strip(), [], "") for x in _c.get("IGNORAR_DESTINOS", "").split(",") if x.strip()]
+    reglas += [("src", x.strip(), [], "") for x in _c.get("IGNORAR_ORIGENES", "").split(",") if x.strip()]
     return reglas
 EXCL = cargar_exclusiones()
-def excluido(src, dst, dport):
-    for tipo, ip, pts in EXCL:
+def excluido(src, dst, dport, sid=None):
+    for tipo, ip, pts, rsid in EXCL:
         quien = dst if tipo == "dst" else src
-        if quien == ip and (not pts or (dport is not None and dport in pts)):
-            return True
+        if quien != ip:
+            continue
+        if pts and not (dport is not None and dport in pts):
+            continue
+        if rsid and str(sid) != rsid:                    # regla ligada a una firma concreta
+            continue
+        return True
     return False
 
 # Confianza para marcar INFECTADO (nivel 1): no basta el texto de UNA firma. Se exige
@@ -486,7 +497,7 @@ for p in files:
             if sig.startswith("ET INFO") or "Not Suspicious" in cat or "Misc activity" in cat:
                 continue
             src = e.get("src_ip", "?"); dst = e.get("dest_ip", "?")
-            if excluido(src, dst, e.get("dest_port")):   # exclusiones configuradas
+            if excluido(src, dst, e.get("dest_port"), a.get("signature_id")):   # exclusiones configuradas
                 continue
             nivel, expl, accion = clasifica(sig)
             by_src_total[src] += 1
@@ -948,34 +959,45 @@ def opener(p):
 def cargar_exclusiones():
     """Reglas de exclusion: {tipo:'dst'|'src', ip, puertos:[int]}. Desde
     /etc/suricata-exclusiones.json (apartado Exclusiones) + lineas IGNORAR_* legacy."""
-    reglas = []
+    reglas = []; ahora = time.time()
     try:
         data = json.load(open("/etc/suricata-exclusiones.json", encoding="utf-8"))
         if isinstance(data, list):
             for r in data:
-                if r.get("ip"):
-                    reglas.append((r.get("tipo", "dst"), r["ip"],
-                                   [int(p) for p in (r.get("puertos") or []) if str(p).isdigit()]))
+                if not r.get("ip"):
+                    continue
+                try: hasta = float(r.get("hasta") or 0)
+                except (TypeError, ValueError): hasta = 0
+                if hasta and ahora > hasta:
+                    continue                             # exclusion temporal vencida
+                reglas.append((r.get("tipo", "dst"), r["ip"],
+                               [int(p) for p in (r.get("puertos") or []) if str(p).isdigit()],
+                               str(r.get("sid") or "")))
     except Exception:
         pass
     try:
         for l in open("/etc/suricata-report.conf", encoding="utf-8"):
             l = l.strip()
             if l.startswith("IGNORAR_DESTINOS="):
-                reglas += [("dst", x.strip(), []) for x in l.split("=", 1)[1].split(",") if x.strip()]
+                reglas += [("dst", x.strip(), [], "") for x in l.split("=", 1)[1].split(",") if x.strip()]
             elif l.startswith("IGNORAR_ORIGENES="):
-                reglas += [("src", x.strip(), []) for x in l.split("=", 1)[1].split(",") if x.strip()]
+                reglas += [("src", x.strip(), [], "") for x in l.split("=", 1)[1].split(",") if x.strip()]
     except OSError:
         pass
     return reglas
 
 EXCL = cargar_exclusiones()
 
-def excluido(src, dst, dport):
-    for tipo, ip, pts in EXCL:
+def excluido(src, dst, dport, sid=None):
+    for tipo, ip, pts, rsid in EXCL:
         quien = dst if tipo == "dst" else src
-        if quien == ip and (not pts or (dport is not None and dport in pts)):
-            return True
+        if quien != ip:
+            continue
+        if pts and not (dport is not None and dport in pts):
+            continue
+        if rsid and str(sid) != rsid:                    # regla ligada a una firma concreta
+            continue
+        return True
     return False
 
 _TRAD = [
@@ -1138,7 +1160,7 @@ for p in files:
             src = g("src_ip") or "?"; dst = g("dest_ip") or "?"
             sport = g("src_port"); dport = g("dest_port")
             proto = g("proto")
-            if excluido(src, dst, int(dport) if dport else None):   # exclusiones configuradas
+            if excluido(src, dst, int(dport) if dport else None, g("sid")):   # exclusiones configuradas
                 continue
             if dst in DEST_OK:     # destino marcado confiable (falso positivo): la alerta no cuenta
                 continue
@@ -2217,18 +2239,29 @@ EVE = "/var/log/suricata/eve.json"
 
 EXCL_FILE = "/etc/suricata-exclusiones.json"
 
-def cargar_exclusiones():
-    """Lista de reglas de exclusion. Cada una: {tipo:'dst'|'src', ip, motivo, puertos:[int]}.
-    puertos vacio = todos los puertos. Tambien lee las lineas IGNORAR_* legacy del .conf."""
-    reglas = []
+def cargar_exclusiones(incluir_vencidas=False):
+    """Lista de reglas de exclusion. Cada una: {tipo:'dst'|'src', ip, motivo, puertos:[int],
+    sid, hasta, autor, creado}. puertos vacio = todos; sid vacio = cualquier firma;
+    hasta=0 = permanente. Las vencidas se ocultan (salvo incluir_vencidas, para la UI).
+    Tambien lee las lineas IGNORAR_* legacy del .conf."""
+    reglas = []; ahora = time.time()
     try:
         data = json.load(open(EXCL_FILE, encoding="utf-8"))
         if isinstance(data, list):
             for r in data:
-                if r.get("ip"):
-                    reglas.append({"tipo": r.get("tipo", "dst"), "ip": r["ip"],
-                                   "motivo": r.get("motivo", ""),
-                                   "puertos": [int(p) for p in (r.get("puertos") or []) if str(p).isdigit()]})
+                if not r.get("ip"):
+                    continue
+                try: hasta = float(r.get("hasta") or 0)
+                except (TypeError, ValueError): hasta = 0
+                vencida = bool(hasta and ahora > hasta)
+                if vencida and not incluir_vencidas:
+                    continue
+                reglas.append({"tipo": r.get("tipo", "dst"), "ip": r["ip"],
+                               "motivo": r.get("motivo", ""),
+                               "puertos": [int(p) for p in (r.get("puertos") or []) if str(p).isdigit()],
+                               "sid": str(r.get("sid") or ""), "hasta": hasta,
+                               "autor": r.get("autor", ""), "creado": r.get("creado", 0),
+                               "vencida": vencida})
     except Exception:
         pass
     try:
@@ -2247,22 +2280,29 @@ def cargar_exclusiones():
     return reglas
 
 def guardar_exclusiones(reglas):
+    _keys = ("tipo", "ip", "motivo", "puertos", "sid", "hasta", "autor", "creado")
+    limpio = [{k: r[k] for k in _keys if k in r} for r in reglas if r.get("motivo") != "(conf)"]
     tmp = EXCL_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump([r for r in reglas if r.get("motivo") != "(conf)"], f, ensure_ascii=False, indent=1)
+        json.dump(limpio, f, ensure_ascii=False, indent=1)
     os.replace(tmp, EXCL_FILE)
 
-def _excluido(reglas, src, dst, dport):
+def _excluido(reglas, src, dst, dport, sid=None):
     for r in reglas:
         quien = dst if r["tipo"] == "dst" else src
-        if quien == r["ip"] and (not r["puertos"] or (dport is not None and int(dport) in r["puertos"])):
-            return True
+        if quien != r["ip"]:
+            continue
+        if r["puertos"] and not (dport is not None and int(dport) in r["puertos"]):
+            continue
+        if r.get("sid") and str(sid) != r["sid"]:        # regla ligada a una firma concreta
+            continue
+        return True
     return False
 _RE = {k: re.compile(p) for k, p in {
     "ts": r'"timestamp":"([^"]+)"', "src_ip": r'"src_ip":"([^"]+)"',
     "dest_ip": r'"dest_ip":"([^"]+)"', "src_port": r'"src_port":(\d+)',
     "dest_port": r'"dest_port":(\d+)', "proto": r'"proto":"([^"]+)"',
-    "sig": r'"signature":"((?:[^"\\]|\\.)*)"',
+    "sig": r'"signature":"((?:[^"\\]|\\.)*)"', "sid": r'"signature_id":(\d+)',
 }.items()}
 
 SEV = [  # (claves en la firma, color, etiqueta). Se evalua en orden; gana la primera.
@@ -2357,7 +2397,7 @@ def tail_grupos(path=EVE, want=200, maxbytes=6_000_000, top=25):
         if sig.startswith("ET INFO"):
             continue
         src = get("src_ip"); dst = get("dest_ip"); dp = get("dest_port"); pr = get("proto")
-        if _excluido(reglas, src, dst, int(dp) if dp else None):   # exclusiones configuradas
+        if _excluido(reglas, src, dst, int(dp) if dp else None, get("sid")):   # exclusiones configuradas
             continue
         vistos += 1
         hh = hora_ec(get("ts"))
@@ -2480,7 +2520,7 @@ def top_origenes(path=EVE, maxbytes=12_000_000, topn=5, subn=8):
         sp = get("src_port"); dp = get("dest_port"); pr = get("proto")
         if not src:
             continue
-        if _excluido(reglas, src, dst, int(dp) if dp else None):
+        if _excluido(reglas, src, dst, int(dp) if dp else None, get("sid")):
             continue
         procesados += 1
         total[src] = total.get(src, 0) + 1
@@ -4902,7 +4942,22 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "</main></body></html>")
 
 def exclusiones_page(msg="", ok=False, edit_idx=None):
-    reglas = cargar_exclusiones()
+    reglas = cargar_exclusiones(incluir_vencidas=True)
+    ahora = time.time()
+    def _vig_txt(r):
+        h = r.get("hasta") or 0
+        if not h:
+            return "permanente"
+        if r.get("vencida") or ahora > h:
+            return "vencida " + time.strftime("%d/%m %H:%M", time.localtime(h))
+        rest = int(h - ahora)
+        if rest >= 86400:
+            q = f"{rest // 86400} d"
+        elif rest >= 3600:
+            q = f"{rest // 3600} h"
+        else:
+            q = f"{max(1, rest // 60)} min"
+        return f"vence en {q} ({time.strftime('%d/%m %H:%M', time.localtime(h))})"
     banner = ""
     if msg:
         col = "#1baf7a" if ok else "#e34948"
@@ -4917,6 +4972,12 @@ def exclusiones_page(msg="", ok=False, edit_idx=None):
         pts = ", ".join(str(p) for p in r["puertos"]) if r["puertos"] else "todos"
         tipo = "Destino" if r["tipo"] == "dst" else "Origen"
         legacy = r.get("motivo") == "(conf)"
+        firma = html.escape(r.get("sid") or "cualquiera")
+        vig = _vig_txt(r)
+        vig_col = "#b52a2a" if (r.get("vencida") or (r.get("hasta") and ahora > r["hasta"])) else ("#6b6a66" if not r.get("hasta") else "#7a4a12")
+        vig_html = f'<span style="color:{vig_col}">{html.escape(vig)}</span>'
+        autor = r.get("autor") or ""
+        mot = html.escape(r.get("motivo", "")) + (f'<div class="muted">por {html.escape(autor)}</div>' if autor else "")
         if legacy:
             accion = '<span class="muted">en .conf</span>'
         else:
@@ -4927,15 +4988,27 @@ def exclusiones_page(msg="", ok=False, edit_idx=None):
                       f'<button class="del" type=submit>Eliminar</button></form></div>')
         resalta = ' style="background:#eef4fd"' if (ed is not None and i == edit_idx) else ''
         filas.append(f'<tr{resalta}><td>{tipo}</td><td class="mono">{html.escape(r["ip"])}</td>'
-                     f'<td>{html.escape(pts)}</td><td>{html.escape(r.get("motivo",""))}</td><td>{accion}</td></tr>')
+                     f'<td>{html.escape(pts)}</td><td class="mono">{firma}</td><td>{vig_html}</td>'
+                     f'<td>{mot}</td><td>{accion}</td></tr>')
     tabla = ("".join(filas) if filas else
-             '<tr><td colspan=5 class="muted">No hay exclusiones. Todo el trafico se analiza.</td></tr>')
+             '<tr><td colspan=7 class="muted">No hay exclusiones. Todo el trafico se analiza.</td></tr>')
     titulo_form = "Editar exclusion" if ed else "Agregar exclusion"
     val_ip = html.escape(ed["ip"]) if ed else ""
     val_pts = ", ".join(str(p) for p in ed["puertos"]) if ed else ""
     val_mot = html.escape(ed.get("motivo", "")) if ed else ""
+    val_sid = html.escape(ed.get("sid", "")) if ed else ""
     sel_src = "selected" if ed and ed["tipo"] == "src" else ""
     sel_dst = "selected" if not ed or ed["tipo"] == "dst" else ""
+    # vigencia: al editar, si ya venia con hasta se ofrece "mantener"
+    _vig_opts = [("0", "Permanente"), ("24", "24 horas"), ("168", "7 dias"), ("720", "30 dias")]
+    if ed and ed.get("hasta"):
+        _rest_h = max(1, int((ed["hasta"] - time.time()) // 3600))
+        vig_select = (f'<select name=vigencia><option value=keep selected>Mantener (~{_rest_h} h restantes)</option>'
+                      + "".join(f'<option value="{v}">{t}</option>' for v, t in _vig_opts) + "</select>")
+    else:
+        vig_select = ("<select name=vigencia>"
+                      + "".join(f'<option value="{v}"{" selected" if v == "0" else ""}>{t}</option>' for v, t in _vig_opts)
+                      + "</select>")
     hid_edit = f'<input type=hidden name=editar value="{edit_idx}">' if ed else ""
     btn_txt = "Guardar cambios" if ed else "Agregar"
     cancelar = '<a class="cancel" href="/exclusiones">Cancelar</a>' if ed else ""
@@ -4963,7 +5036,7 @@ a.cancel{{color:#8a8a86;text-decoration:none;font-size:13px}}a.cancel:hover{{col
 <h1>Exclusiones</h1><p class=sub>IPs que no quieres que aparezcan en el panel ni en los reportes
 (tus DNS, tu monitoreo SNMP, etc.). Se aplica al instante.</p>
 {banner}
-<div class=card><table><thead><tr><th>Tipo</th><th>IP</th><th>Puertos</th><th>Motivo</th><th></th></tr></thead>
+<div class=card><table><thead><tr><th>Tipo</th><th>IP</th><th>Puertos</th><th>Firma (SID)</th><th>Vigencia</th><th>Motivo</th><th></th></tr></thead>
 <tbody>{tabla}</tbody></table></div>
 <h2>Exportar / Importar</h2>
 <div class=card>
@@ -4987,7 +5060,11 @@ Al importar, <b>reemplazan</b> las exclusiones actuales.</p>
 <label>IP</label><input name=ip placeholder="10.66.66.2" value="{val_ip}" required>
 <label>Puertos</label><input name=puertos placeholder="53, 161  (vacio = todos)" value="{val_pts}">
 <div class=hint>Para un DNS suele ser 53; para monitoreo SNMP, 161. Deja vacio para ignorar toda la IP.</div>
-<label>Motivo</label><input name=motivo placeholder="DNS interno / monitoreo SNMP" value="{val_mot}">
+<label>Firma (SID)</label><input name=sid placeholder="p.ej. 2027865  (vacio = cualquier firma)" value="{val_sid}">
+<div class=hint>Excluye SOLO esa firma para esta IP (util para un falso positivo puntual de un CPE). Vacio = todas.</div>
+<label>Vigencia</label>{vig_select}
+<div class=hint>Exclusion temporal: se ignora hasta que venza y luego vuelve a analizarse sola. "Permanente" no vence.</div>
+<label>Motivo</label><input name=motivo placeholder="Falso positivo / DNS interno / monitoreo SNMP" value="{val_mot}">
 <div style="grid-column:2;display:flex;gap:10px;align-items:center;margin-top:4px">
 <button type=submit class=primary>{btn_txt}</button>{cancelar}</div>
 </form></div>
@@ -5227,6 +5304,10 @@ informe de texto) y surte efecto al instante, sin reiniciar nada.</p>
 <tr><td>IP</td><td>La direccion a excluir. Se valida que sea una IP correcta.</td></tr>
 <tr><td>Puertos</td><td>Los puertos a ignorar, separados por coma (p. ej. <code>53</code> o
 <code>161</code>). <b>Vacio = todos los puertos</b> de esa IP.</td></tr>
+<tr><td>Firma (SID)</td><td>El numero de firma a excluir SOLO para esa IP (p. ej. un falso
+positivo puntual de un CPE). <b>Vacio = cualquier firma</b>. El SID sale en la ficha de evidencia.</td></tr>
+<tr><td>Vigencia</td><td>Exclusion <b>temporal</b>: se ignora hasta que venza (24 h / 7 d / 30 d)
+y luego el trafico vuelve a analizarse solo. <b>Permanente</b> no vence. Queda registrado quien la creo.</td></tr>
 <tr><td>Motivo</td><td>Una nota para acordarte por que (p. ej. "DNS interno").</td></tr>
 </table>
 <p><b>Ejemplos utiles:</b></p>
@@ -6887,8 +6968,9 @@ class H(BaseHTTPRequestHandler):
     def _post_exclusiones(self, q):
         import ipaddress
         accion = q.get("accion", [""])[0]
-        # trabajar solo con las reglas propias (no las legacy del .conf)
-        propias = [r for r in cargar_exclusiones() if r.get("motivo") != "(conf)"]
+        # trabajar solo con las reglas propias (no las legacy del .conf); incluir vencidas
+        # para que los indices coincidan con lo que muestra exclusiones_page.
+        propias = [r for r in cargar_exclusiones(incluir_vencidas=True) if r.get("motivo") != "(conf)"]
         if accion == "import":
             try:
                 data = json.loads(q.get("json", [""])[0])
@@ -6914,7 +6996,12 @@ class H(BaseHTTPRequestHandler):
                             pts.append(p)
                     except (ValueError, TypeError):
                         pass
-                limpio.append({"tipo": tipo, "ip": ip, "motivo": str(r.get("motivo", ""))[:80], "puertos": pts})
+                sid = str(r.get("sid") or "").strip(); sid = sid if sid.isdigit() else ""
+                try: hasta = float(r.get("hasta") or 0)
+                except (TypeError, ValueError): hasta = 0
+                limpio.append({"tipo": tipo, "ip": ip, "motivo": str(r.get("motivo", ""))[:80],
+                               "puertos": pts, "sid": sid, "hasta": hasta,
+                               "autor": str(r.get("autor", ""))[:40], "creado": r.get("creado", 0)})
             try:
                 guardar_exclusiones(limpio)
             except OSError as ex:
@@ -6924,11 +7011,12 @@ class H(BaseHTTPRequestHandler):
         if accion == "del":
             try:
                 idx = int(q.get("idx", ["-1"])[0])
-                todas = cargar_exclusiones()
+                todas = cargar_exclusiones(incluir_vencidas=True)
                 objetivo = todas[idx]
                 if objetivo.get("motivo") == "(conf)":
                     return self._html(exclusiones_page("Esa exclusion esta en el archivo .conf; quitala alli.", ok=False))
-                propias = [r for r in propias if not (r["ip"] == objetivo["ip"] and r["tipo"] == objetivo["tipo"] and r["puertos"] == objetivo["puertos"])]
+                propias = [r for r in propias if not (r["ip"] == objetivo["ip"] and r["tipo"] == objetivo["tipo"]
+                           and r["puertos"] == objetivo["puertos"] and r.get("sid", "") == objetivo.get("sid", ""))]
                 guardar_exclusiones(propias)
                 return self._html(exclusiones_page("Exclusion eliminada.", ok=True))
             except Exception:
@@ -6938,12 +7026,16 @@ class H(BaseHTTPRequestHandler):
         ip = (q.get("ip", [""])[0]).strip()
         motivo = (q.get("motivo", [""])[0]).strip()[:80]
         pts_raw = (q.get("puertos", [""])[0]).strip()
+        sid = (q.get("sid", [""])[0]).strip()
+        vig = (q.get("vigencia", ["0"])[0]).strip()
         if tipo not in ("dst", "src"):
             tipo = "dst"
         try:
             ipaddress.ip_address(ip)
         except ValueError:
             return self._html(exclusiones_page("IP invalida.", ok=False))
+        if sid and not sid.isdigit():
+            return self._html(exclusiones_page("La firma (SID) debe ser un numero (o vacio).", ok=False))
         puertos = []
         for p in pts_raw.replace(";", ",").split(","):
             p = p.strip()
@@ -6951,9 +7043,20 @@ class H(BaseHTTPRequestHandler):
                 if not p.isdigit() or not (0 < int(p) < 65536):
                     return self._html(exclusiones_page(f"Puerto invalido: {p}", ok=False))
                 puertos.append(int(p))
-        nueva = {"tipo": tipo, "ip": ip, "motivo": motivo, "puertos": puertos}
         editar = q.get("editar", [""])[0]
         edit_idx = int(editar) if (editar.isdigit() and int(editar) < len(propias)) else None
+        # vigencia -> hasta (epoch). "keep" conserva la de la regla que se edita.
+        ahora = int(time.time())
+        if vig == "keep" and edit_idx is not None:
+            hasta = propias[edit_idx].get("hasta") or 0
+        else:
+            try: horas = int(vig)
+            except ValueError: horas = 0
+            hasta = (ahora + horas * 3600) if horas > 0 else 0
+        autor = getattr(CTX, "user", "") or ""
+        creado = (propias[edit_idx].get("creado") if edit_idx is not None else 0) or ahora
+        nueva = {"tipo": tipo, "ip": ip, "motivo": motivo, "puertos": puertos,
+                 "sid": sid, "hasta": hasta, "autor": autor, "creado": creado}
         tlabel = "origen" if tipo == "src" else "destino"
 
         def _redundante(ex_ports):
@@ -6973,6 +7076,8 @@ class H(BaseHTTPRequestHandler):
         for j, r in enumerate(propias):
             if j == edit_idx:
                 continue
+            if r.get("sid", "") != sid:                  # distinta firma = alcance distinto, se permite
+                continue
             if r.get("ip") == ip and r.get("tipo") == tipo:
                 dup, txt = _redundante(r.get("puertos"))
                 if dup:
@@ -6981,6 +7086,8 @@ class H(BaseHTTPRequestHandler):
                         ok=False, edit_idx=edit_idx))
         # tambien si ya viene excluida por el archivo .conf (legacy, no editable aqui)
         for r in cargar_exclusiones():
+            if sid:                                      # una regla por-firma no choca con las del .conf (globales)
+                break
             if r.get("motivo") == "(conf)" and r.get("ip") == ip and r.get("tipo") == tipo:
                 dup, txt = _redundante(r.get("puertos"))
                 if dup:

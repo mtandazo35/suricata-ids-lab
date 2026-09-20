@@ -4186,6 +4186,32 @@ border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0
 }
 </style>"""
 
+# Base de estilos COMPARTIDA por los apartados del panel (fuente unica de tokens y
+# componentes). Se incluye al PRINCIPIO del <style> de cada pagina migrada; las reglas
+# propias de la pagina van despues y la sobreescriben (p.ej. su max-width de main). Asi
+# se quita el CSS duplicado y todo se ve consistente. Migracion pagina-a-pagina.
+BASE_CSS = (
+    "*{box-sizing:border-box}"
+    "body{margin:0;background:#fcfcfb;font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
+    "main{max-width:1000px;margin:0 auto;padding:20px 24px}"
+    "h1{font-size:21px;margin:0 0 4px}h2{font-size:16px;margin:0 0 10px}"
+    ".sub,.subx,.sub2{color:#52514e;font-size:13px}"
+    ".mono{font-family:ui-monospace,Consolas,monospace}"
+    ".muted{color:#9a9a95;font-size:12px}"
+    "code{background:#f1f1ef;padding:1px 5px;border-radius:4px}"
+    ".card{border:1px solid #e7e6e2;border-radius:12px;background:#fff}"
+    "table{width:100%;border-collapse:collapse;font-size:13px}"
+    "thead th{background:#f4f4f2;text-align:left;padding:9px 12px;border-bottom:1px solid #e7e6e2;color:#52514e;font-weight:600}"
+    "tbody td{padding:9px 12px;border-bottom:1px solid #f2f1ee;vertical-align:top}"
+    "tbody tr:hover{background:#faf9f6}"
+    ".num{text-align:right;font-variant-numeric:tabular-nums}"
+    ".banner{border:1px solid #f2d3ad;background:#fff7ed;color:#7a4a12;border-radius:10px;padding:11px 14px;margin:0 0 12px;font-size:13px}"
+    ".banner.ok{border-color:#b7e0c2;background:#e6f4ea;color:#1a7f37}"
+    ".banner.err{border-color:#f3c4c4;background:#fdecec;color:#b52a2a}"
+    ".banner.msg{border-color:#cfe0f6;background:#eef4fd;color:#2a5fa0}"
+    "@media(max-width:820px){main{padding:16px 14px}h1{font-size:19px}}"
+)
+
 def nav(active=""):
     _rl = getattr(CTX, "role", None)
     es_admin_nav = _rl in (None, "admin")   # exclusiones/tuning: solo admin (ni operador ni lectura)
@@ -6106,19 +6132,11 @@ def cuarentena_page(msg="", es_admin=False):
         estado = ("<div class='banner'><b>Modo sugerencia (dry-run).</b> No se envia nada al MikroTik. "
                   "Para activar el envio, configura y marca <b>Permitir enviar</b> en <b>Ajustes &rarr; MikroTik</b>.</div>")
     flash = ("<div id=notif class='notifm msg'><span class=ni>&#8505;</span><span>" + esc(msg) + "</span></div>") if msg else ""
-    css = ("<style>body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
-           "main{max-width:1100px;margin:0 auto;padding:20px 24px}h1{font-size:21px;margin:0 0 4px}"
-           ".sub{color:#52514e;margin:0 0 14px}code{background:#f1f1ef;padding:1px 5px;border-radius:4px}"
-           ".banner{border:1px solid #f2d3ad;background:#fff7ed;color:#7a4a12;border-radius:10px;padding:11px 14px;margin:0 0 12px;font-size:13px}"
-           ".banner.ok{border-color:#b7e0c2;background:#e6f4ea;color:#1a7f37}"
-           ".banner.err{border-color:#f3c4c4;background:#fdecec;color:#b52a2a}"
-           ".banner.msg{border-color:#cfe0f6;background:#eef4fd;color:#2a5fa0}"
-           ".card{border:1px solid #e7e6e2;border-radius:12px;background:#fff;overflow:hidden}"
-           "table{width:100%;border-collapse:collapse;font-size:13px}"
-           "thead th{background:#f4f4f2;text-align:left;padding:9px 12px;border-bottom:1px solid #e7e6e2;color:#52514e;font-weight:600}"
-           "tbody td{padding:9px 12px;border-bottom:1px solid #f2f1ee;vertical-align:top}"
-           "tbody tr:hover{background:#faf9f6}.num{text-align:right;font-variant-numeric:tabular-nums}"
-           ".mono{font-family:ui-monospace,Consolas,monospace}.ipx{font-weight:700}"
+    css = ("<style>" + BASE_CSS +
+           # solo lo propio de Cuarentena (lo comun ya viene de BASE_CSS)
+           "main{max-width:1100px}.sub{margin:0 0 14px}"
+           ".card{overflow:hidden}"
+           ".ipx{font-weight:700}"
            ".rb{color:#fff;font-weight:800;font-size:12px;padding:2px 9px;border-radius:20px;white-space:nowrap}"
            ".fw{color:#7a4a12;font-size:12px}.mot{max-width:300px}"
            ".rowmeta{font-size:11.5px;color:#6b6a66;margin-top:3px}.muted{color:#9a9a95}"

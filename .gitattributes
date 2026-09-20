@@ -1,3 +1,7 @@
 # Repo con scripts que corren en Linux: forzar LF aunque se edite en Windows.
 * text=auto eol=lf
 *.sh text eol=lf
+
+# Assets vendorizados del mapa: bytes exactos (el instalador verifica SHA256).
+vendor/mapa/countries-110m.json binary
+vendor/mapa/topojson-client.min.js binary

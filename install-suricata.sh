@@ -6193,6 +6193,10 @@ DNS salen marcadas como tal. Puedes mezclar IPs de <b>ambas listas</b>: cada una
 suya. Es reversible (puedes volver a enviarlas) y queda todo en
 <code>/var/log/suricata-cuarentena.log</code>. Si el router falla con alguna, se te dice
 <b>cual y por que</b>, y esa IP <b>se queda</b> en el registro para reintentarla.</p>
+<p>Las IPs se sacan <b>una por una y se ve el avance</b> (barra + cada IP marcada &#10003; o
+&#10007; segun sale), porque cada una es una llamada al MikroTik y en bloque la pantalla se
+quedaba parada sin decir nada. Si una falla <b>no se detiene el resto</b>. Mientras corre, la
+ventana no se cierra, para no perder de vista el avance.</p>
 <p><b>Seguridad:</b> usa un usuario API solo con <code>api,read,write,test</code> (no full), limita el
 servicio API a la IP del servidor Suricata, y si el enlace no es de confianza usa <b>API-SSL</b>. Si
 dejas el envio <b>deshabilitado</b>, la pestana Cuarentena solo <b>sugiere</b> (no toca el router).</p>
@@ -6939,12 +6943,14 @@ def cuarentena_page(msg="", es_admin=False):
                  ) if es_admin else ""
         modal = ("<div id=mmasivo class=masov onclick=\"if(event.target===this)masCerrar()\">"
                  "<div class=masbox><h3>Quitar de la lista</h3>"
-                 "<p class=massub>Se sacaran del MikroTik estas IPs. Es <b>reversible</b>: puedes volver "
-                 "a enviarlas cuando quieras.</p><ul id=maslista class=maslist></ul>"
+                 "<p class=massub id=massub>Se sacaran del MikroTik estas IPs. Es <b>reversible</b>: puedes volver "
+                 "a enviarlas cuando quieras.</p>"
+                 "<div id=masprog class=masprog><div id=masbar class=masbar></div></div>"
+                 "<ul id=maslista class=maslist></ul>"
                  "<form id=fmasivo method=post action='/cuarentena/quitar-varios'>"
                  "<div id=mascampos></div><div class=masacts>"
-                 "<button type=button class=masno onclick=masCerrar()>Cancelar</button>"
-                 "<button type=submit class=massi>Quitar</button></div></form></div></div>"
+                 "<button type=button class=masno id=masno onclick=masCerrar()>Cancelar</button>"
+                 "<button type=submit class=massi id=massi>Quitar</button></div></form></div></div>"
                  ) if es_admin else ""
         sec_manual = ("<div class='seccion'><div class='shead'><div><h2>Enviados manualmente</h2>"
                       "<p class='sub'>IPs que pusiste a mano (p.ej. desde Top origenes) y no son candidatos actuales. "
@@ -7035,7 +7041,16 @@ def cuarentena_page(msg="", es_admin=False):
            ".massub{margin:0 0 12px;color:#52514e;font-size:14px;line-height:1.5}"
            ".maslist{margin:0 0 16px;padding:10px 12px;list-style:none;background:#faf9f6;border:1px solid #e7e6e2;"
            "border-radius:9px;max-height:200px;overflow:auto;font:13px ui-monospace,Consolas,monospace}"
-           ".maslist li{padding:2px 0}"
+           ".maslist li{padding:2px 0;display:flex;align-items:center;gap:8px}"
+           ".maslist li .est{width:14px;text-align:center;flex:none}"
+           ".maslist li.yendo{color:#2a5fa0;font-weight:700}"
+           ".maslist li.hecho .est{color:#1a7f37}"
+           ".maslist li.fallo{color:#b52a2a}.maslist li.fallo .est{color:#b52a2a}"
+           ".maslist li .err{font:11px system-ui;color:#b52a2a}"
+           # barra de avance: solo aparece mientras se estan quitando
+           ".masprog{display:none;height:6px;background:#eceae6;border-radius:4px;overflow:hidden;margin:0 0 12px}"
+           ".masprog.on{display:block}"
+           ".masbar{height:100%;width:0;background:#2a78d6;transition:width .25s}"
            ".masacts{display:flex;gap:10px;justify-content:flex-end}"
            ".masno{background:#eef0f2;color:#33322f;border:1px solid #d7d6d2;padding:10px 16px;border-radius:9px;"
            "font:600 14px system-ui;cursor:pointer}.masno:hover{background:#e2e5e8}"
@@ -7088,7 +7103,10 @@ def cuarentena_page(msg="", es_admin=False):
             "setTimeout(function(){n.classList.add('show');},60);"
             "setTimeout(function(){n.classList.remove('show');},3600);})();"
             # --- quitado masivo: seleccion + modal de confirmacion ---
-            "function masCerrar(){var m=document.getElementById('mmasivo');if(m)m.style.display='none';}"
+            # mientras se estan quitando no se cierra: cerrarlo esconderia el avance
+            # y el proceso seguiria corriendo por detras sin que se vea
+            "function masCerrar(){if(window.masRun)return;"
+            "var m=document.getElementById('mmasivo');if(m)m.style.display='none';}"
             "(function(){var b=document.getElementById('bmasivo');if(!b)return;"
             "function sel(){return Array.prototype.filter.call("
             "document.querySelectorAll('input.selm'),function(c){return c.checked;});}"
@@ -7101,15 +7119,53 @@ def cuarentena_page(msg="", es_admin=False):
             "if(t.id==='selall'){Array.prototype.forEach.call(document.querySelectorAll('input.selm'),"
             "function(c){c.checked=t.checked;});refresca();}"
             "else if(t.classList&&t.classList.contains('selm'))refresca();});"
+            "var filas=[];"
             "b.addEventListener('click',function(){var s=sel();if(!s.length)return;"
             "var ul=document.getElementById('maslista'),campos=document.getElementById('mascampos');"
-            "ul.innerHTML='';campos.innerHTML='';"
+            "ul.innerHTML='';campos.innerHTML='';filas=[];"
             "s.forEach(function(c){var p=c.value.split('|');"
             "var li=document.createElement('li');"
-            "li.textContent=p[1]+(p[0]==='dns'?'  (DNS)':'');ul.appendChild(li);"
+            "var e=document.createElement('span');e.className='est';e.textContent='\\u00b7';"
+            "var t=document.createElement('span');t.textContent=p[1]+(p[0]==='dns'?'  (DNS)':'');"
+            "li.appendChild(e);li.appendChild(t);ul.appendChild(li);"
+            "filas.push({val:c.value,ip:p[1],li:li,est:e});"
+            # el form sigue existiendo como respaldo: si el navegador no puede con fetch,
+            # el envio normal hace el quitado en bloque por /cuarentena/quitar-varios
             "var h=document.createElement('input');h.type='hidden';h.name='sel';h.value=c.value;"
             "campos.appendChild(h);});"
             "document.getElementById('mmasivo').style.display='flex';});"
+            # --- quitado de una en una, mostrando el avance ---
+            # cada IP es una llamada al MikroTik; en bloque tardaba y la pantalla quedaba
+            # colgada sin decir nada. Ahora se ve cual va saliendo y cual fallo.
+            "var f=document.getElementById('fmasivo');"
+            "if(f&&window.fetch)f.addEventListener('submit',function(ev){ev.preventDefault();"
+            "var bs=document.getElementById('massi'),bn=document.getElementById('masno');"
+            "var prog=document.getElementById('masprog'),barra=document.getElementById('masbar');"
+            "var sub=document.getElementById('massub');"
+            "bs.disabled=true;bn.disabled=true;prog.classList.add('on');window.masRun=true;"
+            "var i=0,ok=0,mal=0;"
+            "function pinta(){barra.style.width=Math.round(i/filas.length*100)+'%';"
+            "sub.innerHTML='Quitando <b>'+i+'</b> de <b>'+filas.length+'</b>\\u2026';}"
+            "function fin(){sub.innerHTML='Listo: <b>'+ok+'</b> quitada(s)'"
+            "+(mal?', <b>'+mal+'</b> con error':'')+'. Actualizando\\u2026';"
+            "setTimeout(function(){location.href='/cuarentena?msg='"
+            "+encodeURIComponent(ok+' entrada(s) quitada(s)'+(mal?'; '+mal+' con error':''));},900);}"
+            "function paso(){if(i>=filas.length)return fin();var fila=filas[i];"
+            "fila.li.classList.add('yendo');fila.est.textContent='\\u2026';"
+            "var cuerpo='sel='+encodeURIComponent(fila.val);"
+            "fetch('/cuarentena/quitar-uno',{method:'POST',credentials:'same-origin',"
+            "headers:{'Content-Type':'application/x-www-form-urlencoded'},body:cuerpo})"
+            ".then(function(r){return r.json();}).catch(function(){return {ok:false,err:'sin respuesta'};})"
+            ".then(function(d){fila.li.classList.remove('yendo');"
+            "if(d&&d.ok){ok++;fila.li.classList.add('hecho');fila.est.textContent='\\u2713';"
+            "var cb=document.querySelector('input.selm[value=\"'+fila.val+'\"]');"
+            "if(cb){cb.checked=false;var tr=cb.parentNode&&cb.parentNode.parentNode;"
+            "if(tr&&tr.style)tr.style.opacity='.45';}}"
+            "else{mal++;fila.li.classList.add('fallo');fila.est.textContent='\\u2715';"
+            "var e=document.createElement('span');e.className='err';"
+            "e.textContent=(d&&d.err)||'error';fila.li.appendChild(e);}"
+            "i++;pinta();paso();});}"
+            "pinta();paso();});"
             "document.addEventListener('keydown',function(e){if(e.key==='Escape')masCerrar();});"
             "refresca();})();</script>"
             "</main></body></html>")
@@ -7187,6 +7243,14 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie", cookie)
         self.send_header("Content-Length", "0")
         self.end_headers()
+    def _json(self, obj, code=200):
+        """Respuesta JSON corta, para las acciones que el panel llama con fetch()."""
+        data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
     def _deny(self):
         # sin sesion -> a la pagina de login (no el popup del navegador)
         self._redirect("/login")
@@ -7698,6 +7762,32 @@ class H(BaseHTTPRequestHandler):
             env = cargar_enviados(); env.pop(ip, None); guardar_enviados(env)
             mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), err)
             return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
+        if ruta == "/cuarentena/quitar-uno":
+            # Quita UNA IP y responde JSON enseguida. La usa el quitado masivo para ir
+            # marcando el avance: cada IP es una llamada al MikroTik y en bloque puede
+            # tardar bastante; asi se ve cual va saliendo en vez de una pantalla colgada.
+            if not self._operador():
+                return self._json({"ok": False, "err": "sin permiso"}, 403)
+            tipo, _, ip = (q.get("sel", [""])[0] or "").partition("|")
+            ip = ip.strip()
+            try:
+                ipaddress.ip_address(ip)
+            except Exception:
+                return self._json({"ok": False, "ip": ip, "err": "IP invalida"})
+            es_dns = (tipo == "dns")
+            lst = cargar_mk().get("LIST_DNS", "suricata-dns-sospechoso") if es_dns else ""
+            try:
+                ok, err = mk_remove(ip, lista=lst) if es_dns else mk_remove(ip)
+            except Exception as ex:
+                ok, err = False, str(ex)
+            if ok:
+                cual = MK_SENT_DNS if es_dns else None
+                env = cargar_enviados(cual) if es_dns else cargar_enviados()
+                env.pop(ip, None)
+                guardar_enviados(env, cual) if es_dns else guardar_enviados(env)
+            mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"),
+                   (f"lista={lst} " if es_dns else "") + f"masivo {err}")
+            return self._json({"ok": bool(ok), "ip": ip, "err": "" if ok else (err or "fallo")})
         if ruta == "/cuarentena/quitar-varios":
             # quitado masivo desde la tabla "Enviados manualmente". Cada seleccion llega como
             # "cuar|IP" o "dns|IP" porque cada una vive en una address-list distinta.

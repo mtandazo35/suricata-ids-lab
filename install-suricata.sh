@@ -2577,10 +2577,8 @@ def top_page():
         nota = (f"Muestra reciente ({procesados:,} alertas) mientras se genera el reporte de 24h; "
                 "recarga en unos minutos para el ranking completo.")
     css = (css_rep +
-           "<style>"
-           "body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
-           "main{max-width:1000px;margin:0 auto;padding:18px 22px}"
-           "h1{font-size:20px;margin:0 0 2px}.subx{color:#52514e;font-size:13px;margin:0 0 18px}"
+           "<style>" + BASE_CSS +
+           "main{padding:18px 22px}h1{font-size:20px;margin:0 0 2px}.subx{margin:0 0 18px}"
            ".topwrap .tcard{border:1px solid #e7e6e2;border-radius:12px;background:#fff;margin:0 0 14px;overflow:hidden}"
            ".topwrap .thd{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 15px;background:#f4f4f2;border-bottom:1px solid #e7e6e2}"
            ".topwrap .rank{font-weight:800;color:#2a78d6;font-size:15px}"
@@ -2595,8 +2593,7 @@ def top_page():
            ".topwrap .num{text-align:center;white-space:nowrap;font-variant-numeric:tabular-nums}"
            ".topwrap .mono{font-family:ui-monospace,Consolas,monospace}"
            ".topwrap .tablewrap{overflow-x:auto}"
-           "@media(max-width:820px){"
-           "main{padding:16px 14px}h1{font-size:18px}"
+           "@media(max-width:820px){"                          # h1/main ya los baja BASE_CSS
            ".topwrap table{min-width:640px}"                  # el .tablewrap scrollea en vez de aplastar
            ".topwrap .thd{gap:8px}.topwrap .meta{margin-left:0}"
            "}"
@@ -5921,9 +5918,8 @@ def ficha_page(ip, embed=False):
             + _row("Corroboracion", corr)
             + _row("Decision", decision)
             + "</table>")
-    css = ("body{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
-           "main{max-width:820px;margin:0 auto;padding:18px 20px 40px}h1{font-size:19px;margin:0 0 10px}"
-           ".sub2{color:#6b6a66;font-size:13px}.mono{font-family:ui-monospace,Consolas,monospace}"
+    css = (BASE_CSS +
+           "main{max-width:820px;padding:18px 20px 40px}h1{font-size:19px;margin:0 0 10px}.sub2{color:#6b6a66}"
            ".fichah{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 12px}"
            ".ficha{width:100%;border-collapse:collapse}"
            ".ficha th{text-align:left;vertical-align:top;width:130px;color:#52514e;font-weight:700;padding:10px 12px;border-top:1px solid #eee;background:#faf9f6}"

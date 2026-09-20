@@ -3607,6 +3607,85 @@ def aplicar_politicas():
         if cambiado:
             guardar_enviados(env, sent_path)
 
+# --- barrido rapido de ALTO: envio casi inmediato de infecciones confirmadas ---
+# El ciclo normal (reporte + aplicar_politicas) corre cada REFRESH_SECS (5 min), asi que
+# un CPE puede tardar hasta ~5 min en ir a cuarentena. Este barrido corre cada ~60s y envia
+# YA a los que confirman INFECCION (comunicacion CnC/botnet repetida), sin esperar el reporte.
+# Es conservador: solo firmas de infeccion confirmada (mismo umbral que los candidatos del
+# reporte), respeta allowlist / destinos de confianza / exclusiones, y solo actua si el ALTO
+# esta configurado para ir a cuarentena. MEDIO/BAJO siguen en el ciclo de 5 min.
+_FAST_LAST = {}            # ip -> ts de la ultima accion (anti-rebote por CPE)
+_FAST_CNC = ("cnc", "c2 ", "command and control", "checkin", "check-in", "botnet", "mirai",
+             "katana", "trojan", "ransom", "coinmin", "cryptomin", "compromised")
+try:                      # umbral de confirmacion; alinear con el del reporte (report.conf)
+    _u = 3
+    for _l in open("/etc/suricata-report.conf", encoding="utf-8"):
+        if _l.strip().startswith("UMBRAL_INFECTADO="):
+            _u = int(_l.split("=", 1)[1].strip() or "3"); break
+    _FAST_UMBRAL = max(1, _u)
+except Exception:
+    _FAST_UMBRAL = 3
+
+def barrido_alto_rapido(maxbytes=4_000_000):
+    """Envia a cuarentena, casi al instante, los CPEs con INFECCION confirmada (CnC/botnet
+    repetida) sin esperar el ciclo de 5 min. Idempotente y con anti-rebote de 60s por CPE."""
+    m = cargar_mk()
+    if not (mk_configurado() and m.get("ENABLED") == "1" and m.get("POL_AUTO") == "1"):
+        return
+    if m.get("POL_ALTO", "nada") != "cuarentena":
+        return                                  # el barrido solo actua si ALTO -> cuarentena
+    lst = m.get("LIST", "")
+    if not lst:
+        return
+    try:
+        with open(EVE, "rb") as f:
+            f.seek(0, 2); size = f.tell(); start = max(0, size - maxbytes); f.seek(start); data = f.read()
+    except OSError:
+        return
+    lines = data.decode("utf-8", "replace").split("\n")
+    if start > 0 and lines:
+        lines = lines[1:]                        # la 1a linea casi seguro viene cortada
+    reglas = cargar_exclusiones(); dest_ok = _dest_ok_set()
+    hits = {}; sids = {}
+    for line in lines:
+        if '"event_type":"alert"' not in line:
+            continue
+        get = lambda k: (_RE[k].search(line).group(1) if _RE[k].search(line) else "")
+        low = get("sig").lower()
+        if not any(k in low for k in _FAST_CNC):
+            continue                             # solo infeccion confirmada (CnC/botnet/troyano)
+        src = get("src_ip"); dst = get("dest_ip"); dp = get("dest_port"); sid = get("sid")
+        if not src or nunca_bloquear(src) or dst in dest_ok:
+            continue
+        if _excluido(reglas, src, dst, int(dp) if dp else None, sid):
+            continue
+        hits[src] = hits.get(src, 0) + 1
+        sids.setdefault(src, set()).add(sid or low)
+    ahora = time.time()
+    env = cargar_enviados(MK_SENT); cambiado = False
+    for src in hits:
+        if not (hits[src] >= _FAST_UMBRAL or len(sids[src]) >= 2):
+            continue                             # mismo criterio de confirmacion que el reporte
+        if src in env or ahora - _FAST_LAST.get(src, 0) < 60:
+            continue                             # ya en la lista, o anti-rebote 60s
+        _FAST_LAST[src] = ahora
+        try:
+            ok, _err = mk_add(src, comment=f"suricata ALTO inmediato {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl="")
+        except Exception:
+            ok = False
+        if ok:
+            env[src] = {"cuando": int(ahora), "score": "", "por": "politica-rapida", "manual": False,
+                        "pol": True, "motivo": _motivo_bloqueo(src)}
+            try: notificar_cuarentena(src, "ALTO (envio inmediato)", lst, quien="politica-rapida")
+            except Exception: pass
+            mk_log("POLITICA-RAPIDA", src, "politica", f"lista={lst} cnc_hits={hits[src]} firmas={len(sids[src])}")
+            cambiado = True
+    if cambiado:
+        guardar_enviados(env, MK_SENT)
+    # limpiar anti-rebote viejo para no crecer sin fin
+    for k in [k for k, v in _FAST_LAST.items() if ahora - v > 3600]:
+        _FAST_LAST.pop(k, None)
+
 # --- log de actividad unificado (accesos + acciones de cuarentena) + retencion ---
 LOG_RETENCION_DIAS = 15   # los registros mas viejos que esto se borran solos
 
@@ -4152,8 +4231,13 @@ def refrescador():
     ult_poda = 0.0
     ult_updchk = 0.0
     ult_sensor = 0.0
+    ult_fast = 0.0
     while True:
         global FORCE_REGEN
+        if time.time() - ult_fast > 60:        # cada ~60s: enviar YA los ALTO/infeccion confirmada
+            try: barrido_alto_rapido()
+            except Exception: pass
+            ult_fast = time.time()
         if time.time() - ult_poda > 86400:     # 1x/dia: podar logs (15d) y reportes guardados (3d)
             try: podar_logs()
             except Exception: pass

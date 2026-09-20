@@ -4420,9 +4420,78 @@ def partes_top():
     mt = _TOP_RE.search(doc)
     return css, (mt.group(0) if mt else "")
 
+# --- Auto-aprovisionamiento del mapa (assets + base GeoIP) ---
+# Para las cajas que actualizaron con un updater VIEJO (sin la logica de bajar el mapa): el
+# propio panel se auto-cura al arrancar. Best-effort, una sola vez, en 2do plano.
+_MAPA_DIR = "/var/lib/suricata-mapa"
+_GEOIP_BIN2 = "/var/lib/suricata-geoip/ipv4.bin"
+_REPO_RAW2 = "https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main"
+_MAPA_ASSETS = {
+    "countries-110m.json": "a73ecc17bac82de28af19fa593f9e1a2e76619c51855490da735b7883ec48715",
+    "topojson-client.min.js": "ec362ac1599ef406ea9e79616a4ad47d4a3b3939882d47da7e4bc827a56f629c",
+}
+_GEO_CSV_URL = "https://raw.githubusercontent.com/sapics/ip-location-db/main/geo-whois-asn-country/geo-whois-asn-country-ipv4.csv"
+
+def _provisionar_geo():
+    """Asegura los assets del mapa y la base GeoIP si faltan. No bloquea el panel."""
+    # 1) assets del mapa (TopoJSON + topojson-client), verificando SHA256
+    try:
+        os.makedirs(_MAPA_DIR, exist_ok=True)
+        for fn, want in _MAPA_ASSETS.items():
+            dst = os.path.join(_MAPA_DIR, fn)
+            try:
+                if os.path.exists(dst) and hashlib.sha256(open(dst, "rb").read()).hexdigest() == want:
+                    continue
+                data = urllib.request.urlopen(f"{_REPO_RAW2}/vendor/mapa/{fn}", timeout=30).read()
+                if hashlib.sha256(data).hexdigest() == want:
+                    tmp = dst + ".tmp"
+                    with open(tmp, "wb") as f:
+                        f.write(data)
+                    os.replace(tmp, dst)
+            except Exception:
+                pass
+    except OSError:
+        pass
+    # 2) base GeoIP IP->pais (dominio publico ip-location-db, CC0) -> binario compacto
+    try:
+        if os.path.exists(_GEOIP_BIN2) and os.path.getsize(_GEOIP_BIN2) > 0:
+            return
+        import array, struct
+        raw = urllib.request.urlopen(_GEO_CSV_URL, timeout=180).read().decode("utf-8", "replace")
+        rows = []
+        for ln in raw.splitlines():
+            p = ln.split(",")
+            if len(p) < 3:
+                continue
+            cc = p[2].strip().upper()
+            if len(cc) != 2 or not cc.isalpha():
+                continue
+            try:
+                s = int(ipaddress.IPv4Address(p[0].strip())); e = int(ipaddress.IPv4Address(p[1].strip()))
+            except Exception:
+                continue
+            if e >= s:
+                rows.append((s, e, cc))
+        if len(rows) < 1000:
+            return
+        rows.sort()
+        st = array.array("I", [r[0] for r in rows]); en = array.array("I", [r[1] for r in rows])
+        if st.itemsize != 4:
+            return
+        ccb = b"".join(r[2].encode("ascii") for r in rows)
+        os.makedirs(os.path.dirname(_GEOIP_BIN2), exist_ok=True)
+        tmp = _GEOIP_BIN2 + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(struct.pack("<I", len(rows))); st.tofile(f); en.tofile(f); f.write(ccb)
+        os.replace(tmp, _GEOIP_BIN2)
+        globals()["FORCE_REGEN"] = True   # regenerar el reporte para pintar el mapa con el nuevo geoip
+    except Exception:
+        pass
+
 def refrescador():
     """Hilo de fondo: regenera el reporte periodicamente, NUNCA en el request.
     Asi 'En vivo' sirve siempre el ultimo archivo al instante aunque generar tarde."""
+    threading.Thread(target=_provisionar_geo, daemon=True).start()   # auto-cura mapa/GeoIP 1 vez
     ult_poda = 0.0
     ult_updchk = 0.0
     ult_sensor = 0.0
@@ -6003,7 +6072,9 @@ El color sube con el nº de alertas y al lado sale el <b>Top paises destino</b>.
 <li><b>El mapa</b> se dibuja en el navegador con un <b>TopoJSON</b> del mundo servido por el
 propio panel (<code>/var/lib/suricata-mapa/</code>); no llama a ningun CDN externo.</li>
 <li>Si el mapa sale vacio, casi siempre es que la base GeoIP no se instalo (no habia internet
-en la instalacion). Se reconstruye re-ejecutando el instalador o con el boton <b>Actualizar</b>.</li>
+en la instalacion). El panel <b>se auto-provisiona</b> al arrancar (baja el mapa y construye la
+base GeoIP en 2do plano si faltan); tambien se reconstruye con el boton <b>Actualizar</b> o
+re-ejecutando el instalador. Necesita salida a internet la primera vez.</li>
 </ul>
 <p class="muted" style="color:#52514e;font-size:12px">Mapa inspirado en
 <b>MikroDash</b> (MIT). Geometria del mundo: World Atlas / Natural Earth (dominio publico).</p>

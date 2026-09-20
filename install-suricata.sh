@@ -4825,12 +4825,17 @@ _SORT_JS = ("<script>(function(){function key(td){var d=td.getAttribute('data-so
             "rows.sort(function(a,b){var x=a.cells[i]?key(a.cells[i]):'',y=b.cells[i]?key(b.cells[i]):'';"
             "var c=num?(parseFloat(x)||0)-(parseFloat(y)||0):x.localeCompare(y,'es',{numeric:true,sensitivity:'base'});"
             "return dir*c;});rows.forEach(function(r){tb.appendChild(r);});}"
+            "function init(){"
             "document.querySelectorAll('table.orden').forEach(function(t){var tb=t.tBodies[0];if(!tb)return;"
             "var ths=t.tHead?t.tHead.rows[0].cells:[];Array.prototype.forEach.call(ths,function(th,i){"
             "if(th.hasAttribute('data-nosort'))return;th.setAttribute('data-sort','');"
             "th.addEventListener('click',function(){var asc=th.getAttribute('aria-sort')!=='ascending';"
             "Array.prototype.forEach.call(ths,function(o){o.removeAttribute('aria-sort');});"
-            "th.setAttribute('aria-sort',asc?'ascending':'descending');sortBy(tb,i,asc?1:-1);});});});})();</script>")
+            "th.setAttribute('aria-sort',asc?'ascending':'descending');sortBy(tb,i,asc?1:-1);});});});}"
+            # este <script> va al PRINCIPIO del <body> (lo inyecta nav()), asi que al
+            # ejecutarse todavia no existe ninguna tabla: hay que esperar al DOM.
+            "if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);"
+            "else init();})();</script>")
 
 # Base de estilos COMPARTIDA por los apartados del panel (fuente unica de tokens y
 # componentes). Se incluye al PRINCIPIO del <style> de cada pagina migrada; las reglas

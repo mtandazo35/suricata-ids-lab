@@ -968,10 +968,14 @@ def campos(line):
 LOGDIR = "/var/log/suricata"
 # IPs ya enviadas a la cuarentena del MikroTik (lo escribe el panel): para que el boton
 # del Top muestre "En cuarentena" en vez de "Cuarentena" cuando ya se envio.
-try:
-    _MK_ENVIADOS = set(json.load(open("/var/log/suricata-cuarentena-enviados.json", encoding="utf-8")).keys())
-except Exception:
-    _MK_ENVIADOS = set()
+# Son DOS listas (infectados y DNS sospechoso): si solo se mira la primera, un CPE
+# enviado a la de DNS aparece en el Top como si no estuviera en cuarentena.
+_MK_ENVIADOS = set()
+for _pe in ("/var/log/suricata-cuarentena-enviados.json", "/var/log/suricata-dns-enviados.json"):
+    try:
+        _MK_ENVIADOS |= set(json.load(open(_pe, encoding="utf-8")).keys())
+    except Exception:
+        pass
 # Ventana del resumen en MINUTOS (argv[1]); por defecto 24h. Con una ventana corta
 # (p.ej. 30 min) los cuadros muestran solo la actividad reciente: una IP atendida hace
 # rato se cae sola del top al no tener alertas nuevas.
@@ -3343,13 +3347,26 @@ def cargar_enviados(path=MK_SENT):
         return {}
 
 def guardar_enviados(d, path=MK_SENT):
+    # El Top del resumen es una FOTO que se regenera cada 5 min y lee este archivo para
+    # marcar "En cuarentena". Si cambia QUIEN esta en la lista y no se regenera, el Top
+    # sigue marcando a un CPE que ya se quito (o no marca al que acaba de entrar).
+    # El regen se fuerza aqui, el unico punto por el que pasan TODOS los cambios: hacerlo
+    # ruta por ruta ya fallo (enviar lo hacia, quitar no).
+    # Solo cuenta el alta/baja de IPs; el refresco de metadatos (last_eval/sigue) ocurre
+    # en cada ciclo y regenerar por eso anularia la cache de 5 min.
+    try:
+        antes = set(cargar_enviados(path).keys())
+    except Exception:
+        antes = None
     try:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f)
         os.replace(tmp, path)
     except OSError:
-        pass
+        return
+    if antes is not None and antes != set(d.keys()):
+        globals()["FORCE_REGEN"] = True
 
 BITACORA_LOG = "/var/log/suricata-bitacora.log"   # auditoria: quien hizo que y cuando
 
@@ -5968,6 +5985,10 @@ tu monitoreo SNMP, un falso positivo puntual). Permite exclusiones <b>temporales
 en segundo plano cada <b>5 minutos</b>. Por eso los graficos casi no cambian entre
 recargas y el feed de abajo si (ese es en vivo).</li>
 <li><b>Salud del sensor</b> (tarjeta en Cuarentena): se mide cada <b>~60 segundos</b>.</li>
+<li><b>El distintivo "En cuarentena" del Top</b> no espera esos 5 minutos: cada vez que
+<b>entra o sale</b> un CPE de cualquiera de las dos listas (infectados o DNS), el resumen se
+regenera en unos segundos. Asi el Top no marca como en cuarentena a un CPE que acabas de
+quitar, ni deja sin marcar al que acaba de entrar (tambien cuando lo libera el sistema solo).</li>
 <li><b>Cuarentena automatica</b> (si esta activada): las politicas por banda se aplican junto
 con el resumen (cada 5 min), pero hay un <b>barrido rapido cada ~60 s</b> que envia YA a los CPEs
 con <b>infeccion confirmada</b> (no esperan los 5 min). Ver "Cuarentena automatica" mas abajo.</li>

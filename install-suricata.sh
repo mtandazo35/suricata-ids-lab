@@ -6539,15 +6539,15 @@ def cuarentena_page(msg="", es_admin=False):
                         f"<button class='qbtn send' onclick=\"return confirm('Enviar {esc(ip)} a la lista {esc(lista_name)} del MikroTik?')\">Enviar</button></form>")
             return "<span class='dry' title='Configura y habilita el MikroTik en Ajustes para activar el envio'>solo sugerencia</span>"
         filas = "".join(
-            f"<tr><td class='mono ipx'>{esc(c.get('ip',''))}{_cli(c.get('ip',''))}</td>"
-            f"<td><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {esc(c.get('banda',''))}</span>"
+            f"<tr><td data-label='CPE' class='mono ipx'>{esc(c.get('ip',''))}{_cli(c.get('ip',''))}</td>"
+            f"<td data-label='Riesgo'><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {esc(c.get('banda',''))}</span>"
             f"<div style='margin-top:4px'>{_conf_badge(c)}</div></td>"
-            f"<td class='mot'>{c.get(cnt_key,0)} {cnt_lbl} · {c.get(fir_key,0)} firma(s)<br>"
+            f"<td data-label='Motivo' class='mot'>{c.get(cnt_key,0)} {cnt_lbl} · {c.get(fir_key,0)} firma(s)<br>"
             f"<span class='fw'>{esc((c.get('firma','') or '')[:70])}</span>{_ev_html(c)}"
             f"<button type=button class=evbtn onclick=\"verFicha('{esc(c.get('ip',''))}')\">Ver evidencia</button></td>"
-            f"<td class='num'>{c.get('destinos',0)}</td><td class='num'>{c.get('puertos',0)}</td>"
-            f"<td class='num'>{c.get('total_alertas',0):,}</td>"
-            f"<td>{_acc(c)}</td></tr>" for c in candidatos)
+            f"<td data-label='Destinos' class='num'>{c.get('destinos',0)}</td><td data-label='Puertos' class='num'>{c.get('puertos',0)}</td>"
+            f"<td data-label='Alertas' class='num'>{c.get('total_alertas',0):,}</td>"
+            f"<td data-label='Accion'>{_acc(c)}</td></tr>" for c in candidatos)
         if not filas:
             filas = f"<tr><td colspan=7 class='muted' style='padding:18px;text-align:center'>{vacio}</td></tr>"
         # 'Enviar todos' solo actua sobre ALTA CONFIANZA (evidencia independiente), no sospechosos
@@ -6582,11 +6582,12 @@ def cuarentena_page(msg="", es_admin=False):
                   f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de {esc(lista)}?')\">Quitar</button></form>"
                   ) if es_admin else ""
         mot = _mot_txt(mm) or "<span class='muted'>manual / sin motivo registrado</span>"
-        return (f"<tr><td class='mono ipx'>{esc(ip)}{_cli(ip)}</td><td class='mono'>{esc(lista)}</td>"
-                f"<td class='mot'>{mot}</td><td>{esc(mm.get('por','?'))}</td>"
-                f"<td class='mono'>{cuando}</td>"
-                f"<td class='rowmeta' style='margin:0'>{_rev(mm) or '&mdash;'}</td>"
-                f"<td>{quitar}</td></tr>")
+        return (f"<tr><td data-label='CPE' class='mono ipx'>{esc(ip)}{_cli(ip)}</td>"
+                f"<td data-label='Lista' class='mono'>{esc(lista)}</td>"
+                f"<td data-label='Motivo' class='mot'>{mot}</td><td data-label='Por'>{esc(mm.get('por','?'))}</td>"
+                f"<td data-label='Enviado' class='mono'>{cuando}</td>"
+                f"<td data-label='Ultima revision' class='rowmeta' style='margin:0'>{_rev(mm) or '&mdash;'}</td>"
+                f"<td data-label='Accion'>{quitar}</td></tr>")
     _ci = {c.get("ip") for c in cand}; _cd = {c.get("ip") for c in dns_cand}
     manual_rows = "".join(_fila_manual(ip, mm, "cuarentena", m.get("LIST", "")) for ip, mm in enviados.items() if ip not in _ci)
     manual_rows += "".join(_fila_manual(ip, mm, "cuarentena/dns", m.get("LIST_DNS", "")) for ip, mm in enviados_dns.items() if ip not in _cd)
@@ -6671,13 +6672,24 @@ def cuarentena_page(msg="", es_admin=False):
            ".notifm.msg{background:#eef4fd;color:#2a5fa0;border:1px solid #cfe0f6}.notifm .ni{font-size:18px}"
            "@media(max-width:820px){"
            "h1{font-size:19px}"
-           ".card{overflow-x:auto}"                          # tarjeta scrollea en X
-           "table{min-width:660px}"                           # mantener columnas legibles -> aparece el scroll
-           ".mot{max-width:none}"
            ".shead{align-items:stretch}.shead .qbtn{margin-left:0}"
            ".fichabox{height:calc(100vh - 28px);max-width:100%}"
            ".notifm{left:14px;right:14px;transform:translateY(-16px);max-width:none}"
            ".notifm.show{transform:translateY(0)}"
+           # tablas densas -> se apilan como tarjetas (Etiqueta: valor) en vez de aplastarse.
+           # Patron de etiqueta absoluta: sirve con cualquier contenido (badges, botones, texto).
+           ".card{overflow:visible;border:0;background:transparent;border-radius:0}"
+           "table,thead,tbody,tr,td{display:block;width:auto}"
+           "thead{position:absolute;left:-9999px}"           # cabecera oculta (cada celda lleva su etiqueta)
+           "tbody tr{border:1px solid #e7e6e2;border-radius:12px;background:#fff;margin:0 0 10px;padding:8px 12px}"
+           "tbody tr:hover{background:#fff}"
+           "tbody td{border:0;border-top:1px solid #f4f3f0;padding:7px 0 7px 42%;position:relative;text-align:left;min-height:20px}"
+           "tbody td:first-child{border-top:0}"
+           "tbody td::before{content:attr(data-label);position:absolute;left:0;top:7px;width:38%;color:#52514e;font-weight:600;font-size:12px;white-space:nowrap}"
+           "tbody td.mot{padding-left:0}"
+           "tbody td.mot::before{position:static;display:block;width:auto;margin-bottom:4px}"
+           "tbody td[colspan]{padding-left:0;text-align:center}tbody td[colspan]::before{display:none}"
+           ".mot{max-width:none}.num{text-align:left}"
            "}"
            "</style>")
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"

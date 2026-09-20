@@ -59,6 +59,7 @@ fi
 correr "ruta /cuarentena/quitar-uno" "$PY" tests/test_ruta_quitar_uno.py "$TMPD"
 correr "ruta /cuarentena/quitar-varios" "$PY" tests/test_ruta_quitar_varios.py "$TMPD"
 correr "solo tus redes entran a la cuarentena de CPEs" "$PY" tests/test_mis_redes.py
+correr "registro de routers y migracion del nodo unico" "$PY" tests/test_routers.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

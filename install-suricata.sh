@@ -3273,11 +3273,55 @@ def cargar_mk():
     # CERT_FP: huella SHA256 del certificado del router, fijada en la primera conexion
     # TLS (TOFU). Mientras no cambie, nadie puede colarse en medio; si cambia, la
     # conexion se rechaza y hay que borrar la clave a mano tras comprobar por que.
+    # Forma de siempre (ajustes globales + UN router), para todo el codigo que aun no
+    # distingue nodo. El router es el de por defecto; con multi-nodo, cada camino que
+    # ya sabe de routers usa cargar_mk_de(router) en su lugar.
+    return cargar_mk_de(router_defecto())
+
+def cargar_mk_de(r):
+    """Los ajustes tal y como los espera el codigo: politica global + este router."""
     d = {"HOST": "", "PORT": "8728", "TLS": "0", "USER": "", "PASS": "",
          "LIST": "suricata-cuarentena", "TTL": "1h",
          "LIST_DNS": "suricata-dns-sospechoso", "TTL_DNS": "1d",
          "AUTO_MANTENER": "0", "ENABLED": "0", "CERT_FP": "",
          "POL_AUTO": "0", "POL_BAJO": "nada", "POL_MEDIO": "nada", "POL_ALTO": "nada"}
+    d.update(_mk_globales())          # AUTO_MANTENER y POL_* son de toda la instalacion
+    for k in ("HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL",
+              "LIST_DNS", "TTL_DNS", "CERT_FP", "ENABLED"):
+        if k in (r or {}):
+            d[k] = (r or {})[k]
+    d["ROUTER_ID"] = (r or {}).get("id", "")
+    d["ROUTER_NOMBRE"] = (r or {}).get("nombre", "") or d.get("HOST", "")
+    return d
+
+# ---------------------------------------------------------------------------------
+# Varios MikroTik (multi-nodo)
+# ---------------------------------------------------------------------------------
+# Un sensor puede recibir el espejo de varios routers. Cada uno tiene su conexion, sus
+# address-lists y SUS abonados, y ademas dos nodos suelen repetir el mismo rango privado
+# (10.0.0.x en los dos), asi que una IP sola no identifica a nadie: hace falta el par
+# (router, IP). La interfaz por la que entra el espejo de cada router es lo que permite
+# saber de cual vino cada alerta (Suricata lo registra como in_iface).
+#
+# Los ajustes de POLITICA son globales (bandas de riesgo) y siguen en MK_CONF; lo que es
+# por router vive aqui. Si este archivo no existe todavia se construye a partir del
+# MK_CONF de siempre, asi que una instalacion existente sigue funcionando igual.
+ROUTERS_CONF = "/etc/suricata-routers.json"
+IFACE_BASE = "ids-mon"       # el primer router conserva el nombre de siempre
+CAMPOS_ROUTER = ("id", "nombre", "iface", "HOST", "PORT", "TLS", "USER", "PASS",
+                 "LIST", "TTL", "LIST_DNS", "TTL_DNS", "CERT_FP", "ENABLED")
+
+def _router_vacio(idx=1):
+    return {"id": "r%d" % idx, "nombre": "", "iface": IFACE_BASE if idx == 1 else "%s%d" % (IFACE_BASE, idx),
+            "HOST": "", "PORT": "8728", "TLS": "0", "USER": "", "PASS": "",
+            "LIST": "suricata-cuarentena", "TTL": "1h",
+            "LIST_DNS": "suricata-dns-sospechoso", "TTL_DNS": "1d",
+            "CERT_FP": "", "ENABLED": "0"}
+
+def _mk_globales():
+    """Lee MK_CONF crudo (conexion antigua + ajustes globales de politica)."""
+    d = {"AUTO_MANTENER": "0", "ENABLED": "0", "POL_AUTO": "0",
+         "POL_BAJO": "nada", "POL_MEDIO": "nada", "POL_ALTO": "nada"}
     try:
         for l in open(MK_CONF, encoding="utf-8"):
             l = l.strip()
@@ -3286,6 +3330,72 @@ def cargar_mk():
     except OSError:
         pass
     return d
+
+def cargar_routers():
+    """Lista de routers configurados. Si aun no hay archivo propio, se migra el unico
+    router del MK_CONF de siempre (sin tocar nada en disco: la migracion se persiste
+    la primera vez que se guarde)."""
+    try:
+        d = json.load(open(ROUTERS_CONF, encoding="utf-8"))
+        lst = d.get("routers") if isinstance(d, dict) else d
+        if isinstance(lst, list) and lst:
+            salida = []
+            for i, r in enumerate(lst, 1):
+                base = _router_vacio(i)
+                if isinstance(r, dict):
+                    base.update({k: v for k, v in r.items() if k in CAMPOS_ROUTER})
+                salida.append(base)
+            return salida
+    except Exception:
+        pass
+    g = _mk_globales()                      # migracion desde la configuracion de un solo router
+    uno = _router_vacio(1)
+    for k in ("HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL",
+              "LIST_DNS", "TTL_DNS", "CERT_FP", "ENABLED"):
+        if g.get(k, "") != "":
+            uno[k] = g[k]
+    uno["nombre"] = uno["HOST"] or "MikroTik"
+    return [uno]
+
+def guardar_routers(lst):
+    """Guarda la lista con permisos 600: lleva las claves de la API."""
+    limpia = []
+    for i, r in enumerate(lst, 1):
+        base = _router_vacio(i)
+        base.update({k: v for k, v in (r or {}).items() if k in CAMPOS_ROUTER})
+        if not base.get("id"):
+            base["id"] = "r%d" % i
+        limpia.append(base)
+    tmp = ROUTERS_CONF + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"routers": limpia}, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, ROUTERS_CONF)
+    try: os.chmod(ROUTERS_CONF, 0o600)
+    except OSError: pass
+    return limpia
+
+def router_por_id(rid):
+    for r in cargar_routers():
+        if r.get("id") == rid:
+            return r
+    return None
+
+def router_por_iface(iface):
+    """De que router vino una alerta, segun la interfaz por la que entro su espejo."""
+    if iface:
+        for r in cargar_routers():
+            if r.get("iface") == iface:
+                return r
+    return None
+
+def router_defecto():
+    """El primero habilitado; si ninguno lo esta, el primero. Es el que usan los caminos
+    que todavia no distinguen router (compatibilidad mientras dure la migracion)."""
+    lst = cargar_routers()
+    for r in lst:
+        if r.get("ENABLED") == "1":
+            return r
+    return lst[0] if lst else _router_vacio(1)
 
 def guardar_mk(d):
     orden = ["HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL", "LIST_DNS", "TTL_DNS",

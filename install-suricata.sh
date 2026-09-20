@@ -1287,7 +1287,7 @@ def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_clas
     return (f'<section class="{card_class}"><h2>{esc(titulo)}{q}</h2>'
             f'<svg viewBox="0 0 {W} {h}" width="100%" role="img" aria-label="{esc(titulo)}">'
             f'{"".join(rows)}</svg>'
-            f'<p class="muted">en {unidad} &middot; el color sube con la intensidad '
+            f'<p class="muted leyenda">en {unidad} &middot; el color sube con la intensidad '
             f'(<span style="color:#1baf7a">bajo</span> &rarr; <span style="color:#eda100">medio</span> '
             f'&rarr; <span style="color:#e34948">alto</span>)</p></section>')
 
@@ -1930,6 +1930,7 @@ font-size:12px;font-weight:600;padding:5px 9px;border-radius:6px;pointer-events:
 opacity:0;transition:opacity .1s;z-index:6;box-shadow:0 2px 8px rgba(0,0,0,.25)}}
 @media(prefers-reduced-motion:reduce){{.tl-bar{{animation:none}}}}
 .muted{{color:{INK2};font-size:12px;margin:8px 0 0}}
+.leyenda{{margin:12px -16px -16px;padding:9px 16px;border-top:1px solid {GRID};background:#fafafa;border-radius:0 0 10px 10px}}
 table{{width:100%;border-collapse:collapse;font-size:12.5px}}
 th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid {GRID};vertical-align:top}}
 th{{color:{INK2};font-weight:600;position:sticky;top:0;background:#fff}}
@@ -4827,9 +4828,9 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<h3 class=ch>IPs bloqueadas ahora</h3>" + blq +
             "</section>")
     css = (
-        "body{margin:0;background:#f6f6f4;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
-        "main{max-width:900px;margin:0 auto;padding:26px 20px 40px}"
-        "h1{font-size:22px;margin:0 0 2px}h2{font-size:16px;margin:0}"
+        BASE_CSS +
+        "body{background:#f6f6f4}main{max-width:900px;padding:26px 20px 40px}"
+        "h1{font-size:22px;margin:0 0 2px}h2{margin:0}"
         ".psub{color:#6b6a66;font-size:13px;margin:0 0 18px}.sub2{color:#6b6a66;font-size:12.5px;margin:6px 0 12px}"
         ".card{border:1px solid #e7e6e2;border-radius:14px;padding:22px 22px 20px;background:#fff;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.03)}"
         ".ch{font-size:13px;color:#52514e;margin:18px 0 6px;padding-top:16px;border-top:1px solid #f0efec}"

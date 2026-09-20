@@ -4170,6 +4170,9 @@ border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0
  .nav .updbtn{margin-left:8px;padding:7px 11px;font-size:13px}
  .updov,.updask{padding:14px}
  .empbar .empwrap{padding:6px 14px}
+ /* base compartida: margen lateral comodo en movil para TODOS los apartados
+    (_NAV_CSS se inyecta despues del <style> de cada pagina, asi que manda) */
+ main{padding-left:14px!important;padding-right:14px!important}
 }
 @media(max-width:420px){
  .nav .navwrap{padding:5px 10px}
@@ -6119,6 +6122,16 @@ def cuarentena_page(msg="", es_admin=False):
            ".notifm{position:fixed;top:18px;left:50%;transform:translateX(-50%) translateY(-16px);z-index:140;display:flex;align-items:center;gap:10px;max-width:560px;padding:12px 16px;border-radius:12px;font-size:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);opacity:0;transition:opacity .25s,transform .25s;pointer-events:none}"
            ".notifm.show{opacity:1;transform:translateX(-50%) translateY(0)}"
            ".notifm.msg{background:#eef4fd;color:#2a5fa0;border:1px solid #cfe0f6}.notifm .ni{font-size:18px}"
+           "@media(max-width:820px){"
+           "h1{font-size:19px}"
+           ".card{overflow-x:auto}"                          # tarjeta scrollea en X
+           "table{min-width:660px}"                           # mantener columnas legibles -> aparece el scroll
+           ".mot{max-width:none}"
+           ".shead{align-items:stretch}.shead .qbtn{margin-left:0}"
+           ".fichabox{height:calc(100vh - 28px);max-width:100%}"
+           ".notifm{left:14px;right:14px;transform:translateY(-16px);max-width:none}"
+           ".notifm.show{transform:translateY(0)}"
+           "}"
            "</style>")
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"

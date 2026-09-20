@@ -9035,9 +9035,31 @@ if __name__ == "__main__":
 PYD
   chmod 755 /usr/local/bin/tzsp-decap.py
 
+  # --- Una interfaz por MikroTik ---
+  # Con varios routers el espejo de cada uno entra por SU veth: asi Suricata anota un
+  # in_iface distinto por nodo y se puede saber de cual vino cada alerta. Sin eso, dos
+  # nodos que usan el mismo rango privado (10.0.0.x en los dos) serian indistinguibles.
+  # El PRIMER router conserva ids-in/ids-mon de siempre: una caja con un solo MikroTik
+  # no cambia de interfaz al actualizar (renombrarla la dejaria sin captura).
+  TZSP_MAP=""; TZSP_MONS=""; TZSP_PRE=""
+  _i=0
+  for _src in $(printf '%s' "$MIRROR_SRC" | tr ',' ' '); do
+    _i=$((_i+1))
+    if [ "$_i" -eq 1 ]; then _din="$TZSP_IN"; _dmon="$TZSP_MON"
+    else _din="${TZSP_IN}${_i}"; _dmon="${TZSP_MON}${_i}"; fi
+    TZSP_MAP="${TZSP_MAP}${TZSP_MAP:+,}${_src}=${_din}"
+    TZSP_MONS="${TZSP_MONS}${TZSP_MONS:+ }${_dmon}"
+    TZSP_PRE="${TZSP_PRE}ExecStartPre=/bin/sh -c 'ip link show ${_dmon} >/dev/null 2>&1 || ip link add ${_din} type veth peer name ${_dmon}'
+ExecStartPre=/bin/sh -c 'sysctl -qw net.ipv6.conf.${_din}.disable_ipv6=1 net.ipv6.conf.${_dmon}.disable_ipv6=1 net.ipv4.conf.${_dmon}.rp_filter=1 net.ipv4.conf.${_dmon}.forwarding=0 net.ipv4.conf.${_dmon}.arp_ignore=8 || true'
+ExecStartPre=/sbin/ip link set ${_din} up mtu 65535
+ExecStartPre=/sbin/ip link set ${_dmon} up mtu 65535 promisc on
+"
+  done
+  [ -n "$TZSP_MONS" ] || { TZSP_MONS="$TZSP_MON"; TZSP_MAP="${MIRROR_SRC}=${TZSP_IN}"; }
+
   cat > /etc/systemd/system/tzsp-decap.service <<UNIT
 [Unit]
-Description=Receptor TZSP (MikroTik) -> ${TZSP_MON} para Suricata
+Description=Receptor TZSP (MikroTik) -> ${TZSP_MONS} para Suricata
 After=network.target
 Before=suricata.service
 
@@ -9045,17 +9067,15 @@ Before=suricata.service
 Environment=TZSP_PORT=${TZSP_PORT}
 Environment=TZSP_OUT_IF=${TZSP_IN}
 Environment=TZSP_ALLOW=${MIRROR_SRC}
-# crea el par veth si no existe; sin IPv6 para que no meta ruido propio
-# las tramas reinyectadas NO deben entrar a la pila IP del kernel ni reenviarse
-ExecStartPre=/bin/sh -c 'ip link show ${TZSP_MON} >/dev/null 2>&1 || ip link add ${TZSP_IN} type veth peer name ${TZSP_MON}'
-ExecStartPre=/bin/sh -c 'sysctl -qw net.ipv6.conf.${TZSP_IN}.disable_ipv6=1 net.ipv6.conf.${TZSP_MON}.disable_ipv6=1 net.ipv4.conf.${TZSP_MON}.rp_filter=1 net.ipv4.conf.${TZSP_MON}.forwarding=0 net.ipv4.conf.${TZSP_MON}.arp_ignore=8 || true'
-# el SO_RCVBUF de 16 MB del receptor lo topa rmem_max
-ExecStartPre=-/usr/sbin/sysctl -qw net.core.rmem_max=16777216
+# cada router a su interfaz (ver tzsp-decap.py); con uno solo equivale a lo de siempre
+Environment=TZSP_MAP=${TZSP_MAP}
+# crea los pares veth si no existen; sin IPv6 para que no metan ruido propio.
+# Las tramas reinyectadas NO deben entrar a la pila IP del kernel ni reenviarse.
 # mtu 65535 (maximo de veth): el router agrega segmentos (GRO) y manda tramas de hasta
 # ~22 kB; con 1600/9000 se perdian con EMSGSIZE y cada trama perdida es un hueco mas
-# en el reensamblado. Suricata dimensiona el snaplen por el MTU (block-size 128k en ids-mon).
-ExecStartPre=/sbin/ip link set ${TZSP_IN} up mtu 65535
-ExecStartPre=/sbin/ip link set ${TZSP_MON} up mtu 65535 promisc on
+# en el reensamblado. Suricata dimensiona el snaplen por el MTU (block-size 128k).
+${TZSP_PRE}# el SO_RCVBUF de 16 MB del receptor lo topa rmem_max
+ExecStartPre=-/usr/sbin/sysctl -qw net.core.rmem_max=16777216
 ExecStart=/usr/bin/python3 /usr/local/bin/tzsp-decap.py
 Restart=always
 RestartSec=2
@@ -9074,11 +9094,14 @@ UNIT
   systemctl enable tzsp-decap >/dev/null 2>&1 || true
   systemctl restart tzsp-decap
   sleep 1
-  ip link show "$TZSP_MON" >/dev/null 2>&1 || { journalctl -u tzsp-decap --no-pager -n 20; die "No se creo ${TZSP_MON}. Revisa: journalctl -u tzsp-decap"; }
+  for _dmon in $TZSP_MONS; do
+    ip link show "$_dmon" >/dev/null 2>&1 || { journalctl -u tzsp-decap --no-pager -n 20; die "No se creo ${_dmon}. Revisa: journalctl -u tzsp-decap"; }
+  done
 
-  # segunda interfaz af-packet en suricata.yaml (idempotente)
-  if ! grep -qE "^\s*- interface: ${TZSP_MON}\s*$" "$CFG"; then
-    python3 - "$CFG" "$TZSP_MON" <<'PY'
+  # una entrada af-packet por interfaz de espejo en suricata.yaml (idempotente)
+  for TZSP_MON_CFG in $TZSP_MONS; do
+  if ! grep -qE "^\s*- interface: ${TZSP_MON_CFG}\s*$" "$CFG"; then
+    python3 - "$CFG" "$TZSP_MON_CFG" <<'PY'
 import sys, re
 cfg, mon = sys.argv[1], sys.argv[2]
 s = open(cfg, encoding="utf-8").read()
@@ -9101,10 +9124,11 @@ s = s[:m.start(2)] + block + s[m.start(2):]
 open(cfg, "w", encoding="utf-8").write(s)
 PY
   fi
-  # block-size en el bloque ids-mon aunque ya existiera de una corrida anterior
-  if ! awk -v m="$TZSP_MON" '$0 ~ "^  - interface: "m"$"{f=1;next} f&&/^  - interface:/{exit} f&&/^    block-size: 131072/{ok=1} END{exit !ok}' "$CFG"; then
-    sed -i "/^  - interface: ${TZSP_MON}\$/a\    block-size: 131072" "$CFG"
+  # block-size en el bloque de esa interfaz aunque ya existiera de una corrida anterior
+  if ! awk -v m="$TZSP_MON_CFG" '$0 ~ "^  - interface: "m"$"{f=1;next} f&&/^  - interface:/{exit} f&&/^    block-size: 131072/{ok=1} END{exit !ok}' "$CFG"; then
+    sed -i "/^  - interface: ${TZSP_MON_CFG}\$/a\    block-size: 131072" "$CFG"
   fi
+  done
   # En modo espejo, Suricata captura SOLO ${TZSP_MON} (veth estable que crea tzsp-decap).
   # El bloque af-packet de la NIC fisica (${IFACE}) se ELIMINA: su unico valor era el
   # trafico de gestion del propio sensor, y ademas ataba a Suricata al NOMBRE de la NIC.
@@ -9220,14 +9244,19 @@ OFFLOADS="gro off lro off tso off gso off rx-gro-hw off"
 # lo resuelve por la ruta por defecto en CADA arranque, para que un renombrado de la
 # NIC (ens18 -> eth0 al recrear/migrar la VM) no deje a Suricata sin apagar offloads.
 if [ "$TZSP" -eq 1 ]; then
-  CAP_IF="$TZSP_MON"
-  OFFLOAD_PRE="${ETHTOOL} -K ${TZSP_MON} ${OFFLOADS}"
+  # con varios routers hay una veth por nodo: apagar offloads en TODAS
+  CAP_IF="${TZSP_MONS:-$TZSP_MON}"
+  OFFLOAD_PRE=""
+  for _dmon in ${TZSP_MONS:-$TZSP_MON}; do
+    OFFLOAD_PRE="${OFFLOAD_PRE}${OFFLOAD_PRE:+ ; }${ETHTOOL} -K ${_dmon} ${OFFLOADS}"
+  done
+  OFFLOAD_PRE="/bin/sh -c '${OFFLOAD_PRE} || true'"
 else
   CAP_IF="$IFACE"
   OFFLOAD_PRE="/bin/sh -c 'I=\$(ip -o -4 route show to default 2>/dev/null | awk \"{print \\\$5; exit}\"); [ -n \"\$I\" ] || I=\$(ip -o -4 addr show scope global 2>/dev/null | awk \"{print \\\$2; exit}\"); [ -n \"\$I\" ] && ${ETHTOOL} -K \"\$I\" ${OFFLOADS} || true'"
 fi
 # shellcheck disable=SC2086
-"$ETHTOOL" -K "$CAP_IF" $OFFLOADS >/dev/null 2>&1 || true
+for _ci in $CAP_IF; do "$ETHTOOL" -K "$_ci" $OFFLOADS >/dev/null 2>&1 || true; done
 install -d /etc/systemd/system/suricata.service.d
 cat > /etc/systemd/system/suricata.service.d/10-offload.conf <<UNIT
 # Generado por install-suricata.sh: sin offloads en la interfaz de captura.

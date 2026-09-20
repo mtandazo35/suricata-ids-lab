@@ -61,6 +61,7 @@ correr "ruta /cuarentena/quitar-varios" "$PY" tests/test_ruta_quitar_varios.py "
 correr "solo tus redes entran a la cuarentena de CPEs" "$PY" tests/test_mis_redes.py
 correr "registro de routers y migracion del nodo unico" "$PY" tests/test_routers.py
 correr "receptor TZSP: cada MikroTik a su interfaz" "$PY" tests/test_tzsp_multi.py
+correr "instalador: una interfaz por router" bash tests/test_instalador_multi.sh
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

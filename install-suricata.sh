@@ -4825,17 +4825,47 @@ _SORT_JS = ("<script>(function(){function key(td){var d=td.getAttribute('data-so
             "rows.sort(function(a,b){var x=a.cells[i]?key(a.cells[i]):'',y=b.cells[i]?key(b.cells[i]):'';"
             "var c=num?(parseFloat(x)||0)-(parseFloat(y)||0):x.localeCompare(y,'es',{numeric:true,sensitivity:'base'});"
             "return dir*c;});rows.forEach(function(r){tb.appendChild(r);});}"
-            "function init(){"
-            "document.querySelectorAll('table.orden').forEach(function(t){var tb=t.tBodies[0];if(!tb)return;"
-            "var ths=t.tHead?t.tHead.rows[0].cells:[];Array.prototype.forEach.call(ths,function(th,i){"
+            "function marca(ths,th,asc){Array.prototype.forEach.call(ths,function(o){o.removeAttribute('aria-sort');});"
+            "th.setAttribute('aria-sort',asc?'ascending':'descending');}"
+            "function init(){document.querySelectorAll('table.orden').forEach(function(t,ti){"
+            "var tb=t.tBodies[0];if(!tb)return;var ths=t.tHead?t.tHead.rows[0].cells:[];"
+            "var K='orden:'+location.pathname+':'+ti;"
+            "function aplicar(i,asc,guardar){sortBy(tb,i,asc?1:-1);marca(ths,ths[i],asc);"
+            "if(guardar){try{sessionStorage.setItem(K,i+','+(asc?1:0));}catch(e){}}}"
+            "Array.prototype.forEach.call(ths,function(th,i){"
             "if(th.hasAttribute('data-nosort'))return;th.setAttribute('data-sort','');"
-            "th.addEventListener('click',function(){var asc=th.getAttribute('aria-sort')!=='ascending';"
-            "Array.prototype.forEach.call(ths,function(o){o.removeAttribute('aria-sort');});"
-            "th.setAttribute('aria-sort',asc?'ascending':'descending');sortBy(tb,i,asc?1:-1);});});});}"
+            "th.addEventListener('click',function(){aplicar(i,th.getAttribute('aria-sort')!=='ascending',1);});});"
+            # tras recargar (p.ej. al pulsar Quitar) se vuelve a aplicar el orden elegido,
+            # para que la tabla no se desordene sola
+            "try{var g=sessionStorage.getItem(K);if(g){var p=g.split(',');var i=+p[0];"
+            "if(ths[i]&&!ths[i].hasAttribute('data-nosort'))aplicar(i,p[1]==='1',0);}}catch(e){}"
+            "});}"
             # este <script> va al PRINCIPIO del <body> (lo inyecta nav()), asi que al
             # ejecutarse todavia no existe ninguna tabla: hay que esperar al DOM.
             "if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);"
             "else init();})();</script>")
+
+# Conserva la POSICION de la pagina al recargar. Sin esto, cada accion (Quitar, Enviar...)
+# hace un POST y la pagina vuelve arriba del todo, perdiendo de vista la fila en la que
+# estabas. Solo se restaura tras una accion de la propia pagina o una recarga (incluida la
+# automatica cada 5 min): al cambiar de pestana NO se toca, para no confundir.
+_POS_JS = ("<script>(function(){"
+           "var K='pos:'+location.pathname,F='posact:'+location.pathname;"
+           "function y(){return window.scrollY||window.pageYOffset||0;}"
+           "function guardar(){try{sessionStorage.setItem(K,String(y()));}catch(e){}}"
+           "document.addEventListener('submit',function(){guardar();"
+           "try{sessionStorage.setItem(F,'1');}catch(e){}},true);"
+           "window.addEventListener('beforeunload',guardar);"
+           "function esRecarga(){try{var n=performance.getEntriesByType('navigation')[0];"
+           "if(n)return n.type==='reload';"
+           "return !!(performance.navigation&&performance.navigation.type===1);}catch(e){return false;}}"
+           "function rest(){try{"
+           "if(sessionStorage.getItem(F))sessionStorage.removeItem(F);"
+           "else if(!esRecarga())return;"
+           "var v=sessionStorage.getItem(K);if(v===null)return;"
+           "var p=parseInt(v,10);if(p>0)window.scrollTo(0,p);}catch(e){}}"
+           "if(document.readyState==='complete')rest();else window.addEventListener('load',rest);"
+           "})();</script>")
 
 # Base de estilos COMPARTIDA por los apartados del panel (fuente unica de tokens y
 # componentes). Se incluye al PRINCIPIO del <style> de cada pagina migrada; las reglas
@@ -4932,7 +4962,7 @@ def nav(active=""):
         elogo = f'<img class="elogo" src="{html.escape(emp["logo"])}" alt="">' if tiene_logo else ""
         enom = f'<span class="en">{html.escape(emp["nombre"])}</span>' if emp.get("nombre") else ""
         empbar = f'<div class="empbar"><div class="empwrap">{elogo}{enom}</div></div>'
-    return _NAV_CSS + _SORT_JS + navbar + empbar
+    return _NAV_CSS + _SORT_JS + _POS_JS + navbar + empbar
 
 # compat: algunas plantillas todavia interpolan {NAV} (barra sin pestana activa marcada)
 NAV = nav()
@@ -6153,7 +6183,9 @@ address-list y TTL. Marca <b>Habilitar</b>.</li>
 <p>En la tabla <b>Enviados manualmente</b> puedes <b>ordenar por cualquier columna</b>: haz
 clic en la cabecera (CPE, Lista, Por, Enviado, Ultima revision&hellip;) para ordenar de forma
 <b>ascendente</b>, y otra vez para <b>descendente</b>. Las columnas de fecha ordenan por
-tiempo real, no por texto.</p>
+tiempo real, no por texto. El orden que elijas <b>se conserva</b> al pulsar <b>Quitar</b> o
+al recargarse la pagina, y esta <b>vuelve a la altura donde estabas</b> en vez de saltar
+arriba del todo (tambien en el refresco automatico de cada 5 min).</p>
 <p><b>Seguridad:</b> usa un usuario API solo con <code>api,read,write,test</code> (no full), limita el
 servicio API a la IP del servidor Suricata, y si el enlace no es de confianza usa <b>API-SSL</b>. Si
 dejas el envio <b>deshabilitado</b>, la pestana Cuarentena solo <b>sugiere</b> (no toca el router).</p>

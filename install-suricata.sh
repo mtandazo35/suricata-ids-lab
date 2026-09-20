@@ -5111,6 +5111,20 @@ button.del:hover{{background:#f5d5d5}}
 a.edit{{background:#eef4fd;color:#1c5cab;border:1px solid #cfe0fb;padding:5px 12px;border-radius:8px;
 text-decoration:none;font-size:13px;font-weight:600}}a.edit:hover{{background:#dceafb}}
 a.cancel{{color:#8a8a86;text-decoration:none;font-size:13px}}a.cancel:hover{{color:#52514e}}
+.eximp-row{{display:flex;gap:14px;align-items:center;flex-wrap:wrap}}
+.eximp-imp{{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0}}
+.eximp-sep{{width:1px;align-self:stretch;background:#eceae6}}
+.ebtn{{display:inline-flex;align-items:center;padding:9px 16px;border-radius:9px;font:600 13px system-ui;
+cursor:pointer;text-decoration:none;border:1px solid transparent;transition:background .15s,border-color .15s}}
+.ebtn.exp{{background:#f2f6fc;color:#1c5cab;border-color:#d6e2f2}}.ebtn.exp:hover{{background:#e6eef9;border-color:#c2d5ee}}
+.ebtn.imp{{background:#2a78d6;color:#fff}}.ebtn.imp:hover{{background:#1c5cab}}
+.filepick{{display:inline-flex;align-items:center;gap:10px;border:1px dashed #cdd3da;border-radius:9px;
+padding:5px 10px 5px 5px;background:#fafbfc;cursor:pointer;max-width:100%}}
+.filepick:hover{{border-color:#9db4d6;background:#f5f8fc}}
+.filepick .filebtn{{background:#eceae6;color:#33322f;border-radius:7px;padding:6px 12px;font:600 13px system-ui;white-space:nowrap}}
+.filepick .fname{{font-size:12.5px;color:#8a8a86;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px}}
+.filepick input[type=file]{{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}}
+@media(max-width:520px){{.eximp-sep{{display:none}}.eximp-row,.eximp-imp{{width:100%}}.filepick{{flex:1}}}}
 @keyframes fadeout{{0%,74%{{opacity:1;transform:translateY(0)}}100%{{opacity:0;transform:translateY(-10px);visibility:hidden;margin:0;padding:0;height:0}}}}
 @media(max-width:820px){{
  main{{padding:16px 14px}}
@@ -5125,21 +5139,6 @@ a.cancel{{color:#8a8a86;text-decoration:none;font-size:13px}}a.cancel:hover{{col
 {banner}
 <div class=card><table><thead><tr><th>Tipo</th><th>IP</th><th>Puertos</th><th>Firma (SID)</th><th>Vigencia</th><th>Motivo</th><th></th></tr></thead>
 <tbody>{tabla}</tbody></table></div>
-<h2>Exportar / Importar</h2>
-<div class=card>
-<p class=sub style="margin:0 0 10px">Guarda tus exclusiones en un archivo <code>.json</code> o cargalas desde uno.
-Al importar, <b>reemplazan</b> las exclusiones actuales.</p>
-<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-<a class=edit href="/exclusiones/export" download="exclusiones.json">&#8681; Exportar JSON</a>
-<form method=post action="/exclusiones" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0"
- onsubmit="if(!document.getElementById('impjson').value){{alert('Elige un archivo JSON primero.');return false;}}">
-<input type=hidden name=accion value=import>
-<input type=hidden name=json id=impjson>
-<input type=file accept="application/json,.json" onchange="leerJSON(this)">
-<button type=submit class=primary style="margin:0">&#8679; Importar</button>
-</form></div>
-<script>function leerJSON(i){{var f=i.files&&i.files[0];if(!f)return;var r=new FileReader();r.onload=function(){{document.getElementById('impjson').value=r.result;}};r.readAsText(f);}}</script>
-</div>
 <h2>{titulo_form}</h2>
 <div class=card><form class=add method=post action="/exclusiones">
 <input type=hidden name=accion value=add>{hid_edit}
@@ -5157,6 +5156,26 @@ Al importar, <b>reemplazan</b> las exclusiones actuales.</p>
 </form></div>
 <p class=sub style="margin-top:16px">Ejemplos: tu DNS interno como <b>Destino</b> puerto <b>53</b>; tu servidor de
 monitoreo como <b>Origen</b> puerto <b>161</b>. Asi quitas el ruido sin perder de vista lo demas que hagan esas IPs.</p>
+<h2 style="margin-top:30px">Copia de seguridad</h2>
+<div class="card eximp">
+<p class=sub style="margin:0 0 14px">Guarda tus exclusiones en un archivo <code>.json</code> (respaldo o para pasarlas a otro
+sensor) o cargalas desde uno. Al importar, <b>reemplazan</b> todas las exclusiones actuales.</p>
+<div class=eximp-row>
+<a class="ebtn exp" href="/exclusiones/export" download="exclusiones.json">&#8681;&nbsp; Exportar JSON</a>
+<span class=eximp-sep></span>
+<form class=eximp-imp method=post action="/exclusiones"
+ onsubmit="if(!document.getElementById('impjson').value){{alert('Elige un archivo JSON primero.');return false;}}">
+<input type=hidden name=accion value=import>
+<input type=hidden name=json id=impjson>
+<label class=filepick><span class=filebtn>Elegir archivo</span><span id=fname class=fname>ningun archivo</span>
+<input type=file accept="application/json,.json" onchange="leerJSON(this)"></label>
+<button type=submit class="ebtn imp">&#8679;&nbsp; Importar</button>
+</form>
+</div>
+</div>
+<script>function leerJSON(i){{var f=i.files&&i.files[0];var n=document.getElementById('fname');
+if(!f){{if(n)n.textContent='ningun archivo';return;}}if(n)n.textContent=f.name;
+var r=new FileReader();r.onload=function(){{document.getElementById('impjson').value=r.result;}};r.readAsText(f);}}</script>
 </main></body></html>"""
     return body
 

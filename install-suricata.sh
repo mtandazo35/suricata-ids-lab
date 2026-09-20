@@ -3190,6 +3190,45 @@ def enviar_telegram(texto):
     except Exception:
         return False
 
+NOTIF_CUAR_FILE = "/var/log/suricata-notif-cuarentena.json"   # dedupe de avisos de cuarentena
+
+def notificar_cuarentena(ip, tipo, lista, quien=""):
+    """Aviso ACCIONABLE (Telegram) cuando un CPE va a cuarentena: cliente/abonado, confianza,
+    evidencia, accion aplicada y enlace a la ficha. Dedupe por IP: no re-notifica dentro de 6h."""
+    now = time.time()
+    try:
+        d = json.load(open(NOTIF_CUAR_FILE, encoding="utf-8"))
+    except Exception:
+        d = {}
+    if now - d.get(ip, 0) < 6 * 3600:
+        return
+    ab = abonado_de(ip)
+    cliente = f"{ab.get('nombre')} ({ip})" if ab.get("nombre") else ip
+    conf = ""; ev = ""
+    try:
+        cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
+        for k in ("candidatos", "dns_candidatos"):
+            for c in cq.get(k, []):
+                if c.get("ip") == ip:
+                    conf = c.get("confianza", "")
+                    ev = "; ".join((c.get("evidencias") or [])[:3])
+                    break
+    except Exception:
+        pass
+    base = conf_dash_get("PANEL_URL", "").rstrip("/")
+    link = f"{base}/cuarentena/ficha?ip={ip}" if base else f"panel -> Cuarentena -> Ver evidencia ({ip})"
+    txt = (f"\U0001f6a8 Cuarentena [{_hostname()}]: {cliente}\n"
+           f"Accion: enviado a lista '{lista}' ({tipo})" + (f" | confianza {conf}" if conf else "") + "\n"
+           + (f"Evidencia: {ev}\n" if ev else "")
+           + (f"Por: {quien}\n" if quien else "")
+           + f"Ficha: {link}")
+    if enviar_telegram(txt):
+        d[ip] = int(now)
+        try:
+            json.dump(d, open(NOTIF_CUAR_FILE, "w", encoding="utf-8"))
+        except OSError:
+            pass
+
 def _suricatasc(cmd):
     try:
         r = subprocess.run(["suricatasc", "-c", cmd], capture_output=True, text=True, timeout=8)
@@ -3365,6 +3404,7 @@ def aplicar_politicas():
             if ok:
                 env[ip] = {"cuando": int(time.time()), "score": sc, "por": "politica", "manual": False, "pol": True,
                            "motivo": _motivo_bloqueo(ip)}
+                notificar_cuarentena(ip, "politica de riesgo", lst, quien="politica")
                 mk_log("POLITICA-ENVIADO", ip, "politica", f"lista={lst} riesgo={sc}"); cambiado = True
         for ip in list(env.keys()):        # sacar los que entraron por politica y ya no califican
             if env[ip].get("pol") and ip not in deseado:
@@ -6428,6 +6468,7 @@ class H(BaseHTTPRequestHandler):
                            "manual": ip not in cand_ips, "motivo": _motivo_bloqueo(ip)}
                 guardar_enviados(env)
                 mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} ttl={m.get('TTL')}" + (" (manual)" if ip not in cand_ips else ""))
+                notificar_cuarentena(ip, "Infeccion CnC", m.get("LIST", ""), quien=getattr(CTX, "user", "?"))
                 globals()["FORCE_REGEN"] = True   # regenerar pronto para que el Top muestre 'En cuarentena'
                 nota = " (ya estaba en la lista)" if err else ""
                 return _fin(True, f"{ip} en la lista {m.get('LIST')}{nota}")
@@ -6467,6 +6508,9 @@ class H(BaseHTTPRequestHandler):
                     if "conexion" in (err or "").lower() or "login" in (err or "").lower():
                         break   # si el router no responde, no seguir intentando
             guardar_enviados(env)
+            if ok_n:
+                enviar_telegram(f"\U0001f6a8 Cuarentena masiva [{_hostname()}]: {ok_n} CPE de alta confianza "
+                                f"a la lista '{m.get('LIST')}' por {getattr(CTX, 'user', '?')}")
             resumen = f"Enviados {ok_n} a cuarentena" + (f", {err_n} con error ({ult_err})" if err_n else "")
             return self._redirect("/cuarentena?msg=" + _up.quote(resumen))
         if ruta == "/cuarentena/quitar":
@@ -6526,6 +6570,7 @@ class H(BaseHTTPRequestHandler):
                                "motivo": _motivo_bloqueo(ip)}
                     guardar_enviados(env, MK_SENT_DNS)
                     mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={lst} (dns)")
+                    notificar_cuarentena(ip, "DNS sospechoso", lst, quien=getattr(CTX, "user", "?"))
                     return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} enviado a la lista {lst}"))
                 mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), f"lista={lst} {err}")
                 return self._redirect("/cuarentena?msg=" + _up.quote(f"No se pudo enviar {ip}: {err}"))
@@ -6552,6 +6597,9 @@ class H(BaseHTTPRequestHandler):
                     if "conexion" in (err or "").lower() or "login" in (err or "").lower():
                         break
             guardar_enviados(env, MK_SENT_DNS)
+            if ok_n:
+                enviar_telegram(f"\U0001f6a8 DNS sospechoso masivo [{_hostname()}]: {ok_n} CPE de alta confianza "
+                                f"a la lista '{lst}' por {getattr(CTX, 'user', '?')}")
             return self._redirect("/cuarentena?msg=" + _up.quote(f"Enviados {ok_n} a {lst}" + (f", {err_n} con error ({ult_err})" if err_n else "")))
         return self._html("<h1>No encontrado</h1>", 404)
 

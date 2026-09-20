@@ -798,6 +798,56 @@ chmod 644 /etc/cron.d/suricata-feeds
 # primera carga ya (best-effort; si no hay internet, el score corre con reputacion=0)
 /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1 || true
 
+# --- Mapa "a donde atacan": assets del mapa (vendorizados) + base GeoIP IP->pais (offline) ---
+# Todo best-effort: si no hay internet en la instalacion, el mapa se dibuja vacio con un aviso
+# y el resto del panel funciona igual. Se puede reconstruir re-ejecutando el instalador.
+REPO_RAW="https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main"
+install -d -m 755 /var/lib/suricata-mapa /var/lib/suricata-geoip
+_mapa_get() {  # $1=archivo  $2=sha256 esperado
+  f="/var/lib/suricata-mapa/$1"
+  [ -f "$f" ] && [ "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" = "$2" ] && return 0
+  curl -fsSL "$REPO_RAW/vendor/mapa/$1" -o "$f.new" 2>/dev/null || { rm -f "$f.new"; echo "mapa: no se bajo $1 (sin internet?)"; return 1; }
+  if [ "$(sha256sum "$f.new" | cut -d' ' -f1)" = "$2" ]; then mv "$f.new" "$f"; echo "mapa: $1 OK"; else rm -f "$f.new"; echo "mapa: SHA no coincide en $1"; return 1; fi
+}
+_mapa_get countries-110m.json a73ecc17bac82de28af19fa593f9e1a2e76619c51855490da735b7883ec48715 || true
+_mapa_get topojson-client.min.js ec362ac1599ef406ea9e79616a4ad47d4a3b3939882d47da7e4bc827a56f629c || true
+if [ ! -s /var/lib/suricata-geoip/ipv4.bin ]; then
+  python3 - <<'GEOPY' || echo "geoip: no se construyo (el mapa quedara vacio hasta reconstruir)"
+import urllib.request, ipaddress, array, struct, os
+URL = "https://raw.githubusercontent.com/sapics/ip-location-db/main/geo-whois-asn-country/geo-whois-asn-country-ipv4.csv"
+try:
+    data = urllib.request.urlopen(URL, timeout=180).read().decode("utf-8", "replace")
+except Exception as e:
+    raise SystemExit("descarga geoip fallo: %s" % e)
+rows = []
+for ln in data.splitlines():
+    p = ln.split(",")
+    if len(p) < 3:
+        continue
+    cc = p[2].strip().upper()
+    if len(cc) != 2 or not cc.isalpha():
+        continue
+    try:
+        s = int(ipaddress.IPv4Address(p[0].strip())); e = int(ipaddress.IPv4Address(p[1].strip()))
+    except Exception:
+        continue
+    if e >= s:
+        rows.append((s, e, cc))
+if len(rows) < 1000:
+    raise SystemExit("geoip: muy pocas filas (%d), aborto" % len(rows))
+rows.sort()
+starts = array.array("I", [r[0] for r in rows]); ends = array.array("I", [r[1] for r in rows])
+if starts.itemsize != 4:
+    raise SystemExit("geoip: array 'I' no es de 4 bytes en esta plataforma")
+ccb = b"".join(r[2].encode("ascii") for r in rows)
+tmp = "/var/lib/suricata-geoip/ipv4.bin.tmp"
+with open(tmp, "wb") as f:
+    f.write(struct.pack("<I", len(rows))); starts.tofile(f); ends.tofile(f); f.write(ccb)
+os.replace(tmp, "/var/lib/suricata-geoip/ipv4.bin")
+print("geoip: %d rangos -> /var/lib/suricata-geoip/ipv4.bin" % len(rows))
+GEOPY
+fi
+
 # --- reporte HTML grafico (puertos, IPs origen/destino, linea de tiempo, tabla) ---
 cat > /usr/local/bin/suricata-html-report <<'HREP'
 #!/usr/bin/env python3
@@ -812,6 +862,7 @@ Uso: suricata-html-report [horas]   (default 24)
 Salida: /var/log/suricata/report-AAAAMMDD-HHMM.html
 """
 import glob, gzip, io, json, os, re, sys, html, time, socket, urllib.request, urllib.error
+import array, struct, bisect
 from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 
@@ -1056,6 +1107,55 @@ by_dport = Counter()
 by_src = Counter()
 by_dst = Counter()
 by_hour = Counter()
+pais_dst = Counter()   # alertas por PAIS del destino (para el mapa "a donde atacan")
+
+# --- GeoIP IP->pais (offline, base de dominio publico ip-location-db, CC0) ---
+# Formato compacto en /var/lib/suricata-geoip/ipv4.bin: [uint32 N][N x start u32]
+# [N x end u32][N x 2 bytes cc]. Lo genera el instalador; aqui solo se consulta con
+# busqueda binaria (Python puro, sin dependencias). Si falta, pais() devuelve "".
+GEOIP_BIN = "/var/lib/suricata-geoip/ipv4.bin"
+_G_S = _G_E = _G_C = None
+_G_loaded = False
+_G_ok = False
+_geo_cache = {}
+
+def _geo_load():
+    global _G_S, _G_E, _G_C, _G_loaded, _G_ok
+    if _G_loaded:
+        return
+    _G_loaded = True
+    try:
+        with open(GEOIP_BIN, "rb") as f:
+            n = struct.unpack("<I", f.read(4))[0]
+            s = array.array("I"); s.fromfile(f, n)
+            e = array.array("I"); e.fromfile(f, n)
+            c = f.read(n * 2)
+        if n > 0 and len(c) == n * 2 and s.itemsize == 4:
+            _G_S, _G_E, _G_C, _G_ok = s, e, c, True
+    except Exception:
+        _G_ok = False
+
+def pais(ip):
+    """ISO2 del pais de una IPv4 publica (o '' si no se sabe / es privada / IPv6)."""
+    if not ip or ":" in ip:
+        return ""
+    v = _geo_cache.get(ip)
+    if v is not None:
+        return v
+    _geo_load()
+    r = ""
+    if _G_ok:
+        try:
+            a = _ipm.IPv4Address(ip)
+            if not (a.is_private or a.is_loopback or a.is_link_local or a.is_multicast):
+                n = int(a)
+                i = bisect.bisect_right(_G_S, n) - 1
+                if i >= 0 and n <= _G_E[i]:
+                    r = _G_C[2 * i:2 * i + 2].decode("ascii", "ignore")
+        except Exception:
+            r = ""
+    _geo_cache[ip] = r
+    return r
 flujos = {}            # (src,sport,dst,dport,proto,sig) -> [count, first, last]
 ips_vistas = set()     # TODAS las IPs vistas en la ventana (cualquier evento, no solo alertas)
 MAX_IPS = 300000       # tope de cardinalidad del set (proteje la RAM en flotas grandes)
@@ -1166,6 +1266,9 @@ for p in files:
                 continue
             by_dst[dst] += 1
             by_src[src] += 1
+            _cc = pais(dst)                    # pais del destino (mapa "a donde atacan")
+            if _cc:
+                pais_dst[_cc] += 1
             if dport != "":
                 by_dport[f"{dport}/{proto}"] += 1
             # --- senales de riesgo por CPE ---
@@ -1759,8 +1862,100 @@ def top_origenes_section(n_src=5, n_sub=8):
         "<span style='color:#a15c12;font-weight:700'>naranja</span> = dominio del dueño pero no es un gran servicio; "
         "<b>sin PTR</b> = IP sin nombre publico (frecuente en botnets/hosting sucio).</p>"
         f"<div class=\"topwrap\">{''.join(cards)}</div></section>"
-        + top_destinos_section() +
+        + top_destinos_section() + mapa_ataques_section() +
         "<!--TOP_FIN-->")
+
+# id numerico del TopoJSON (countries-110m) -> ISO2, y nombres, para el mapa del cliente.
+_MAP_NUM2ISO = ("{4:'AF',8:'AL',12:'DZ',24:'AO',32:'AR',36:'AU',40:'AT',50:'BD',56:'BE',64:'BT',"
+    "68:'BO',76:'BR',100:'BG',104:'MM',116:'KH',120:'CM',124:'CA',144:'LK',152:'CL',156:'CN',"
+    "170:'CO',180:'CD',188:'CR',191:'HR',192:'CU',196:'CY',203:'CZ',204:'BJ',208:'DK',214:'DO',"
+    "218:'EC',818:'EG',222:'SV',231:'ET',246:'FI',250:'FR',266:'GA',276:'DE',288:'GH',300:'GR',"
+    "320:'GT',332:'HT',340:'HN',348:'HU',356:'IN',360:'ID',364:'IR',368:'IQ',372:'IE',376:'IL',"
+    "380:'IT',388:'JM',392:'JP',400:'JO',404:'KE',408:'KP',410:'KR',414:'KW',418:'LA',422:'LB',"
+    "430:'LR',434:'LY',442:'LU',484:'MX',504:'MA',508:'MZ',516:'NA',524:'NP',528:'NL',540:'NC',"
+    "554:'NZ',558:'NI',566:'NG',578:'NO',586:'PK',591:'PA',598:'PG',604:'PE',608:'PH',616:'PL',"
+    "620:'PT',630:'PR',634:'QA',642:'RO',643:'RU',682:'SA',686:'SN',694:'SL',706:'SO',710:'ZA',"
+    "724:'ES',729:'SD',752:'SE',756:'CH',760:'SY',762:'TJ',764:'TH',792:'TR',800:'UG',804:'UA',"
+    "784:'AE',826:'GB',840:'US',858:'UY',860:'UZ',862:'VE',704:'VN',887:'YE',894:'ZM',716:'ZW',"
+    "70:'BA',807:'MK',499:'ME',688:'RS',51:'AM',31:'AZ',112:'BY',268:'GE',398:'KZ',417:'KG',"
+    "498:'MD',496:'MN',795:'TM'}")
+_MAP_NAMES = ("{AF:'Afganistan',AR:'Argentina',AU:'Australia',AT:'Austria',BD:'Bangladesh',BE:'Belgica',"
+    "BO:'Bolivia',BR:'Brasil',BG:'Bulgaria',CA:'Canada',CL:'Chile',CN:'China',CO:'Colombia',CR:'Costa Rica',"
+    "CU:'Cuba',CZ:'Chequia',DK:'Dinamarca',DO:'Rep. Dominicana',EC:'Ecuador',EG:'Egipto',SV:'El Salvador',"
+    "FI:'Finlandia',FR:'Francia',DE:'Alemania',GR:'Grecia',GT:'Guatemala',HN:'Honduras',HU:'Hungria',"
+    "IN:'India',ID:'Indonesia',IR:'Iran',IQ:'Irak',IE:'Irlanda',IL:'Israel',IT:'Italia',JP:'Japon',"
+    "KZ:'Kazajistan',KE:'Kenia',KR:'Corea del Sur',KP:'Corea del Norte',MX:'Mexico',MA:'Marruecos',"
+    "NL:'Paises Bajos',NZ:'Nueva Zelanda',NI:'Nicaragua',NG:'Nigeria',NO:'Noruega',PK:'Pakistan',"
+    "PA:'Panama',PY:'Paraguay',PE:'Peru',PH:'Filipinas',PL:'Polonia',PT:'Portugal',RO:'Rumania',"
+    "RU:'Rusia',SA:'Arabia Saudita',RS:'Serbia',SG:'Singapur',ZA:'Sudafrica',ES:'Espana',SE:'Suecia',"
+    "CH:'Suiza',SY:'Siria',TW:'Taiwan',TH:'Tailandia',TR:'Turquia',UA:'Ucrania',AE:'Emiratos AU',"
+    "GB:'Reino Unido',US:'Estados Unidos',UY:'Uruguay',UZ:'Uzbekistan',VE:'Venezuela',VN:'Vietnam',"
+    "HK:'Hong Kong',BY:'Bielorrusia',MD:'Moldavia',BZ:'Belice'}")
+
+def mapa_ataques_section():
+    """Mapa mundial (coropleta por pais) de los DESTINOS de las alertas: a donde atacan los
+    CPEs. Se dibuja en el navegador con el TopoJSON vendorizado; el color = nº de alertas."""
+    datos = {k: v for k, v in pais_dst.items() if k}
+    total = sum(datos.values())
+    intro = ("Los paises <b>destino</b> de las alertas (a donde va el trafico sospechoso). El color "
+             "sube con el nº de alertas. Geolocalizacion <b>offline</b> (base de dominio publico); "
+             "las IPs privadas o sin pais no cuentan.")
+    if not datos:
+        aviso = ("<div class='mapempty'>Sin datos de pais todavia. Puede que la base GeoIP aun no este "
+                 "instalada (<code>/var/lib/suricata-geoip/ipv4.bin</code>) o que los destinos recientes "
+                 "sean IPs privadas / sin pais.</div>")
+    else:
+        aviso = ""
+    return (
+        "<style>"
+        ".attmap .mapwrap{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}"
+        ".attmap .mapsvg{flex:1 1 520px;min-width:280px;background:#f7f9fc;border:1px solid #e7e6e2;border-radius:10px;overflow:hidden}"
+        ".attmap #attackmap{width:100%;height:auto;display:block}"
+        ".attmap #attackmap path{transition:fill .2s}.attmap #attackmap path:hover{stroke:#0b0b0b;stroke-width:.8}"
+        ".attmap .maptop{flex:1 1 240px;min-width:220px}"
+        ".attmap .maprow{display:flex;align-items:center;gap:9px;padding:5px 0;border-bottom:1px solid #f2f1ee;font-size:13px}"
+        ".attmap .maprow .cc{font:700 11px ui-monospace,Consolas,monospace;background:#eef2f7;color:#33322f;border-radius:5px;padding:2px 6px}"
+        ".attmap .maprow .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+        ".attmap .maprow .ct{font-weight:700;font-variant-numeric:tabular-nums}"
+        ".attmap .mapbar{height:6px;border-radius:4px;background:#e34948;min-width:6px}"
+        ".attmap .mapempty{color:#6b6a66;font-size:13px;background:#faf9f6;border:1px dashed #e0dfda;border-radius:8px;padding:12px 14px;margin-top:8px}"
+        "@media(max-width:820px){.attmap .mapsvg{flex-basis:100%}}"
+        "</style>"
+        "<section class=\"card attmap\" style=\"margin-top:16px\"><h2>A donde atacan tus CPEs (destino por pais)</h2>"
+        "<p class=\"muted\" style=\"margin:0 0 12px\">" + intro + "</p>" + aviso +
+        "<div class=mapwrap><div class=mapsvg><svg id=attackmap viewBox=\"0 0 1000 500\" "
+        "preserveAspectRatio=\"xMidYMid meet\" role=img aria-label=\"Mapa de destinos\"></svg></div>"
+        "<div class=maptop id=attacktop></div></div>"
+        "<script>window.__ATTACK_GEO=" + json.dumps(datos) + ";window.__ATTACK_TOTAL=" + str(total) + ";</script>"
+        "<script src=\"/vendor/mapa/topojson-client.min.js\"></script>"
+        "<script>(function(){"
+        "var DATA=window.__ATTACK_GEO||{},NUM2=" + _MAP_NUM2ISO + ",NAMES=" + _MAP_NAMES + ";"
+        "var W=1000,H=500,svg=document.getElementById('attackmap');if(!svg)return;"
+        "function proj(lo,la){return [(lo+180)*(W/360),(90-la)*(H/180)];}"
+        "function heat(f){f=f<0?0:(f>1?1:f);var st=[[0,[43,120,214]],[.35,[27,175,122]],[.65,[237,161,0]],[.85,[235,104,52]],[1,[227,73,72]]];"
+        "for(var j=0;j<st.length-1;j++){var a=st[j][0],ca=st[j][1],b=st[j+1][0],cb=st[j+1][1];"
+        "if(f<=b){var t=b>a?(f-a)/(b-a):0,r=Math.round(ca[0]+(cb[0]-ca[0])*t),g=Math.round(ca[1]+(cb[1]-ca[1])*t),bl=Math.round(ca[2]+(cb[2]-ca[2])*t);"
+        "return 'rgb('+r+','+g+','+bl+')';}}return '#e34948';}"
+        "function ringD(r){var d='';for(var i=0;i<r.length;i++){var p=proj(r[i][0],r[i][1]);d+=(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1);}return d+'Z';}"
+        "function geomD(g){var d='';if(!g)return d;if(g.type==='Polygon'){g.coordinates.forEach(function(r){d+=ringD(r);});}"
+        "else if(g.type==='MultiPolygon'){g.coordinates.forEach(function(pl){pl.forEach(function(r){d+=ringD(r);});});}return d;}"
+        "var mx=0;for(var k in DATA){if(DATA[k]>mx)mx=DATA[k];}if(mx<1)mx=1;"
+        "function esc(s){return String(s).replace(/[&<>\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c];});}"
+        "fetch('/vendor/mapa/countries-110m.json').then(function(r){return r.json();}).then(function(topo){"
+        "var feats=topojson.feature(topo,topo.objects.countries).features,frag='';"
+        "feats.forEach(function(ft){var iso=NUM2[+ft.id]||'',c=DATA[iso]||0;"
+        "var fill=c>0?heat(c/mx):'#e7ebf0';var nm=NAMES[iso]||iso||'?';"
+        "frag+='<path d=\"'+geomD(ft.geometry)+'\" fill=\"'+fill+'\" stroke=\"#fff\" stroke-width=\"0.4\">"
+        "<title>'+esc(nm)+(c>0?': '+c+' alertas':'')+'</title></path>';});"
+        "svg.innerHTML=frag;"
+        "}).catch(function(e){var w=document.getElementById('attacktop');if(w)w.innerHTML='<div class=mapempty>No se pudo cargar el mapa.</div>';});"
+        "var rows=Object.keys(DATA).map(function(k){return [k,DATA[k]];}).sort(function(a,b){return b[1]-a[1];}).slice(0,10);"
+        "var tot=window.__ATTACK_TOTAL||0,html='';"
+        "rows.forEach(function(kv){var iso=kv[0],c=kv[1],nm=NAMES[iso]||iso,pct=tot?Math.max(6,Math.round(c/rows[0][1]*120)):6;"
+        "html+='<div class=maprow><span class=cc>'+esc(iso)+'</span><span class=nm>'+esc(nm)+'</span>"
+        "<span class=mapbar style=\"width:'+pct+'px\"></span><span class=ct>'+c+'</span></div>';});"
+        "var w=document.getElementById('attacktop');if(w)w.innerHTML=html?('<div style=\"font-weight:700;font-size:13px;margin:0 0 4px\">Top paises destino</div>'+html):'';"
+        "})();</script></section>")
 
 def _dst_badge(dst):
     """Chip del dueño/reputacion de una IP destino, para la cabecera de su tarjeta."""
@@ -5620,6 +5815,8 @@ en <code>/etc/suricata-report.conf</code>. Se envia cada dia a las 07:30.</li>
 <tr><td>Alertas / logs</td><td><code>/var/log/suricata/fast.log</code>, <code>eve.json</code></td></tr>
 <tr><td>Estado de servicios</td><td><code>systemctl status suricata evebox tzsp-decap suricata-dashboard</code></td></tr>
 <tr><td>Ver logs en vivo</td><td><code>journalctl -u suricata-dashboard -f</code></td></tr>
+<tr><td>Base GeoIP del mapa</td><td><code>/var/lib/suricata-geoip/ipv4.bin</code> (IP&rarr;pais, offline)</td></tr>
+<tr><td>Assets del mapa</td><td><code>/var/lib/suricata-mapa/</code> (TopoJSON + topojson-client)</td></tr>
 </table>
 
 <h2>Espejo MikroTik y HOME_NET (por que a veces no se ven datos)</h2>
@@ -5793,6 +5990,23 @@ actual</b> en <code>/root/backups/panel/</code> (conserva 5) y reinicia el panel
 configuracion (usuarios, exclusiones, empresa, IPs de confianza, <code>.conf</code>, suricata.yaml ni
 las units). El registro queda en <code>/tmp/suricata-panel-update.log</code> y el resultado en
 <code>/var/log/suricata-update-result.json</code>.</p>
+
+<h2>Mapa: a donde atacan tus CPEs</h2>
+<p>En la pestana <b>Top origenes</b>, debajo de los rankings, hay un <b>mapa mundial</b> que
+pinta los <b>paises destino</b> de las alertas (a donde va el trafico sospechoso de tus CPEs).
+El color sube con el nº de alertas y al lado sale el <b>Top paises destino</b>.</p>
+<ul>
+<li><b>Geolocalizacion offline:</b> la IP destino se traduce a pais con una base
+<b>IP&rarr;pais de dominio publico</b> (ip-location-db, CC0) que se guarda en el servidor
+(<code>/var/lib/suricata-geoip/ipv4.bin</code>). No usa servicios externos en caliente.</li>
+<li><b>Solo destinos publicos:</b> las IPs privadas (tu red) o sin pais no cuentan en el mapa.</li>
+<li><b>El mapa</b> se dibuja en el navegador con un <b>TopoJSON</b> del mundo servido por el
+propio panel (<code>/var/lib/suricata-mapa/</code>); no llama a ningun CDN externo.</li>
+<li>Si el mapa sale vacio, casi siempre es que la base GeoIP no se instalo (no habia internet
+en la instalacion). Se reconstruye re-ejecutando el instalador o con el boton <b>Actualizar</b>.</li>
+</ul>
+<p class="muted" style="color:#52514e;font-size:12px">Mapa inspirado en
+<b>MikroDash</b> (MIT). Geometria del mundo: World Atlas / Natural Earth (dominio publico).</p>
 
 <h2>Reinstalar o actualizar</h2>
 <p>Todo esta en un instalador idempotente. Para actualizar a la ultima version
@@ -6583,6 +6797,23 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(img)
             return
+        if path.startswith("/vendor/mapa/"):
+            # assets del mapa mundial (TopoJSON + topojson-client), publicos y cacheables
+            fname = path.rsplit("/", 1)[-1]
+            ct = {"countries-110m.json": "application/json",
+                  "topojson-client.min.js": "application/javascript"}.get(fname)
+            if ct:
+                try:
+                    with open(os.path.join("/var/lib/suricata-mapa", fname), "rb") as f:
+                        data = f.read()
+                except OSError:
+                    self.send_error(404); return
+                self.send_response(200)
+                self.send_header("Content-Type", ct + "; charset=utf-8")
+                self.send_header("Cache-Control", "public, max-age=604800, immutable")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers(); self.wfile.write(data); return
+            self.send_error(404); return
         if not ip_confiable(self._client_ip()):
             return self._html("<!doctype html><meta charset=utf-8><title>Acceso restringido</title>"
                               "<div style='font:15px system-ui;max-width:520px;margin:60px auto;padding:24px;text-align:center'>"
@@ -7565,6 +7796,41 @@ date '+%Y-%m-%d %H:%M:%S' > /etc/suricata-dashboard.updated
 [ -n "$SHA" ] && printf '%s' "$SHA" > /etc/suricata-dashboard.commit
 rm -f /var/log/suricata-update-check.json   # invalidar el cache: ya no hay update pendiente
 log "actualizado OK (${SHA:-main}); regenerando reporte y reiniciando panel"
+# provisionar (best-effort) los assets del mapa y la base GeoIP si faltan, para que las cajas
+# que actualizan por el boton (no re-instalan) tengan el mapa "a donde atacan".
+REF="${SHA:-$REPO_BRANCH}"
+mkdir -p /var/lib/suricata-mapa /var/lib/suricata-geoip 2>/dev/null || true
+for pair in "countries-110m.json a73ecc17bac82de28af19fa593f9e1a2e76619c51855490da735b7883ec48715" \
+            "topojson-client.min.js ec362ac1599ef406ea9e79616a4ad47d4a3b3939882d47da7e4bc827a56f629c"; do
+  fn=${pair%% *}; want=${pair##* }; dst="/var/lib/suricata-mapa/$fn"
+  [ -f "$dst" ] && [ "$(sha256sum "$dst" 2>/dev/null | cut -d' ' -f1)" = "$want" ] && continue
+  if curl -fsSL "https://raw.githubusercontent.com/${REPO_USER}/${REPO_NAME}/${REF}/vendor/mapa/$fn" -o "$dst.new" 2>/dev/null \
+     && [ "$(sha256sum "$dst.new" | cut -d' ' -f1)" = "$want" ]; then mv "$dst.new" "$dst"; log "mapa: $fn OK"; else rm -f "$dst.new"; log "mapa: no se pudo $fn"; fi
+done
+if [ ! -s /var/lib/suricata-geoip/ipv4.bin ]; then
+  python3 - >/dev/null 2>&1 <<'GEOPY' && log "geoip: base construida" || log "geoip: no se construyo (mapa vacio hasta reconstruir)"
+import urllib.request, ipaddress, array, struct, os
+URL="https://raw.githubusercontent.com/sapics/ip-location-db/main/geo-whois-asn-country/geo-whois-asn-country-ipv4.csv"
+data=urllib.request.urlopen(URL, timeout=180).read().decode("utf-8","replace")
+rows=[]
+for ln in data.splitlines():
+    p=ln.split(",")
+    if len(p)<3: continue
+    cc=p[2].strip().upper()
+    if len(cc)!=2 or not cc.isalpha(): continue
+    try: s=int(ipaddress.IPv4Address(p[0].strip())); e=int(ipaddress.IPv4Address(p[1].strip()))
+    except Exception: continue
+    if e>=s: rows.append((s,e,cc))
+assert len(rows)>=1000
+rows.sort()
+st=array.array("I",[r[0] for r in rows]); en=array.array("I",[r[1] for r in rows])
+assert st.itemsize==4
+cc=b"".join(r[2].encode("ascii") for r in rows)
+tmp="/var/lib/suricata-geoip/ipv4.bin.tmp"
+open(tmp,"wb").write(struct.pack("<I",len(rows))+st.tobytes()+en.tobytes()+cc)
+os.replace(tmp,"/var/lib/suricata-geoip/ipv4.bin")
+GEOPY
+fi
 # regenerar el reporte YA con el codigo nuevo (respetando la ventana VENTANA_MIN), para
 # que los cambios (tablas/graficos) se vean sin esperar los 30 min del ciclo normal
 VMIN=$(awk -F= '/^VENTANA_MIN=/{print $2}' /etc/suricata-dashboard.conf 2>/dev/null); [ -n "$VMIN" ] || VMIN=1440

@@ -1108,6 +1108,10 @@ by_src = Counter()
 by_dst = Counter()
 by_hour = Counter()
 pais_dst = Counter()   # alertas por PAIS del destino (para el mapa "a donde atacan")
+# detalle por pais para el mapa: que IPs destino, que puertos y que CPEs (tu red) peticionan
+pais_ips = defaultdict(Counter)     # cc -> Counter(ip_destino -> alertas)
+pais_ports = defaultdict(Counter)   # cc -> Counter("dport/proto" -> alertas)
+pais_srcs = defaultdict(Counter)    # cc -> Counter(cpe_origen -> alertas)
 
 # --- GeoIP IP->pais (offline, base DB-IP lite via ip-location-db, CC-BY-4.0) ---
 # Formato compacto en /var/lib/suricata-geoip/ipv4.bin: [uint32 N][N x start u32]
@@ -1269,6 +1273,10 @@ for p in files:
             _cc = pais(dst)                    # pais del destino (mapa "a donde atacan")
             if _cc:
                 pais_dst[_cc] += 1
+                pais_ips[_cc][dst] += 1        # detalle del mapa: a que IPs y puertos, y desde que CPE
+                pais_srcs[_cc][src] += 1
+                if dport != "":
+                    pais_ports[_cc][f"{dport}/{proto}"] += 1
             if dport != "":
                 by_dport[f"{dport}/{proto}"] += 1
             # --- senales de riesgo por CPE ---
@@ -1903,13 +1911,25 @@ def _mapa_origen():
 
 def mapa_ataques_section():
     """Mapa mundial (coropleta por pais) de los DESTINOS de las alertas + arcos animados desde
-    tu red hacia cada pais (de donde -> a donde). Se dibuja en el navegador con el TopoJSON."""
+    tu red hacia cada pais (de donde -> a donde). Con zoom por pais y detalle de que IPs,
+    que puertos y que CPEs peticionan. Se dibuja en el navegador con el TopoJSON."""
     datos = {k: v for k, v in pais_dst.items() if k}
     total = sum(datos.values())
+    # Detalle por pais para el tooltip y el panel: a que IPs destino, por que puertos y desde
+    # que CPEs de tu red. Se recortan los top para no inflar el HTML (se indica cuantos faltan).
+    det = {}
+    for cc in datos:
+        det[cc] = {
+            "ips": [[ip, n] for ip, n in pais_ips[cc].most_common(6)],
+            "ports": [[p, n] for p, n in pais_ports[cc].most_common(6)],
+            "srcs": [[s, n] for s, n in pais_srcs[cc].most_common(4)],
+            "nip": len(pais_ips[cc]), "npt": len(pais_ports[cc]), "nsr": len(pais_srcs[cc]),
+        }
     intro = ("Los paises <b>destino</b> de las alertas (a donde va el trafico sospechoso de tus "
              "CPEs). El color sube con el nº de alertas; los <b>arcos animados</b> muestran el flujo "
-             "desde tu red hacia cada pais. Geolocalizacion <b>offline</b>; las IPs privadas o sin "
-             "pais no cuentan.")
+             "desde tu red hacia cada pais. <b>Pasa el mouse</b> por un pais para ver a que IPs y "
+             "puertos se peticiona, y <b>haz clic para acercar</b>. Geolocalizacion <b>offline</b>; "
+             "las IPs privadas o sin pais no cuentan.")
     if not datos:
         aviso = ("<div class='mapempty'>Sin datos de pais todavia. Puede que la base GeoIP aun no este "
                  "instalada (<code>/var/lib/suricata-geoip/ipv4.bin</code>) o que los destinos recientes "
@@ -1919,14 +1939,43 @@ def mapa_ataques_section():
     return (
         "<style>"
         ".attmap .mapwrap{display:block}"
-        ".attmap .mapsvg{width:100%;background:#f7f9fc;border:1px solid #e7e6e2;border-radius:10px;overflow:hidden}"
-        ".attmap #attackmap{width:100%;height:auto;display:block}"
-        ".attmap #attackmap path{transition:fill .2s}.attmap #attackmap path:hover{stroke:#0b0b0b;stroke-width:.8}"
+        ".attmap .mapsvg{position:relative;width:100%;background:#f7f9fc;border:1px solid #e7e6e2;border-radius:10px;overflow:hidden}"
+        ".attmap #attackmap{width:100%;height:auto;display:block;cursor:grab}"
+        ".attmap #attackmap.grab{cursor:grabbing}"
+        ".attmap #attackmap path{transition:fill .2s}.attmap #attackmap path:hover{stroke:#0b0b0b;stroke-width:1}"
+        ".attmap #attackmap path.sel{stroke:#0b0b0b;stroke-width:1.4}"
+        # --- controles de zoom (esquina del mapa) ---
+        ".attmap .mapctl{position:absolute;top:8px;right:8px;display:flex;gap:6px;z-index:3}"
+        ".attmap .mapctl button{height:28px;min-width:28px;padding:0;border:1px solid #d7d6d2;background:#fff;color:#33322f;"
+        "border-radius:7px;font:700 15px system-ui;line-height:1;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12)}"
+        ".attmap .mapctl button.wide{padding:0 10px;font:600 12px system-ui}"
+        ".attmap .mapctl button:hover{background:#eef2f7;border-color:#2a78d6;color:#2a78d6}"
+        # --- tooltip flotante con el detalle del pais ---
+        ".attmap .maptip{position:absolute;z-index:4;display:none;width:266px;background:#fff;border:1px solid #d7d6d2;"
+        "border-radius:10px;box-shadow:0 8px 26px rgba(0,0,0,.18);padding:10px 12px;font-size:12.5px;line-height:1.45;pointer-events:none}"
+        ".attmap .maptip h4{margin:0 0 3px;font-size:13.5px;display:flex;align-items:center;gap:7px}"
+        ".attmap .maptip .dir{color:#6b6a66;font-size:11.5px;margin:0 0 4px}"
+        ".attmap .grp{margin:7px 0 0}"
+        ".attmap .glbl{font-weight:700;font-size:10.5px;color:#8a8984;text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px}"
+        ".attmap .it{display:flex;justify-content:space-between;gap:10px;font:12px ui-monospace,Consolas,monospace}"
+        ".attmap .it span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+        ".attmap .mas{color:#9a9a95;font-size:11px;margin-top:1px}"
+        ".attmap .cc{font:700 11px ui-monospace,Consolas,monospace;background:#eef2f7;color:#33322f;border-radius:5px;padding:2px 6px}"
+        # --- panel de detalle (al hacer clic en un pais): se queda fijo y se lee en movil ---
+        ".attmap .mapdet{display:none;margin-top:10px;border:1px solid #e7e6e2;border-radius:10px;padding:12px 14px;background:#fbfcfe}"
+        ".attmap .mapdethdr{display:flex;align-items:center;gap:9px;flex-wrap:wrap}"
+        ".attmap .mapdethdr b{font-size:14.5px}"
+        ".attmap .mapdethdr .dsub{color:#6b6a66;font-size:12px;flex:1;min-width:180px}"
+        ".attmap .dclose{margin-left:auto;border:1px solid #d7d6d2;background:#fff;width:26px;height:26px;border-radius:50%;"
+        "font-size:16px;line-height:1;cursor:pointer;color:#6b6a66}"
+        ".attmap .dclose:hover{background:#f2f1ee;color:#0b0b0b}"
+        ".attmap .mapdetgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px 20px;margin-top:10px}"
+        ".attmap .maphint{color:#9a9a95;font-size:11.5px;margin:7px 0 0}"
         ".attmap .maptop{margin-top:12px}"
         ".attmap .maptophdr{font-weight:700;font-size:13px;margin:0 0 6px}"
         ".attmap .maptopgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:0 22px}"
-        ".attmap .maprow{display:flex;align-items:center;gap:9px;padding:5px 0;border-bottom:1px solid #f2f1ee;font-size:13px}"
-        ".attmap .maprow .cc{font:700 11px ui-monospace,Consolas,monospace;background:#eef2f7;color:#33322f;border-radius:5px;padding:2px 6px}"
+        ".attmap .maprow{display:flex;align-items:center;gap:9px;padding:5px 0;border-bottom:1px solid #f2f1ee;font-size:13px;cursor:pointer}"
+        ".attmap .maprow:hover{background:#f4f7fb}"
         ".attmap .maprow .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
         ".attmap .maprow .ct{font-weight:700;font-variant-numeric:tabular-nums}"
         ".attmap .mapbar{height:6px;border-radius:4px;background:#e34948;min-width:6px}"
@@ -1935,14 +1984,25 @@ def mapa_ataques_section():
         "<section class=\"card attmap\" style=\"margin-top:16px\"><h2>A donde atacan tus CPEs (destino por pais)</h2>"
         "<p class=\"muted\" style=\"margin:0 0 12px\">" + intro + "</p>" + aviso +
         "<div class=mapwrap><div class=mapsvg><svg id=attackmap viewBox=\"0 20 1000 392\" "
-        "preserveAspectRatio=\"xMidYMid meet\" role=img aria-label=\"Mapa de destinos\"></svg></div>"
+        "preserveAspectRatio=\"xMidYMid meet\" role=img aria-label=\"Mapa de destinos\"></svg>"
+        "<div class=mapctl>"
+        "<button type=button id=mzin title=\"Acercar\">+</button>"
+        "<button type=button id=mzout title=\"Alejar\">&minus;</button>"
+        "<button type=button id=mzrst class=wide title=\"Volver al mundo entero\">Vista completa</button>"
+        "</div><div class=maptip id=maptip></div></div>"
+        "<div class=mapdet id=mapdet></div>"
+        "<p class=maphint>Clic en un pais para acercarlo y ver su detalle &middot; arrastra para mover "
+        "&middot; <b>Ctrl + rueda</b> para zoom &middot; <b>Vista completa</b> para volver.</p>"
         "<div class=maptop id=attacktop></div></div>"
         "<script>window.__ATTACK_GEO=" + json.dumps(datos) + ";window.__ATTACK_TOTAL=" + str(total) +
+        ";window.__ATTACK_DET=" + json.dumps(det) +
         ";window.__ATTACK_HOME=" + json.dumps(_mapa_origen()) + ";</script>"
         "<script src=\"/vendor/mapa/topojson-client.min.js\"></script>"
         "<script>(function(){"
-        "var DATA=window.__ATTACK_GEO||{},NUM2=" + _MAP_NUM2ISO + ",NAMES=" + _MAP_NAMES + ";"
+        "var DATA=window.__ATTACK_GEO||{},DET=window.__ATTACK_DET||{},NUM2=" + _MAP_NUM2ISO + ",NAMES=" + _MAP_NAMES + ";"
         "var W=1000,H=500,svg=document.getElementById('attackmap');if(!svg)return;"
+        "var tip=document.getElementById('maptip'),panel=document.getElementById('mapdet'),box=svg.parentNode;"
+        "var BBOX={},sel='';"
         "function proj(lo,la){return [(lo+180)*(W/360),(90-la)*(H/180)];}"
         "function heat(f){f=f<0?0:(f>1?1:f);var st=[[0,[43,120,214]],[.35,[27,175,122]],[.65,[237,161,0]],[.85,[235,104,52]],[1,[227,73,72]]];"
         "for(var j=0;j<st.length-1;j++){var a=st[j][0],ca=st[j][1],b=st[j+1][0],cb=st[j+1][1];"
@@ -1959,13 +2019,66 @@ def mapa_ataques_section():
         "function centroid(g){var best=null,bn=0;function c(r){if(r.length>bn){bn=r.length;best=r;}}"
         "if(!g)return null;if(g.type==='Polygon')g.coordinates.forEach(c);else if(g.type==='MultiPolygon')g.coordinates.forEach(function(pl){pl.forEach(c);});"
         "if(!best)return null;var sx=0,sy=0;for(var i=0;i<best.length;i++){var p=proj(best[i][0],best[i][1]);sx+=p[0];sy+=p[1];}return [sx/best.length,sy/best.length];}"
+        # bbox del anillo MAS GRANDE (no de toda la geometria): asi el zoom de EEUU va al territorio
+        # continental y no se estira hasta Alaska/Hawaii, ni Rusia cruza el antimeridiano.
+        "function bboxMain(g){var best=null,bn=0;function c(r){if(r.length>bn){bn=r.length;best=r;}}"
+        "if(!g)return null;if(g.type==='Polygon')g.coordinates.forEach(c);else if(g.type==='MultiPolygon')g.coordinates.forEach(function(pl){pl.forEach(c);});"
+        "if(!best)return null;var x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;"
+        "for(var i=0;i<best.length;i++){var p=proj(best[i][0],best[i][1]);"
+        "if(p[0]<x0)x0=p[0];if(p[0]>x1)x1=p[0];if(p[1]<y0)y0=p[1];if(p[1]>y1)y1=p[1];}"
+        "return {x:x0,y:y0,w:Math.max(x1-x0,4),h:Math.max(y1-y0,4)};}"
+        # --- zoom / desplazamiento: se mueve el viewBox del SVG (nitido a cualquier escala) ---
+        "var VB0={x:0,y:20,w:1000,h:392},AR=VB0.w/VB0.h,vb={x:VB0.x,y:VB0.y,w:VB0.w,h:VB0.h};"
+        "function setVB(){svg.setAttribute('viewBox',vb.x.toFixed(1)+' '+vb.y.toFixed(1)+' '+vb.w.toFixed(1)+' '+vb.h.toFixed(1));}"
+        "function fit(b){if(!b)return;var pad=Math.max(b.w,b.h)*0.30+8,w=b.w+pad*2,h=b.h+pad*2;"
+        "if(w/h<AR)w=h*AR;else h=w/AR;if(w<60){w=60;h=w/AR;}"
+        "vb={x:b.x+b.w/2-w/2,y:b.y+b.h/2-h/2,w:w,h:h};setVB();}"
+        "function reset(){vb={x:VB0.x,y:VB0.y,w:VB0.w,h:VB0.h};setVB();}"
+        "function zoom(f,cx,cy){var nw=vb.w*f,nh=vb.h*f;"
+        "if(nw>VB0.w){nw=VB0.w;nh=VB0.h;}if(nw<60){nw=60;nh=nw/AR;}"
+        "if(cx===undefined){cx=vb.x+vb.w/2;cy=vb.y+vb.h/2;}"
+        "vb.x=cx-(cx-vb.x)*(nw/vb.w);vb.y=cy-(cy-vb.y)*(nh/vb.h);vb.w=nw;vb.h=nh;setVB();}"
+        "function at(e){var r=svg.getBoundingClientRect();"
+        "return [vb.x+(e.clientX-r.left)/r.width*vb.w,vb.y+(e.clientY-r.top)/r.height*vb.h];}"
+        # --- detalle de un pais: a que IPs, por que puertos y desde que CPEs (direccion saliente) ---
+        "function grupo(lbl,items,tot){if(!items||!items.length)return '';"
+        "var h='<div class=grp><div class=glbl>'+lbl+'</div>';"
+        "items.forEach(function(kv){h+='<div class=it><span>'+esc(kv[0])+'</span><b>'+kv[1]+'</b></div>';});"
+        "if(tot>items.length)h+='<div class=mas>+'+(tot-items.length)+' mas</div>';return h+'</div>';}"
+        "function dirTxt(iso){var nm=NAMES[iso]||iso||'?',c=DATA[iso]||0;"
+        "return c?('Direccion <b>saliente</b>: tus CPEs &rarr; '+esc(nm)+' &middot; <b>'+c+'</b> alertas')"
+        ":('Sin alertas hacia '+esc(nm)+' en la ventana.');}"
+        "function grupos(iso){var d=DET[iso];if(!d)return '';"
+        "return grupo('IPs destino (a donde)',d.ips,d.nip)+grupo('Puertos destino',d.ports,d.npt)"
+        "+grupo('CPEs de tu red (de donde)',d.srcs,d.nsr);}"
+        "function showTip(iso,e){if(!tip)return;"
+        "tip.innerHTML='<h4><span class=cc>'+esc(iso)+'</span>'+esc(NAMES[iso]||iso)+'</h4>'"
+        "+'<div class=dir>'+dirTxt(iso)+'</div>'+grupos(iso);"
+        "tip.style.display='block';var r=box.getBoundingClientRect();"
+        "var x=e.clientX-r.left+16,y=e.clientY-r.top+16,tw=tip.offsetWidth,th=tip.offsetHeight;"
+        "if(x+tw>r.width-6)x=e.clientX-r.left-tw-16;if(x<4)x=4;"
+        "if(y+th>r.height-6)y=Math.max(4,e.clientY-r.top-th-16);"
+        "tip.style.left=x+'px';tip.style.top=y+'px';}"
+        "function hideTip(){if(tip)tip.style.display='none';}"
+        "function marcar(iso){sel=iso;Array.prototype.forEach.call(svg.querySelectorAll('path[data-iso]'),function(p){"
+        "if(p.getAttribute('data-iso')===iso)p.classList.add('sel');else p.classList.remove('sel');});}"
+        "function abrir(iso){if(!panel)return;marcar(iso);fit(BBOX[iso]);"
+        "panel.innerHTML='<div class=mapdethdr><span class=cc>'+esc(iso)+'</span><b>'+esc(NAMES[iso]||iso)+'</b>'"
+        "+'<span class=dsub>'+dirTxt(iso)+'</span>'"
+        "+'<button type=button class=dclose title=\"Cerrar\">&times;</button></div>'"
+        "+'<div class=mapdetgrid>'+grupos(iso)+'</div>';"
+        "panel.style.display='block';"
+        "var b=panel.querySelector('.dclose');if(b)b.addEventListener('click',cerrar);}"
+        "function cerrar(){if(panel)panel.style.display='none';marcar('');reset();}"
         "var HOME=window.__ATTACK_HOME||[-78.1,-1.8],home=proj(HOME[0],HOME[1]);"
         "fetch('/vendor/mapa/countries-110m.json').then(function(r){return r.json();}).then(function(topo){"
         "var feats=topojson.feature(topo,topo.objects.countries).features,frag='',cents={};"
         "feats.forEach(function(ft){var iso=NUM2[+ft.id]||'',c=DATA[iso]||0;"
         "var fill=c>0?heat(c/mx):'#e7ebf0';var nm=NAMES[iso]||iso||'?';"
-        "frag+='<path d=\"'+geomD(ft.geometry)+'\" fill=\"'+fill+'\" stroke=\"#fff\" stroke-width=\"0.4\">"
+        "frag+='<path data-iso=\"'+esc(iso)+'\" d=\"'+geomD(ft.geometry)+'\" fill=\"'+fill+'\" stroke=\"#fff\" "
+        "stroke-width=\"0.4\" vector-effect=\"non-scaling-stroke\">"
         "<title>'+esc(nm)+(c>0?': '+c+' alertas':'')+'</title></path>';"
+        "if(iso){var bb=bboxMain(ft.geometry);if(bb)BBOX[iso]=bb;}"
         "if(c>0){var ce=centroid(ft.geometry);if(ce)cents[iso]=ce;}});"
         # --- flujo de donde -> a donde: arcos animados desde tu red hacia cada pais destino ---
         "var arcs='';Object.keys(cents).forEach(function(iso){var ce=cents[iso],n=DATA[iso];"
@@ -1973,20 +2086,44 @@ def mapa_ataques_section():
         "var mid=[(home[0]+ce[0])/2-dy*0.18,(home[1]+ce[1])/2+dx*0.18];"
         "var d='M'+home[0].toFixed(1)+' '+home[1].toFixed(1)+' Q'+mid[0].toFixed(1)+' '+mid[1].toFixed(1)+' '+ce[0].toFixed(1)+' '+ce[1].toFixed(1);"
         "var w=(0.8+1.8*(n/mx)).toFixed(2);"
-        "arcs+='<path d=\"'+d+'\" fill=\"none\" stroke=\"#e34948\" stroke-opacity=\"0.5\" stroke-width=\"'+w+'\"/>';"
-        "arcs+='<circle r=\"2.1\" fill=\"#e34948\"><animateMotion dur=\"'+(1.6+len/900).toFixed(1)+'s\" repeatCount=\"indefinite\" path=\"'+d+'\"/></circle>';});"
-        "if(Object.keys(cents).length){arcs+='<circle cx=\"'+home[0].toFixed(1)+'\" cy=\"'+home[1].toFixed(1)+'\" r=\"3\" fill=\"#0b0b0b\"/>';"
-        "arcs+='<circle cx=\"'+home[0].toFixed(1)+'\" cy=\"'+home[1].toFixed(1)+'\" r=\"3\" fill=\"none\" stroke=\"#0b0b0b\">"
+        "arcs+='<path d=\"'+d+'\" fill=\"none\" stroke=\"#e34948\" stroke-opacity=\"0.5\" stroke-width=\"'+w+'\" "
+        "vector-effect=\"non-scaling-stroke\" pointer-events=\"none\"/>';"
+        "arcs+='<circle r=\"2.1\" fill=\"#e34948\" pointer-events=\"none\"><animateMotion dur=\"'+(1.6+len/900).toFixed(1)+'s\" repeatCount=\"indefinite\" path=\"'+d+'\"/></circle>';});"
+        "if(Object.keys(cents).length){arcs+='<circle cx=\"'+home[0].toFixed(1)+'\" cy=\"'+home[1].toFixed(1)+'\" r=\"3\" fill=\"#0b0b0b\" pointer-events=\"none\"/>';"
+        "arcs+='<circle cx=\"'+home[0].toFixed(1)+'\" cy=\"'+home[1].toFixed(1)+'\" r=\"3\" fill=\"none\" stroke=\"#0b0b0b\" pointer-events=\"none\">"
         "<animate attributeName=\"r\" values=\"3;12\" dur=\"1.8s\" repeatCount=\"indefinite\"/>"
         "<animate attributeName=\"stroke-opacity\" values=\"0.55;0\" dur=\"1.8s\" repeatCount=\"indefinite\"/></circle>';}"
-        "svg.innerHTML=frag+arcs;"
+        "svg.innerHTML=frag+arcs;if(sel)marcar(sel);"
         "}).catch(function(e){var w=document.getElementById('attacktop');if(w)w.innerHTML='<div class=mapempty>No se pudo cargar el mapa.</div>';});"
+        # --- interaccion: hover = detalle, clic = acercar el pais, arrastrar = mover, Ctrl+rueda = zoom ---
+        "function isoDe(e){var t=e.target;return (t&&t.getAttribute)?(t.getAttribute('data-iso')||''):'';}"
+        "var drag=null,movido=false;"
+        "svg.addEventListener('mousedown',function(e){drag={x:e.clientX,y:e.clientY,vx:vb.x,vy:vb.y};movido=false;svg.classList.add('grab');});"
+        "window.addEventListener('mouseup',function(){if(drag){drag=null;svg.classList.remove('grab');}});"
+        "svg.addEventListener('mousemove',function(e){"
+        "if(drag){var r=svg.getBoundingClientRect(),dx=e.clientX-drag.x,dy=e.clientY-drag.y;"
+        "if(Math.abs(dx)>3||Math.abs(dy)>3){movido=true;hideTip();"
+        "vb.x=drag.vx-dx/r.width*vb.w;vb.y=drag.vy-dy/r.height*vb.h;setVB();}return;}"
+        "var iso=isoDe(e);if(iso)showTip(iso,e);else hideTip();});"
+        "svg.addEventListener('mouseleave',hideTip);"
+        "svg.addEventListener('click',function(e){if(movido){movido=false;return;}"
+        "var iso=isoDe(e);if(iso)abrir(iso);else cerrar();});"
+        "svg.addEventListener('wheel',function(e){if(!(e.ctrlKey||e.metaKey))return;"
+        "e.preventDefault();var p=at(e);zoom(e.deltaY<0?0.82:1.22,p[0],p[1]);},{passive:false});"
+        "var bi=document.getElementById('mzin'),bo=document.getElementById('mzout'),br=document.getElementById('mzrst');"
+        "if(bi)bi.addEventListener('click',function(){zoom(0.7);});"
+        "if(bo)bo.addEventListener('click',function(){zoom(1.43);});"
+        "if(br)br.addEventListener('click',cerrar);"
         "var rows=Object.keys(DATA).map(function(k){return [k,DATA[k]];}).sort(function(a,b){return b[1]-a[1];}).slice(0,10);"
         "var tot=window.__ATTACK_TOTAL||0,html='';"
         "rows.forEach(function(kv){var iso=kv[0],c=kv[1],nm=NAMES[iso]||iso,pct=tot?Math.max(6,Math.round(c/rows[0][1]*120)):6;"
-        "html+='<div class=maprow><span class=cc>'+esc(iso)+'</span><span class=nm>'+esc(nm)+'</span>"
+        "html+='<div class=maprow data-iso=\"'+esc(iso)+'\" title=\"Ver detalle y acercar\"><span class=cc>'+esc(iso)+'</span><span class=nm>'+esc(nm)+'</span>"
         "<span class=mapbar style=\"width:'+pct+'px\"></span><span class=ct>'+c+'</span></div>';});"
         "var w=document.getElementById('attacktop');if(w)w.innerHTML=html?('<div class=maptophdr>Top paises destino</div><div class=maptopgrid>'+html+'</div>'):'';"
+        # clic en una fila del top = mismo efecto que clic en el pais (acerca y abre el detalle)
+        "if(w)w.addEventListener('click',function(e){var r=e.target.closest?e.target.closest('.maprow'):null;"
+        "if(r&&r.getAttribute('data-iso')){abrir(r.getAttribute('data-iso'));"
+        "var s=document.getElementById('attackmap');if(s&&s.scrollIntoView)s.scrollIntoView({behavior:'smooth',block:'nearest'});}});"
         "})();</script></section>")
 
 def _dst_badge(dst):
@@ -6137,6 +6274,14 @@ trafico sospechoso de tus CPEs). El color sube con el nº de alertas y al lado s
 hacia cada pais destino (un punto viaja por el arco = sensacion de trafico en vivo). El punto de
 origen se puede fijar con <code>MAPA_ORIGEN=lon,lat</code> en <code>/etc/suricata-dashboard.conf</code>
 (por defecto Ecuador); es solo el inicio visual del arco, no un dato real.</li>
+<li><b>Detalle por pais:</b> al <b>pasar el mouse</b> por un pais sale un recuadro con <b>a que IPs
+destino</b> va el trafico, <b>por que puertos</b> (p.ej. <code>443/tcp</code>) y <b>desde que CPEs</b> de
+tu red sale, ademas de la <b>direccion</b> (siempre saliente: tus CPEs &rarr; el pais). Se muestran los
+mas repetidos y se indica cuantos mas hay.</li>
+<li><b>Zoom por pais:</b> <b>clic en un pais</b> (o en una fila del Top) lo <b>acerca</b> y abre debajo
+un panel fijo con ese mismo detalle, comodo de leer en el telefono. Puedes <b>arrastrar</b> para
+mover el mapa, usar <b>+</b> / <b>&minus;</b> o <b>Ctrl + rueda</b> para acercar, y <b>Vista completa</b>
+para volver al mundo entero.</li>
 <li><b>Solo destinos publicos:</b> las IPs privadas (tu red) o sin pais no cuentan en el mapa.</li>
 <li><b>El mapa</b> se dibuja en el navegador con un <b>TopoJSON</b> del mundo servido por el
 propio panel (<code>/var/lib/suricata-mapa/</code>); no llama a ningun CDN externo.</li>

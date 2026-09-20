@@ -5062,13 +5062,9 @@ def exclusiones_page(msg="", ok=False, edit_idx=None):
     cancelar = '<a class="cancel" href="/exclusiones">Cancelar</a>' if ed else ""
     body = f"""<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>
 <meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>
-<style>body{{margin:0;background:#fcfcfb;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}}
-main{{max-width:820px;margin:0 auto;padding:24px 20px}}h1{{font-size:21px;margin:0 0 4px}}
-.sub{{color:#52514e;font-size:13px;margin:0 0 18px}}h2{{font-size:15px;margin:24px 0 10px}}
-.card{{border:1px solid #e7e6e2;border-radius:12px;padding:18px;background:#fff}}
-table{{width:100%;border-collapse:collapse;font-size:13.5px}}th,td{{padding:8px 10px;border-bottom:1px solid #eee;text-align:left}}
-th{{color:#52514e;font-weight:600}}.mono{{font-family:ui-monospace,Consolas,monospace}}
-.muted{{color:#8a8a86;font-size:12px}}
+<style>{BASE_CSS}
+main{{max-width:820px;padding:24px 20px}}.sub{{margin:0 0 18px}}h2{{font-size:15px;margin:24px 0 10px}}
+.card{{padding:18px}}
 form.add{{display:grid;grid-template-columns:130px 1fr;gap:10px 12px;align-items:center}}
 label{{font-size:13px;color:#52514e;font-weight:600}}
 input,select{{padding:9px 11px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui;width:100%;box-sizing:border-box}}
@@ -5591,9 +5587,9 @@ def log_page(embed=False):
     else:
         cuerpo = "<p class=sub2>Sin actividad registrada todavia.</p>"
     css = (
-        "body{margin:0;background:#f6f6f4;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
-        "main{max-width:1000px;margin:0 auto;padding:22px 22px 40px}"
-        "h1{font-size:21px;margin:0 0 2px}.sub2{color:#6b6a66;font-size:13px;margin:0 0 14px}"
+        BASE_CSS +
+        "body{background:#f6f6f4}main{max-width:1000px;padding:22px 22px 40px}"
+        "h1{margin:0 0 2px}.sub2{color:#6b6a66;margin:0 0 14px}"
         ".card{border:1px solid #e7e6e2;border-radius:14px;padding:20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.03)}"
         ".uhead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}"
         ".search{width:240px;padding:8px 12px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui}"
@@ -5602,7 +5598,6 @@ def log_page(embed=False):
         ".ut th{text-align:left;color:#8a8a86;font-weight:600;padding:10px 12px;background:#fafafa;border-bottom:1px solid #eee}"
         ".ut td{padding:8px 12px;border-bottom:1px solid #f2f1ee}"
         ".ut tbody tr:last-child td{border-bottom:0}.ut tbody tr:hover{background:#fafbfd}"
-        ".mono{font-family:ui-monospace,Consolas,monospace}"
         ".det{white-space:normal;color:#6b6a66;font-size:12px;max-width:320px}"
         ".pager{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}"
         ".pager button{font:13px system-ui;padding:6px 12px;border:1px solid #d7d6d2;background:#fff;border-radius:8px;cursor:pointer;color:#0b0b0b}"
@@ -5669,9 +5664,9 @@ def bitacora_page(embed=False):
     else:
         cuerpo = "<p class=sub2>Sin acciones registradas todavia.</p>"
     css = (
-        "body{margin:0;background:#f6f6f4;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
-        "main{max-width:1000px;margin:0 auto;padding:22px 22px 40px}"
-        "h1{font-size:21px;margin:0 0 2px}.sub2{color:#6b6a66;font-size:13px;margin:0 0 14px}"
+        BASE_CSS +
+        "body{background:#f6f6f4}main{max-width:1000px;padding:22px 22px 40px}"
+        "h1{margin:0 0 2px}.sub2{color:#6b6a66;margin:0 0 14px}"
         ".card{border:1px solid #e7e6e2;border-radius:14px;padding:20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.03)}"
         ".uhead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}"
         ".search{width:240px;padding:8px 12px;border:1px solid #d7d6d2;border-radius:8px;font:14px system-ui}"
@@ -5680,7 +5675,6 @@ def bitacora_page(embed=False):
         ".ut th{text-align:left;color:#8a8a86;font-weight:600;padding:10px 12px;background:#fafafa;border-bottom:1px solid #eee}"
         ".ut td{padding:8px 12px;border-bottom:1px solid #f2f1ee}"
         ".ut tbody tr:last-child td{border-bottom:0}.ut tbody tr:hover{background:#fafbfd}"
-        ".mono{font-family:ui-monospace,Consolas,monospace}"
         ".det{white-space:normal;color:#6b6a66;font-size:12px;max-width:360px}"
         ".pager{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}"
         ".pager button{font:13px system-ui;padding:6px 12px;border:1px solid #d7d6d2;background:#fff;border-radius:8px;cursor:pointer;color:#0b0b0b}"
@@ -5732,10 +5726,8 @@ def historico_page():
               "if(rows.length)render();})();</script>") if rows else ""
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
-            "<title>Suricata</title><style>body{margin:0;background:#fcfcfb;"
-            "font:14px system-ui,sans-serif;color:#0b0b0b}main{max-width:800px;margin:0 auto;padding:20px}"
-            "table{width:100%;border-collapse:collapse}td{padding:8px;border-bottom:1px solid #e7e6e2}"
-            "a{color:#2a78d6}"
+            "<title>Suricata</title><style>" + BASE_CSS +
+            "main{max-width:800px;padding:20px}a{color:#2a78d6}"
             ".pager{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}"
             ".pager button{font:13px system-ui;padding:6px 12px;border:1px solid #d7d6d2;background:#fff;border-radius:8px;cursor:pointer}"
             ".pager button:hover:not(:disabled){background:#eef4fd;border-color:#2a78d6}"

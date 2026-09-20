@@ -4159,6 +4159,23 @@ border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0
 .empbar .empwrap{max-width:1360px;margin:0 auto;padding:7px 28px;display:flex;justify-content:flex-end;align-items:center;gap:10px}
 .empbar .elogo{height:30px;width:auto;max-width:150px;object-fit:contain;display:block}
 .empbar .en{color:#33322f;font-size:14px;font-weight:700;white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis}
+/* --- responsive de la barra: en pantallas angostas las pestanas se apilan en vez de desbordarse --- */
+@media(max-width:820px){
+ .nav .navwrap{height:auto;flex-wrap:wrap;padding:6px 14px;gap:2px}
+ .nav .brand{width:100%;margin:0 0 2px;padding:4px 0;font-size:15px}
+ .nav a.tab{padding:8px 11px;margin:3px 1px;font-size:14px}
+ .nav a.tab.on::after{display:none}         /* el subrayado inferior no encaja al envolver */
+ .nav .push{margin-left:auto}
+ .nav .out{margin-left:8px;padding:7px 12px;font-size:14px}
+ .nav .updbtn{margin-left:8px;padding:7px 11px;font-size:13px}
+ .updov,.updask{padding:14px}
+ .empbar .empwrap{padding:6px 14px}
+}
+@media(max-width:420px){
+ .nav .navwrap{padding:5px 10px}
+ .nav a.tab{padding:7px 9px;font-size:13px}
+ .nav .brand .bn{max-width:150px}
+}
 </style>"""
 
 def nav(active=""):

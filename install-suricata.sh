@@ -2867,6 +2867,74 @@ def mk_list_ips(lista):
         try: s.close()
         except Exception: pass
 
+# --- Cliente -> abonado: mapear IP interna a PPPoE/DHCP del MikroTik (para la ficha) ---
+ABONADOS_FILE = "/var/log/suricata-abonados.json"
+
+def _mk_re_dicts(frases):
+    """Convierte las sentencias !re de una respuesta API en lista de dicts {clave: valor}."""
+    out = []
+    for f in frases:
+        if f and f[0] == "!re":
+            r = {}
+            for a in f:
+                if a.startswith("="):
+                    k, _, v = a[1:].partition("=")
+                    r[k] = v
+            out.append(r)
+    return out
+
+def mk_abonados():
+    """Consulta PPPoE activos + leases DHCP y arma {ip: {nombre, tipo, mac, extra}}."""
+    d = cargar_mk()
+    s = mk_conectar(d)
+    mapa = {}
+    try:
+        _mk_send(s, ["/ppp/active/print", "=.proplist=name,address,caller-id,uptime"])
+        _ok, frases, _e = _mk_reply(s)
+        for r in _mk_re_dicts(frases):
+            ip = r.get("address")
+            if ip:
+                mapa[ip] = {"nombre": r.get("name", ""), "tipo": "PPPoE",
+                            "mac": r.get("caller-id", ""), "extra": ("uptime " + r.get("uptime", "")).strip()}
+        _mk_send(s, ["/ip/dhcp-server/lease/print",
+                     "=.proplist=address,active-address,mac-address,host-name,comment,status"])
+        _ok, frases, _e = _mk_reply(s)
+        for r in _mk_re_dicts(frases):
+            ip = r.get("active-address") or r.get("address")
+            if ip and ip not in mapa:                      # PPPoE tiene prioridad
+                mapa[ip] = {"nombre": (r.get("comment") or r.get("host-name") or ""), "tipo": "DHCP",
+                            "mac": r.get("mac-address", ""), "extra": r.get("status", "")}
+        return mapa
+    finally:
+        try: s.close()
+        except Exception: pass
+
+def refrescar_abonados():
+    """Refresca el mapa IP->abonado desde el MikroTik (solo si esta configurado). En 2do plano."""
+    if not mk_configurado():
+        return
+    try:
+        mapa = mk_abonados()
+    except Exception:
+        return
+    if not mapa:
+        return
+    try:
+        tmp = ABONADOS_FILE + ".tmp"
+        json.dump({"ts": int(time.time()), "mapa": mapa}, open(tmp, "w", encoding="utf-8"))
+        os.replace(tmp, ABONADOS_FILE)
+    except OSError:
+        pass
+
+def cargar_abonados():
+    try:
+        return json.load(open(ABONADOS_FILE, encoding="utf-8"))
+    except Exception:
+        return {}
+
+def abonado_de(ip):
+    return (cargar_abonados().get("mapa") or {}).get(ip, {})
+
 def mk_sync_enviados():
     """Sincroniza el registro del panel con lo que REALMENTE hay en el MikroTik, para que el
     indicador 'En cuarentena' sea fiable y no se reintente enviar algo que ya esta. Agrega los
@@ -3833,6 +3901,10 @@ def refrescador():
             FORCE_REGEN = False
             try:
                 mk_sync_enviados()   # el registro del panel refleja la lista real del MikroTik
+            except Exception:
+                pass
+            try:
+                refrescar_abonados()  # mapa IP->abonado (PPPoE/DHCP) para la ficha de evidencia
             except Exception:
                 pass
             try:
@@ -5520,11 +5592,24 @@ def ficha_page(ip, embed=False):
             decision = "<b>Vigilar</b> (sospechoso; falta corroboracion independiente)"
         def _row(k, v):
             return f"<tr><th>{k}</th><td>{v}</td></tr>"
+        ab = abonado_de(ip)
+        _abinfo = cargar_abonados()
+        _snap = time.strftime("%d/%m %H:%M", time.localtime(_abinfo.get("ts", 0))) if _abinfo.get("ts") else "—"
+        if ab:
+            cliente = (f"<b>{esc(ab.get('nombre') or '(sin nombre)')}</b> "
+                       f"<span class=cfb style='background:#e7f0fb;color:#1c5cab'>{esc(ab.get('tipo', ''))}</span>"
+                       f"<div class=rowmeta>IP {esc(ip)} · MAC {esc(ab.get('mac', '') or '—')}"
+                       f"{(' · ' + esc(ab.get('extra', ''))) if ab.get('extra') else ''}"
+                       f" · asignacion actual (snapshot {_snap})</div>")
+        elif _abinfo.get("mapa") is not None:
+            cliente = f"{esc(ip)} <span class=rowmeta>sin asignacion PPPoE/DHCP conocida (snapshot {_snap})</span>"
+        else:
+            cliente = f"{esc(ip)} <span class=rowmeta>configura el MikroTik en Ajustes para ver el abonado</span>"
         cuerpo = (
             f"<div class=fichah><h2 style='margin:0'>{esc(ip)}</h2>{conf_b}"
             f"<span class=sub2 style='margin-left:auto'>{esc(categoria)} · riesgo {c.get('riesgo', '')}</span></div>"
             "<table class=ficha>"
-            + _row("Cliente", esc(ip) + " <span class=rowmeta>(mapeo a abonado PPPoE/DHCP: pendiente de integrar)</span>")
+            + _row("Cliente", cliente)
             + _row("Actividad", act_html)
             + _row("Alerta", al)
             + _row("Coincidencia", coincidencia)
@@ -5571,6 +5656,12 @@ def cuarentena_page(msg="", es_admin=False):
     enviados_dns = cargar_enviados(MK_SENT_DNS)
     def _col(b):
         return {"ALTO": "#e34948", "MEDIO": "#e58a00"}.get(b, "#3a9d5d")
+
+    def _cli(ip):
+        a = abonado_de(ip)
+        if a and a.get("nombre"):
+            return f"<div class='rowmeta'>{esc(a['nombre'])} · {esc(a.get('tipo', ''))}</div>"
+        return ""
 
     def _rev(mm):
         """Meta legible: cuando se reviso por ultima vez, si sigue activo y si esta en el router."""
@@ -5628,7 +5719,7 @@ def cuarentena_page(msg="", es_admin=False):
                         f"<button class='qbtn send' onclick=\"return confirm('Enviar {esc(ip)} a la lista {esc(lista_name)} del MikroTik?')\">Enviar</button></form>")
             return "<span class='dry' title='Configura y habilita el MikroTik en Ajustes para activar el envio'>solo sugerencia</span>"
         filas = "".join(
-            f"<tr><td class='mono ipx'>{esc(c.get('ip',''))}</td>"
+            f"<tr><td class='mono ipx'>{esc(c.get('ip',''))}{_cli(c.get('ip',''))}</td>"
             f"<td><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {esc(c.get('banda',''))}</span>"
             f"<div style='margin-top:4px'>{_conf_badge(c)}</div></td>"
             f"<td class='mot'>{c.get(cnt_key,0)} {cnt_lbl} · {c.get(fir_key,0)} firma(s)<br>"
@@ -5671,7 +5762,7 @@ def cuarentena_page(msg="", es_admin=False):
                   f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de {esc(lista)}?')\">Quitar</button></form>"
                   ) if es_admin else ""
         mot = _mot_txt(mm) or "<span class='muted'>manual / sin motivo registrado</span>"
-        return (f"<tr><td class='mono ipx'>{esc(ip)}</td><td class='mono'>{esc(lista)}</td>"
+        return (f"<tr><td class='mono ipx'>{esc(ip)}{_cli(ip)}</td><td class='mono'>{esc(lista)}</td>"
                 f"<td class='mot'>{mot}</td><td>{esc(mm.get('por','?'))}</td>"
                 f"<td class='mono'>{cuando}</td>"
                 f"<td class='rowmeta' style='margin:0'>{_rev(mm) or '&mdash;'}</td>"

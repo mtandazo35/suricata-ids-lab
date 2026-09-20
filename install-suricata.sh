@@ -5895,7 +5895,17 @@ def ficha_page(ip, embed=False):
            ".cfb{font-size:11px;font-weight:800;padding:2px 9px;border-radius:20px}"
            ".cfb.alta{background:#fdecec;color:#b52a2a;border:1px solid #f3c4c4}"
            ".cfb.sosp{background:#fff7ed;color:#7a4a12;border:1px solid #f2d3ad}"
-           ".evlist{margin:2px 0;padding-left:16px;color:#245c3c}.rowmeta{font-size:12px;color:#6b6a66;margin-top:4px}")
+           ".evlist{margin:2px 0;padding-left:16px;color:#245c3c}.rowmeta{font-size:12px;color:#6b6a66;margin-top:4px}"
+           "@media(max-width:640px){"
+           "main{padding:14px 14px 32px}"
+           # la ficha (label | valor) se apila: la etiqueta pasa a encabezado de fila
+           ".ficha tr{display:block;border-top:1px solid #eee}"
+           ".ficha th{display:block;width:auto;background:transparent;border-top:0;padding:8px 0 0}"
+           ".ficha td{display:block;padding:2px 0 10px;border-top:0}"
+           # tablas internas (Alertas, Coincidencia, Vigencia) scrollean en vez de desbordar
+           ".ficha td>.fichat{min-width:520px}"
+           ".ficha td{overflow-x:auto}"
+           "}")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>"
             f"<style>{css}</style></head><body>" + ("" if embed else nav("/cuarentena")) +

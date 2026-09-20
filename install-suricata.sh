@@ -800,7 +800,7 @@ IP:puerto con firma, protocolo, primera/ultima hora y duracion. Autocontenido
 Uso: suricata-html-report [horas]   (default 24)
 Salida: /var/log/suricata/report-AAAAMMDD-HHMM.html
 """
-import glob, gzip, io, json, os, re, sys, html, time, socket
+import glob, gzip, io, json, os, re, sys, html, time, socket, urllib.request, urllib.error
 from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 
@@ -1415,6 +1415,31 @@ _ipinfo = _cargar_ipinfo()
 _ipinfo_nuevos = 0
 _ipinfo_sucio = False
 
+def _rdap_org(ip):
+    """Operador/red de una IP (util cuando NO tiene PTR) via RDAP publico (rdap.org, sin clave).
+    Devuelve (etiqueta, pais) o ('', '') si falla. Timeout corto; el resultado se cachea en duenio."""
+    try:
+        req = urllib.request.Request(f"https://rdap.org/ip/{ip}",
+                                     headers={"User-Agent": "suricata-report/1.0",
+                                              "Accept": "application/rdap+json"})
+        with urllib.request.urlopen(req, timeout=2.5) as r:
+            d = json.load(r)
+    except Exception:
+        return ("", "")
+    name = (d.get("name") or "").strip()
+    cc = (d.get("country") or "").strip()
+    org = ""
+    for e in (d.get("entities") or []):
+        vc = e.get("vcardArray")
+        if vc and len(vc) > 1:
+            for it in vc[1]:
+                if it and it[0] == "fn" and len(it) > 3 and it[3]:
+                    org = str(it[3]).strip(); break
+        if org:
+            break
+    etq = org or name
+    return (etq[:44], cc)
+
 def duenio(ip):
     """(etiqueta, legitimo) del dueno de una IP: PTR -> dominio -> marca conocida.
     Cachea a disco con TTL. Los CDN/grandes se marcan legitimo=True (verde)."""
@@ -1428,17 +1453,22 @@ def duenio(ip):
     if _ipinfo_nuevos >= _IPINFO_MAX_NUEVOS:
         return ("-", False)          # se resolvera en la proxima corrida
     _ipinfo_nuevos += 1
-    org, legit = "sin PTR", False
+    org, legit, via = "sin PTR", False, ""
     try:
         socket.setdefaulttimeout(1.5)
         host = socket.gethostbyaddr(ip)[0]
         dom = _reg_dom(host)
-        org, legit = (_ORG_DOM[dom], True) if dom in _ORG_DOM else (dom, False)
+        org, legit, via = (_ORG_DOM[dom], True, "ptr") if dom in _ORG_DOM else (dom, False, "ptr")
     except Exception:
-        org, legit = "sin PTR", False
+        # sin DNS inverso: buscar el OPERADOR de red del bloque IP (RDAP, cacheado)
+        aso, cc = _rdap_org(ip)
+        if aso:
+            org, legit, via = (aso + (f" · {cc}" if cc else ""), False, "rdap")
+        else:
+            org, legit, via = "sin PTR", False, ""
     finally:
         socket.setdefaulttimeout(None)
-    _ipinfo[ip] = {"org": org, "legit": legit, "ts": now}
+    _ipinfo[ip] = {"org": org, "legit": legit, "ts": now, "via": via}
     _ipinfo_sucio = True
     return (org, legit)
 
@@ -1456,6 +1486,14 @@ def _guardar_ipinfo():
         pass
 
 def _org_celda(dst):
+    # 1) si el destino esta en una lista de reputacion, eso manda (aunque no tenga PTR)
+    fuente = es_malo(dst)
+    if fuente:
+        cat = (REP_META.get(fuente, {}) or {}).get("categoria", "")
+        etq = ((cat + " · ") if cat else "") + fuente
+        return (f"<td class='org'><span class='obadge bad' title='Destino en lista de reputacion "
+                f"({esc(fuente)}{(', ' + esc(cat)) if cat else ''}) &mdash; ver ficha para el CIDR y la vigencia'>"
+                f"&#9888; {esc(etq)}</span></td>")
     org, legit = duenio(dst)
     if org == "-":
         return "<td class='org'>-</td>"
@@ -1463,9 +1501,12 @@ def _org_celda(dst):
         return (f"<td class='org'><span class='obadge ok' title='Servicio conocido "
                 f"(CDN/gran empresa): trafico casi siempre legitimo'>{esc(org)}</span></td>")
     if org == "sin PTR":
-        return "<td class='org'><span class='obadge none' title='Sin DNS inverso: IP sin nombre publico'>sin PTR</span></td>"
-    return (f"<td class='org'><span class='obadge unk' title='Dominio del dueno segun DNS inverso; "
-            f"no es un servicio grande conocido'>{esc(org)}</span></td>")
+        return "<td class='org'><span class='obadge none' title='Sin DNS inverso ni operador identificable'>sin PTR</span></td>"
+    via = (_ipinfo.get(dst, {}) or {}).get("via", "")
+    ttl = ("Operador de red del bloque IP (RDAP); no tiene DNS inverso" if via == "rdap"
+           else "Dominio del dueno segun DNS inverso; no es un servicio grande conocido")
+    marca = "&#127760; " if via == "rdap" else ""   # globo: viene del operador de red, no de PTR
+    return (f"<td class='org'><span class='obadge unk' title='{ttl}'>{marca}{esc(org)}</span></td>")
 
 
 # --- Reputacion: feeds de IPs/CIDR malos (suricata-feeds-update), con caducidad ---
@@ -1662,6 +1703,7 @@ def top_origenes_section(n_src=5, n_sub=8):
         ".topwrap .obadge.ok{background:#e6f4ea;color:#1a7f37;border:1px solid #b7e0c2}"
         ".topwrap .obadge.unk{background:#fdf0e6;color:#a15c12;border:1px solid #f2d3ad}"
         ".topwrap .obadge.none{background:#f1f1ef;color:#6b6a66;border:1px solid #e0dfda}"
+        ".topwrap .obadge.bad{background:#fdecec;color:#b52a2a;border:1px solid #f3c4c4}"
         "</style>"
         "<script>function qcuar(b,ip,sc){b.disabled=true;var o=b.innerHTML;b.textContent='enviando...';"
         "fetch('/cuarentena/enviar',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"

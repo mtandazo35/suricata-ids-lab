@@ -1504,7 +1504,7 @@ def _org_celda(dst):
         return "<td class='org'><span class='obadge none' title='Sin DNS inverso ni operador identificable'>sin PTR</span></td>"
     via = (_ipinfo.get(dst, {}) or {}).get("via", "")
     ttl = ("Operador de red del bloque IP (RDAP); no tiene DNS inverso" if via == "rdap"
-           else "Dominio del dueno segun DNS inverso; no es un servicio grande conocido")
+           else "Dominio del dueño segun DNS inverso; no es un servicio grande conocido")
     marca = "&#127760; " if via == "rdap" else ""   # globo: viene del operador de red, no de PTR
     return (f"<td class='org'><span class='obadge unk' title='{ttl}'>{marca}{esc(org)}</span></td>")
 
@@ -1678,7 +1678,7 @@ def top_origenes_section(n_src=5, n_sub=8):
             f"<span class='tot'>{tot:,} alertas</span>{cuar}"
             f"<span class='meta'>&rarr; {len(dsts):,} IP destino &middot; {len(dports):,} puertos destino</span></div>"
             f"<div class='tablewrap'><table><thead><tr>"
-            f"<th>Puerto origen</th><th>IP destino (a donde)</th><th>Dueno / organizacion</th>"
+            f"<th>Puerto origen</th><th>IP destino (a donde)</th><th class='org'>Dueño / organización</th>"
             f"<th class='num'>Puerto destino</th>"
             f"<th>Protocolo</th><th class='num'>Peticiones</th></tr></thead>"
             f"<tbody>{rows}</tbody></table></div></div>")
@@ -1698,8 +1698,9 @@ def top_origenes_section(n_src=5, n_sub=8):
         ".topwrap .meta{color:#52514e;font-size:12px;margin-left:auto}"
         ".topwrap table{table-layout:fixed}"
         ".topwrap table th,.topwrap table td{text-align:center!important;padding-left:6px;padding-right:6px}"
-        ".topwrap .org{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-        ".topwrap .obadge{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}"
+        ".topwrap table th.org{width:23%}"
+        ".topwrap td.org{white-space:normal;word-break:break-word;overflow-wrap:anywhere}"
+        ".topwrap .obadge{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:12px;max-width:100%;white-space:normal;word-break:break-word;overflow-wrap:anywhere;line-height:1.35;vertical-align:middle}"
         ".topwrap .obadge.ok{background:#e6f4ea;color:#1a7f37;border:1px solid #b7e0c2}"
         ".topwrap .obadge.unk{background:#fdf0e6;color:#a15c12;border:1px solid #f2d3ad}"
         ".topwrap .obadge.none{background:#f1f1ef;color:#6b6a66;border:1px solid #e0dfda}"
@@ -1714,9 +1715,9 @@ def top_origenes_section(n_src=5, n_sub=8):
         ".catch(function(e){b.disabled=false;b.innerHTML=o;alert('Error: '+e);});}</script>"
         "<section class=\"card\"><h2>Top 5 IPs origen que mas peticionan</h2>"
         "<p class=\"muted\" style=\"margin:0 0 12px\">Quien ataca mas, hacia que IP destino, desde que puerto origen y hacia que puerto destino. "
-        "La columna <b>Dueno / organizacion</b> viene del DNS inverso (PTR) de la IP destino: "
+        "La columna <b>Dueño / organización</b> viene del DNS inverso (PTR) de la IP destino: "
         "<span style='color:#1a7f37;font-weight:700'>verde</span> = servicio conocido (Facebook, Google, Cloudflare, etc., casi siempre legitimo); "
-        "<span style='color:#a15c12;font-weight:700'>naranja</span> = dominio del dueno pero no es un gran servicio; "
+        "<span style='color:#a15c12;font-weight:700'>naranja</span> = dominio del dueño pero no es un gran servicio; "
         "<b>sin PTR</b> = IP sin nombre publico (frecuente en botnets/hosting sucio).</p>"
         f"<div class=\"topwrap\">{''.join(cards)}</div></section>"
         "<!--TOP_FIN-->")

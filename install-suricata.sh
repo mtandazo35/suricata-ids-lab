@@ -2322,7 +2322,11 @@ try:
         if nunca_bloquear(_s):
             continue                                    # allowlist: fuera del motor de politicas
         _sc, _bd, _c2, _d2 = riesgo(_s)
-        top_r.append({"ip": _s, "riesgo": _sc, "banda": _bd})
+        # Se guarda tambien POR QUE puntua asi: las politicas envian a cuarentena desde
+        # esta lista (no desde 'candidatos'), y sin estos datos el bloqueo quedaba sin
+        # motivo que mostrar y el panel lo rotulaba como "manual / sin motivo".
+        top_r.append({"ip": _s, "riesgo": _sc, "banda": _bd, "desglose": _d2, "alertas": _t,
+                      "destinos": len(dst_by_src.get(_s, ())), "puertos": len(dpt_by_src.get(_s, ()))})
     _cq = {"generado": int(time.time()), "ventana_min": VENTANA_MIN,
            "umbral": UMBRAL_INFECTADO, "umbral_dns": UMBRAL_DNS,
            "candidatos": cand, "dns_candidatos": cand_dns, "top_riesgo": top_r}
@@ -3726,6 +3730,16 @@ def _motivo_bloqueo(ip):
                         "firma": (c.get("firma", "") or "")[:120],
                         "conteo": f"{c.get(cnt, 0)} {cntlbl}, {c.get(fir, 0)} firma(s)",
                         "destinos_ip": c.get("destinos_ip", [])}   # para liberar por falso positivo
+    # Las POLITICAS por banda no envian desde 'candidatos' sino desde 'top_riesgo': si el
+    # CPE no es candidato confirmado, el motivo se arma con lo que uso la politica para
+    # decidir (banda, puntaje y su desglose). Sin esto el bloqueo se quedaba sin motivo.
+    for c in cq.get("top_riesgo", []):
+        if c.get("ip") == ip:
+            return {"tipo": "politica", "banda": c.get("banda", ""), "score": c.get("riesgo", 0),
+                    "firma": "", "desglose": c.get("desglose", ""),
+                    "conteo": (f"{c.get('alertas', 0)} alertas, {c.get('destinos', 0)} destino(s) "
+                               f"distintos, {c.get('puertos', 0)} puerto(s)"),
+                    "destinos_ip": []}
     return {}
 
 def evaluar_bloqueos():
@@ -6280,6 +6294,11 @@ culpa al cliente que hoy tiene esa IP por lo que hizo otro antes.</p>
 DNS sospechoso) o <b>cuarentena</b> (a la address-list de bloqueo).</td></tr></table>
 <p>Las politicas se aplican junto con el resumen (cada 5&nbsp;min) y <b>liberan solas</b> a los CPEs
 que dejan de calificar. Ademas:</p>
+<p><b>Por que se bloqueo cada uno:</b> las politicas eligen por <b>banda de riesgo</b>, no por
+infeccion confirmada, asi que el motivo guardado es el <b>desglose del puntaje</b> (severidad,
+destinos unicos, puertos unicos, persistencia, correlacion de flota y reputacion) junto con la
+banda y los conteos. La columna <b>Motivo</b> lo muestra tal cual, y la columna <b>Por</b> dice
+<code>politica</code> o <code>politica-rapida</code> segun quien lo envio.</p>
 <ul>
 <li><b>Barrido rapido de ALTO (~60&nbsp;s):</b> si <b>ALTO &rarr; cuarentena</b>, un chequeo ligero cada
 minuto envia <b>ya</b> a los CPEs con <b>infeccion confirmada</b> (firmas CnC repetidas), sin esperar
@@ -6857,10 +6876,14 @@ def cuarentena_page(msg="", es_admin=False):
         mt = mm.get("motivo") or {}
         if not mt:
             return ""
-        tp = {"infeccion": "Infeccion CnC", "dns": "DNS malicioso"}.get(mt.get("tipo"), "Bloqueo")
+        tp = {"infeccion": "Infeccion CnC", "dns": "DNS malicioso",
+              "politica": "Politica por riesgo"}.get(mt.get("tipo"), "Bloqueo")
         fw = esc((mt.get("firma") or "")[:70])
+        # el desglose ya viene como HTML corto del generador (Severidad x/30 · Destinos...)
+        des = mt.get("desglose") or ""
+        extra = f"<br><span class='fw'>{des}</span>" if des else ""
         return (f"<b>{tp}</b> riesgo {esc(str(mt.get('score', '')))} {esc(mt.get('banda', ''))}<br>"
-                f"<span class='fw'>{esc(mt.get('conteo', ''))}{(' · ' + fw) if fw else ''}</span>")
+                f"<span class='fw'>{esc(mt.get('conteo', ''))}{(' · ' + fw) if fw else ''}</span>{extra}")
 
     def _conf_badge(c):
         cf = c.get("confianza")
@@ -6940,7 +6963,15 @@ def cuarentena_page(msg="", es_admin=False):
                   f"<input type=hidden name=ip value='{esc(ip)}'>"
                   f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de {esc(lista)}?')\">Quitar</button></form>"
                   ) if es_admin else ""
-        mot = _mot_txt(mm) or "<span class='muted'>manual / sin motivo registrado</span>"
+        # sin motivo guardado: decir de donde vino en vez de afirmar "manual", que era
+        # falso justo para los que envio la politica (la fila mostraba Por=politica y
+        # Motivo=manual a la vez)
+        _por = (mm.get("por") or "").lower()
+        _sin = ("enviado por politica automatica (sin detalle guardado)"
+                if _por.startswith("politica") else
+                "manual / sin motivo registrado" if _por not in ("", "?") else
+                "sin motivo registrado")
+        mot = _mot_txt(mm) or f"<span class='muted'>{esc(_sin)}</span>"
         # token lista|ip: el quitado masivo necesita saber de CUAL address-list sacarla
         _tok = ("dns|" if pref.endswith("/dns") else "cuar|") + ip
         marca = (f"<td data-label='Seleccionar' class='selc'><input type=checkbox class=selm "

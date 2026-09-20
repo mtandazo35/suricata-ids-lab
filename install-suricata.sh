@@ -2595,6 +2595,11 @@ def top_page():
            ".topwrap .num{text-align:center;white-space:nowrap;font-variant-numeric:tabular-nums}"
            ".topwrap .mono{font-family:ui-monospace,Consolas,monospace}"
            ".topwrap .tablewrap{overflow-x:auto}"
+           "@media(max-width:820px){"
+           "main{padding:16px 14px}h1{font-size:18px}"
+           ".topwrap table{min-width:640px}"                  # el .tablewrap scrollea en vez de aplastar
+           ".topwrap .thd{gap:8px}.topwrap .meta{margin-left:0}"
+           "}"
            "</style>")
     body = (f"<!doctype html><html lang=es><head><meta charset=utf-8>"
             f"<link rel=icon type=image/png href=/favicon.ico>"
@@ -5052,7 +5057,15 @@ button.del:hover{{background:#f5d5d5}}
 a.edit{{background:#eef4fd;color:#1c5cab;border:1px solid #cfe0fb;padding:5px 12px;border-radius:8px;
 text-decoration:none;font-size:13px;font-weight:600}}a.edit:hover{{background:#dceafb}}
 a.cancel{{color:#8a8a86;text-decoration:none;font-size:13px}}a.cancel:hover{{color:#52514e}}
-@keyframes fadeout{{0%,74%{{opacity:1;transform:translateY(0)}}100%{{opacity:0;transform:translateY(-10px);visibility:hidden;margin:0;padding:0;height:0}}}}</style></head><body>{nav("/exclusiones")}<main>
+@keyframes fadeout{{0%,74%{{opacity:1;transform:translateY(0)}}100%{{opacity:0;transform:translateY(-10px);visibility:hidden;margin:0;padding:0;height:0}}}}
+@media(max-width:820px){{
+ main{{padding:16px 14px}}
+ .card{{overflow-x:auto}}
+ table{{min-width:720px}}
+ form.add{{grid-template-columns:1fr;gap:6px}}
+ label{{margin-top:6px}}
+ .hint,button[type=submit].primary{{grid-column:1}}
+}}</style></head><body>{nav("/exclusiones")}<main>
 <h1>Exclusiones</h1><p class=sub>IPs que no quieres que aparezcan en el panel ni en los reportes
 (tus DNS, tu monitoreo SNMP, etc.). Se aplica al instante.</p>
 {banner}

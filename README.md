@@ -12,6 +12,52 @@ afuera** (el caso real que motiva esto), antes de llevarlo a un MikroTik de
 produccion. Sin Elastic ni dependencias externas: EveBox lee `eve.json` y guarda
 en SQLite local.
 
+## Arquitectura
+
+Como circula el trafico, quien lo inspecciona y donde acaban las alertas. Hay **dos
+formas de alimentar al sensor**: escuchar una interfaz local (`af-packet`, el caso
+simple) o recibir un **espejo TZSP** del MikroTik (el caso ISP, linea gruesa).
+
+```mermaid
+flowchart LR
+    subgraph red["Red del ISP"]
+        cpe["CPEs / clientes<br/>redes privadas"]
+        mt["MikroTik<br/>bridge + firewall"]
+        cpe <--> mt
+    end
+
+    mt == "espejo TZSP<br/>UDP 37008" ==> rx
+
+    subgraph srv["Servidor sensor — Debian 13/12"]
+        rx["tzsp-decap<br/>receptor TZSP"] --> tap["TAP ids-mon"]
+        nic["interfaz local<br/>modo af-packet"] --> sur
+        tap --> sur["Suricata<br/>motor IDS"]
+        sur --> eve["eve.json<br/>fast.log"]
+        eve --> evebox["EveBox<br/>:5636"]
+        eve --> rep["suricata-html-report<br/>cada 5 min"]
+        rep --> panel["Panel de estadisticas<br/>:5637"]
+        geo[("GeoIP DB-IP<br/>+ mapa TopoJSON")] --> rep
+    end
+
+    reglas["ET Open<br/>suricata-rules-update"] -.-> sur
+    listas["Listas de reputacion<br/>suricata-feeds-update"] -.-> rep
+    panel == "API RouterOS: address-list<br/>cuarentena / DNS" ==> mt
+```
+
+La flecha de vuelta del panel al MikroTik es la parte que **actua**: el panel manda
+los CPE confirmados como infectados a una *address-list*, y es el MikroTik quien
+decide que hacer con ellos con tus reglas. Todo es reversible desde el panel.
+
+### Por que no hay `docker-compose.yml`
+
+No es un olvido, es una decision. El caso principal necesita un **dispositivo TAP**
+(`ids-mon`), `NET_ADMIN` y red del host para recibir el espejo TZSP: en un contenedor
+acabarias con `network_mode: host` + privilegios, o sea Docker de nombre y sin ganar
+aislamiento. Ademas el panel **administra la maquina** (habla con la API del MikroTik,
+consulta `suricatasc`, gestiona unidades de systemd y se autoactualiza desde GitHub),
+que es justo lo contrario de un contenedor inmutable. El instalador es **idempotente**,
+asi que re-ejecutarlo cumple el papel que tendria `docker compose up`.
+
 ## ⚡ Quick install (one-liner)
 
 En una VM/VPS Debian 13/12 limpia, como root:
@@ -85,6 +131,52 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/te
 ```
 
 > La imagen `genericcloud` de Debian no trae `curl`: antes `apt-get update && apt-get install -y curl`.
+
+## Comprobar que detecta
+
+Tres scripts, cada uno responde una pregunta distinta:
+
+| Script | Que responde | Manda trafico a la red |
+|---|---|---|
+| `test-alerts.sh` | ¿Suricata ve mi trafico y dispara firmas reales de ET Open? | si |
+| `test-tzsp.sh` | ¿El receptor TZSP y la interfaz `ids-mon` funcionan? (sin MikroTik) | si, a `127.0.0.1` |
+| `test-pcap.sh` | ¿Mi set de reglas detecta *esta* captura concreta? | **no**, es offline |
+
+`test-pcap.sh` reproduce un `.pcap` con `suricata -r` y resume que firmas saltaron. Es
+**determinista**, asi que sirve para comparar antes/despues de tocar reglas o exclusiones:
+
+```bash
+./test-pcap.sh captura.pcap -n 10.0.0.0/8      # -n: HOME_NET de esa captura
+./test-pcap.sh --fuentes                       # de donde bajar capturas
+```
+
+> **Capturas con malware.** Las capturas publicas de trafico malicioso traen payloads de
+> malware **real** (y suelen venir en ZIP con clave `infected`). **Nunca se guardan en este
+> repositorio**: el script las descarga bajo demanda a un temporal, **exige su SHA256** y las
+> borra al terminar. Reproducirlas con `suricata -r` no ejecuta nada, pero el archivo en disco
+> si es malware: hazlo en una maquina de pruebas o un runner efimero, no en tu equipo.
+
+## Desarrollo
+
+Todo el proyecto es **un solo script** que lleva dentro, como heredocs, varios programas en
+Python (el panel son ~5.400 lineas) y el JavaScript del mapa. Un error de sintaxis ahi no se
+nota al hacer commit: se nota cuando rompe un servidor. Por eso:
+
+```bash
+./validar.sh
+```
+
+comprueba de una pasada la sintaxis de los `.sh`, extrae **cada programa incrustado** y lo
+valida (`ast.parse` + `pyflakes` para Python, `sh -n` para shell), pasa `node --check` al
+JavaScript del mapa, verifica que no se haya colado ningun **CRLF** (rompe los scripts en
+Linux y git no lo delata) y que el **SHA256** de los assets vendorizados siga cuadrando con
+las constantes del instalador. Lo mismo corre solo en cada push mediante GitHub Actions
+(`.github/workflows/ci.yml`).
+
+## Licencia
+
+[MIT](LICENSE). Los archivos bajo `vendor/` son de terceros y mantienen su propia licencia;
+ver [`vendor/mapa/ATTRIBUTION.md`](vendor/mapa/ATTRIBUTION.md).
 
 ## Puertos y por donde se expone cada web
 

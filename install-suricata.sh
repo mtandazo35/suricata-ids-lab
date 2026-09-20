@@ -1909,7 +1909,7 @@ def _mapa_origen():
     """Punto de origen del mapa (tu red) como [lon, lat]. Configurable con MAPA_ORIGEN=lon,lat
     en el .conf; por defecto Ecuador. Es solo el punto de partida de los arcos, no un dato real."""
     try:
-        v = (conf().get("MAPA_ORIGEN", "") or "").split(",")
+        v = (_conf_key("MAPA_ORIGEN", "") or "").split(",")
         return [float(v[0]), float(v[1])]
     except Exception:
         return [-78.1, -1.8]
@@ -5041,7 +5041,6 @@ def _card_politicas(m):
             "Apagado: las politicas no hacen nada (usa los botones a mano).</div></div></div>")
 
 def perfil_page(msg="", ok=False, edit_user=None):
-    import urllib.parse as _up
     esc = html.escape
     yo = getattr(CTX, "user", None)
     mirol = getattr(CTX, "role", None)
@@ -5050,9 +5049,6 @@ def perfil_page(msg="", ok=False, edit_user=None):
     mi_foto = (mi or {}).get("avatar", "")
     big_av = (f'<img class=avatar src="{esc(mi_foto)}" alt="">' if mi_foto.startswith("data:image/")
               else f'<div class=avatar>{esc(yo[0].upper()) if yo else "?"}</div>')
-    banner = ""
-    if msg:
-        banner = f'<div class="banner {"ok" if ok else "err"}">{esc(msg)}</div>'
     # --- tarjeta: cambiar mi clave (solo para lectura; el admin lo hace desde su fila) ---
     if yo and not es_admin:
         card_pw = (
@@ -5899,16 +5895,6 @@ def documentacion_page(embed=False):
     port = CFG.get("PORT", "5637")
     ubox = update_box()
     refresh_meta = "<meta http-equiv=refresh content='15;url=/documentacion#reglas'>" if UPDATE["running"] else ""
-    css = ("body{margin:0;background:#fcfcfb;font:15px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b}"
-           "main{max-width:820px;margin:0 auto;padding:24px 22px}h1{font-size:22px;margin:0 0 4px}"
-           "h2{font-size:16px;margin:26px 0 8px;border-bottom:1px solid #e7e6e2;padding-bottom:6px}"
-           "p,li{color:#33322f}code{background:#f0efec;padding:1px 6px;border-radius:5px;"
-           "font-family:ui-monospace,Consolas,monospace;font-size:13px}"
-           "pre{background:#0b0b0b;color:#e8e8e3;padding:12px 14px;border-radius:8px;overflow-x:auto;font-size:13px}"
-           "pre code{background:none;color:inherit;padding:0}"
-           ".b{display:inline-block;color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px}"
-           "table{border-collapse:collapse;width:100%;margin:8px 0}td,th{border:1px solid #e7e6e2;padding:7px 10px;text-align:left;font-size:14px}"
-           "th{background:#f4f4f2}")
     art = f"""<h2>Las pestañas del menu</h2>
 <table><tr><th>Pestaña</th><th>Que hace</th></tr>
 <tr><td><b>En vivo</b></td><td>Vista principal. Arriba, el <b>resumen de las ultimas 24h</b>:
@@ -6763,11 +6749,11 @@ def cuarentena_page(msg="", es_admin=False):
     y quien mira es admin, aparece el boton Enviar (a la address-list) / Quitar. Si no, dry-run.
     La lista de candidatos la calcula el reporte (cuarentena.json)."""
     esc = html.escape
-    data, gen, vmin, umbral, cand = {}, 0, 0, 3, []
+    data, gen, vmin, cand = {}, 0, 0, []
     try:
         data = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
         gen = data.get("generado", 0); vmin = data.get("ventana_min", 0)
-        umbral = data.get("umbral", 3); cand = data.get("candidatos", [])
+        cand = data.get("candidatos", [])
     except Exception:
         pass
     dns_cand = data.get("dns_candidatos", []); umbral_dns = data.get("umbral_dns", 3)

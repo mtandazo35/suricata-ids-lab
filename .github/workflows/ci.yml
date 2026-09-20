@@ -1,0 +1,30 @@
+name: Validar
+
+# Todo el proyecto vive en un script con Python y JavaScript incrustados en heredocs:
+# un error de sintaxis ahi no se ve al hacer commit, se ve cuando rompe un servidor.
+# Esto corre la misma validacion que validar.sh hace en local, en cada push y PR.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:      # permite lanzarlo a mano desde la pestana Actions
+
+jobs:
+  validar:
+    name: Sintaxis, heredocs, JS y assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # pyflakes detecta lo que ast.parse no ve: nombres no definidos, imports rotos.
+      - name: Instalar pyflakes
+        run: pip install --quiet pyflakes
+
+      # node ya viene en el runner de ubuntu; se usa para node --check del mapa.
+      - name: Validar el repositorio
+        run: bash validar.sh

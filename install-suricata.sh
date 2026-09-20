@@ -1986,7 +1986,7 @@ h2{{position:relative}}
 .tile .lab{{font-size:12px;color:{INK2};margin-top:6px;display:flex;align-items:center;gap:6px}}
 .dot{{width:11px;height:11px;border-radius:3px;display:inline-block}}
 .grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
-.card{{border:1px solid {GRID};border-radius:10px;padding:16px;background:#fff;margin-bottom:16px}}
+.card{{border:1px solid {GRID};border-radius:10px;padding:16px;background:#fff;margin-bottom:16px;display:flex;flex-direction:column}}
 .card.wide{{grid-column:1/-1}}
 .lbl{{font-size:12.5px;fill:#2b2a27;font-weight:600}} .val{{font-size:12px;fill:{INK};font-weight:600}}
 .tick{{font-size:11px;fill:{INK2}}}
@@ -1999,7 +1999,7 @@ font-size:12px;font-weight:600;padding:5px 9px;border-radius:6px;pointer-events:
 opacity:0;transition:opacity .1s;z-index:6;box-shadow:0 2px 8px rgba(0,0,0,.25)}}
 @media(prefers-reduced-motion:reduce){{.tl-bar{{animation:none}}}}
 .muted{{color:{INK2};font-size:12px;margin:8px 0 0}}
-.leyenda{{margin:12px -16px -16px;padding:9px 16px;border-top:1px solid {GRID};background:#fafafa;border-radius:0 0 10px 10px}}
+.leyenda{{margin:16px -16px -16px;margin-top:auto;padding:9px 16px;border-top:1px solid {GRID};background:#fafafa;border-radius:0 0 10px 10px}}
 table{{width:100%;border-collapse:collapse;font-size:12.5px}}
 th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid {GRID};vertical-align:top}}
 th{{color:{INK2};font-weight:600;position:sticky;top:0;background:#fff}}
@@ -5439,16 +5439,27 @@ def documentacion_page(embed=False):
 puertos de destino mas atacados, IPs origen (atacantes), IPs destino (objetivos) y la
 linea de tiempo por intervalos de 30 minutos. Abajo, el <b>feed de los ultimos ataques</b>,
 que se actualiza solo cada 20 segundos.</td></tr>
+<tr><td><b>Top origenes</b></td><td>Ranking del <b>Top 5 de CPEs que mas alertan</b> (quien ataca mas),
+con el desglose de cada uno: puerto origen, IP destino, dueño/organizacion del destino, puerto y
+protocolo. Debajo, el <b>espejo</b>: <b>Top IPs destino mas atacadas</b> (los blancos que reciben mas
+alertas) y que CPEs las golpean &mdash; util para detectar un destino comun (un mismo C2/servidor
+tocado por varios CPEs).</td></tr>
 <tr><td><b>Detalle</b></td><td>La tabla completa de ataques: quien ataca, a que IP y puerto,
 protocolo, tipo de ataque, cuantas veces y desde/hasta cuando. Paginada de 20 en 20; al
 imprimir a PDF salen todas las filas.</td></tr>
-<tr><td><b>Historico</b></td><td>Los ultimos 20 reportes guardados, cada uno abrible. Se
-generan cada 10 minutos y los mas viejos se borran solos.</td></tr>
-<tr><td><b>Exclusiones</b></td><td>Gestiona las IPs que NO quieres ver en el panel (tus DNS,
-tu monitoreo SNMP). Agregar, editar y eliminar; se explica mas abajo.</td></tr>
-<tr><td><b>Ajustes</b></td><td>Tu cuenta (cambiar tu clave y tu foto). Si eres <b>administrador</b>, ademas gestionas
-<b>usuarios</b> (crear, editar, borrar, activar/desactivar y cambiar rol) y los <b>datos de la empresa</b>
-(nombre y logo que salen en la barra superior).</td></tr>
+<tr><td><b>Cuarentena</b></td><td>Los CPEs con <b>infeccion confirmada</b> y los que consultan
+<b>DNS sospechoso</b>, con su <b>nivel de confianza</b>, la <b>evidencia</b> que lo respalda (boton
+"Ver evidencia") y la <b>salud del sensor</b> arriba. Desde aqui se envian/quitan del MikroTik.
+Se explica mas abajo.</td></tr>
+<tr><td><b>Historico</b></td><td>Los reportes guardados de los <b>ultimos 3 dias</b> (una instantanea
+por hora, mas el mas reciente), cada uno abrible. Los mas viejos se borran solos. Paginado.</td></tr>
+<tr><td><b>Exclusiones</b></td><td>Gestiona las IPs/firmas que NO quieres que cuenten (tus DNS,
+tu monitoreo SNMP, un falso positivo puntual). Permite exclusiones <b>temporales</b> y por
+<b>firma (SID)</b>. Se explica mas abajo. Solo <b>administrador</b>.</td></tr>
+<tr><td><b>Ajustes</b></td><td>Tu cuenta (clave y foto). Si eres <b>administrador</b>, ademas: <b>usuarios</b>
+(crear/editar/borrar/rol), <b>datos de la empresa</b> (nombre y logo de la barra), <b>MikroTik</b>
+(conexion y politicas de cuarentena), <b>Reputacion/feeds</b> (Auth-Key de abuse.ch), <b>Bitacora</b>,
+<b>Documentacion</b> y <b>Actualizaciones</b> del panel.</td></tr>
 <tr><td><b>Documentacion</b></td><td>Esta pagina.</td></tr>
 <tr><td><b>Salir</b></td><td>Cierra la sesion.</td></tr>
 </table>
@@ -5456,9 +5467,13 @@ tu monitoreo SNMP). Agregar, editar y eliminar; se explica mas abajo.</td></tr>
 <h2>Cada cuanto se actualiza</h2>
 <ul>
 <li><b>Feed de ultimos ataques</b> (En vivo, abajo): cada <b>20 segundos</b>.</li>
-<li><b>Resumen (tiles, graficos y linea de tiempo), Detalle e Historico</b>: se regeneran
-en segundo plano cada <b>30 minutos</b>. Por eso los graficos casi no cambian entre
+<li><b>Resumen (tiles, graficos y linea de tiempo), Detalle, Top e Historico</b>: se regeneran
+en segundo plano cada <b>5 minutos</b>. Por eso los graficos casi no cambian entre
 recargas y el feed de abajo si (ese es en vivo).</li>
+<li><b>Salud del sensor</b> (tarjeta en Cuarentena): se mide cada <b>~60 segundos</b>.</li>
+<li><b>Cuarentena automatica</b> (si esta activada): las politicas por banda se aplican junto
+con el resumen (cada 5 min), pero hay un <b>barrido rapido cada ~60 s</b> que envia YA a los CPEs
+con <b>infeccion confirmada</b> (no esperan los 5 min). Ver "Cuarentena automatica" mas abajo.</li>
 <li><b>Ventana del resumen</b>: por defecto <b>24 h</b>. Se puede acortar para ver solo la
 <b>actividad reciente</b> (asi una IP ya atendida se cae sola del top al no tener alertas
 nuevas). Se ajusta con <code>VENTANA_MIN</code> en <code>/etc/suricata-dashboard.conf</code>
@@ -5574,11 +5589,15 @@ consulto un dominio malicioso. Esa senal sigue disponible en EveBox filtrando po
 origen, si quieres cazar clientes infectados por sus consultas.</p>
 
 <h2>Usuarios, roles y clave</h2>
-<p>El panel soporta <b>varios usuarios</b> con dos roles:</p>
+<p>El panel soporta <b>varios usuarios</b> con tres roles:</p>
 <ul>
-<li><b>Administrador</b>: acceso total (exclusiones, actualizar reglas, gestionar usuarios).</li>
-<li><b>Solo lectura</b>: ve los paneles y reportes y puede cambiar su propia clave, pero
-no edita exclusiones, ni actualiza reglas, ni gestiona usuarios (ni ve esa pestana).</li>
+<li><b>Administrador</b>: acceso total (exclusiones, MikroTik y politicas, feeds, actualizar
+reglas y panel, gestionar usuarios, bitacora).</li>
+<li><b>Operador</b>: opera el dia a dia &mdash; ve todo y <b>gestiona la cuarentena</b> (enviar/quitar
+CPEs, excluir un destino de falso positivo). <b>No</b> toca usuarios, conexion MikroTik,
+exclusiones de deteccion ni actualizaciones. Cada accion suya queda en la <b>bitacora</b>.</li>
+<li><b>Solo lectura</b>: ve los paneles y reportes y cambia su propia clave; no opera cuarentena
+ni edita nada.</li>
 </ul>
 <p>Todo se maneja en el apartado <b>Perfil</b>: cualquiera cambia su clave; un administrador
 ademas crea/borra usuarios y cambia roles. Las claves se guardan <b>hasheadas</b> (PBKDF2 con sal)
@@ -5682,6 +5701,98 @@ el panel no toca el router.</li>
 address-list todos los CPE de la lista que aun no esten en cuarentena (tope de 50 por accion; si el
 router deja de responder, se detiene y avisa). Cada IP queda con su <b>TTL</b> y se puede sacar con
 <b>Quitar</b>. Toda accion se registra en <code>/var/log/suricata-cuarentena.log</code>.</p>
+
+<h2>Salud del sensor</h2>
+<p>Arriba de la pestana <b>Cuarentena</b> hay una tarjeta que responde de un vistazo si el
+sensor esta <b>viendo trafico</b>. Se mide en segundo plano cada ~60&nbsp;s (cache en
+<code>/var/log/suricata-sensor.json</code>) y distingue:</p>
+<ul>
+<li><b>Viendo trafico</b> (verde): captura activa, con o sin amenazas.</li>
+<li><b>Sin trafico</b> / <b>Receptor TZSP caido</b> / <b>Suricata detenido</b> (rojo): no llega nada
+que inspeccionar &mdash; revisa el espejo del MikroTik o los servicios.</li>
+<li><b>Captura con perdidas</b> (ambar): Suricata descarta paquetes (drop ratio alto).</li>
+<li><b>Reporte desactualizado</b> (ambar): el resumen no se regenera; revisa el panel.</li>
+</ul>
+<p>Muestra chips de servicios, interfaces de captura, paquetes/s y % de perdidas. Usa
+<code>suricatasc iface-stat</code> y <code>systemctl is-active</code>.</p>
+
+<h2>Por que un CPE es candidato: confianza y evidencia</h2>
+<p>Una coincidencia en una lista o varias alertas repetidas <b>no bastan</b> para confirmar una
+infeccion. Cada candidato lleva un <b>nivel de confianza</b>:</p>
+<ul>
+<li><b>Alta confianza</b>: hay <b>≥2 evidencias independientes</b> (firmas CnC distintas, reputacion
+del destino, persistencia, campana, DNS). Es lo que se envia con "Enviar alta confianza".</li>
+<li><b>Sospechoso</b>: solo repeticion, sin corroboracion &rarr; vigilar, no aislar todavia.</li>
+</ul>
+<p>El boton <b>Ver evidencia</b> abre la <b>ficha del CPE</b>, que muestra: el <b>cliente/abonado</b>
+(nombre PPPoE/DHCP tomado del MikroTik), la <b>actividad</b> (a que destinos hablo), las <b>alertas</b>
+con su SID/firma/fecha/flow_id, las <b>coincidencias de reputacion</b> con su fuente/CIDR y su
+<b>vigencia</b> (si el feed sigue vigente o caduco), la <b>corroboracion</b> independiente y la
+<b>decision</b>. Si el destino no tiene DNS inverso, se muestra el <b>operador de red</b> del bloque
+(via RDAP) en vez de "sin PTR".</p>
+<p><b>Quien tenia la IP en el momento del evento:</b> el panel guarda un historico de asignaciones
+(PPPoE/DHCP). Si la IP cambio de dueño entre el ataque y ahora, la ficha lo avisa &mdash; asi no se
+culpa al cliente que hoy tiene esa IP por lo que hizo otro antes.</p>
+
+<h2>Cuarentena automatica (politicas por banda)</h2>
+<p>Ademas de enviar a mano, el panel puede actuar solo. En <b>Ajustes &rarr; MikroTik</b>, con
+<b>Aplicar politicas automaticamente</b> activado, defines que hacer por <b>banda de riesgo</b>:</p>
+<table><tr><th>Banda</th><th>Accion posible</th></tr>
+<tr><td><b>ALTO</b> / <b>MEDIO</b> / <b>BAJO</b></td>
+<td><b>nada</b> (no hacer), <b>notificar</b> (solo avisar, dedupe 6&nbsp;h), <b>dns</b> (a la lista de
+DNS sospechoso) o <b>cuarentena</b> (a la address-list de bloqueo).</td></tr></table>
+<p>Las politicas se aplican junto con el resumen (cada 5&nbsp;min) y <b>liberan solas</b> a los CPEs
+que dejan de calificar. Ademas:</p>
+<ul>
+<li><b>Barrido rapido de ALTO (~60&nbsp;s):</b> si <b>ALTO &rarr; cuarentena</b>, un chequeo ligero cada
+minuto envia <b>ya</b> a los CPEs con <b>infeccion confirmada</b> (firmas CnC repetidas), sin esperar
+los 5&nbsp;min. Es conservador (solo infeccion confirmada), respeta allowlist, destinos de confianza y
+exclusiones, con <b>anti-rebote de 60&nbsp;s</b> por CPE. MEDIO/BAJO siguen en el ciclo de 5&nbsp;min.</li>
+<li><b>Auto-mantener:</b> las IPs entran sin caducidad y se liberan cuando el CPE deja de atacar (en
+vez de caducar por TTL).</li>
+</ul>
+
+<h2>Falsos positivos: excluir un destino y liberar en cadena</h2>
+<p>Si una IP <b>destino</b> (p.ej. un DNS publico) dispara falsos positivos en muchos CPEs, en la
+pestana Cuarentena esta <b>Excluir destino (falso positivo)</b>: marca esa IP como <b>confiable</b>,
+sus alertas dejan de contar y se <b>liberan automaticamente</b> todos los CPEs que fueron a la lista
+por su culpa. Los destinos confiables se guardan en <code>/etc/suricata-destinos-confianza.lst</code>.</p>
+
+<h2>Allowlist "nunca bloquear"</h2>
+<p>En <b>Ajustes</b> puedes definir IPs/CIDR que <b>jamas</b> van a cuarentena (tu infraestructura,
+clientes criticos), aunque disparen alertas. Se guardan en
+<code>/etc/suricata-nunca-bloquear.lst</code> y las respetan tanto las politicas como el barrido rapido.</p>
+
+<h2>Reputacion / feeds (abuse.ch)</h2>
+<p>El panel enriquece los destinos con <b>feeds de reputacion</b> (IPs/CIDR y dominios maliciosos)
+con su <b>procedencia</b> y <b>caducidad</b>. En <b>Ajustes &rarr; Reputacion/feeds</b> (admin) se pega
+la <b>Auth-Key</b> de abuse.ch (URLhaus/ThreatFox); se guarda <b>solo-escritura</b> en
+<code>/etc/suricata-feeds.conf</code> (permisos 600, no se vuelve a mostrar) y hay un <b>validador</b>
+que comprueba que la clave es valida antes de guardarla. Feodo no necesita clave. La tabla muestra el
+estado por fuente (vigente/vacia/caducada) y un boton para actualizar los feeds al momento.</p>
+
+<h2>Bitacora (auditoria)</h2>
+<p>Toda accion sensible queda registrada: accesos, envios/quitados de cuarentena, cambios de
+configuracion, usuarios y actualizaciones, con <b>quien, que, cuando y desde que IP</b>. Se ve en
+<b>Ajustes &rarr; Bitacora</b> (admin), con buscador y paginacion.</p>
+
+<h2>Avisos por Telegram</h2>
+<p>Cuando un CPE va a cuarentena (a mano, por politica o por el barrido rapido) se manda un aviso por
+Telegram con el <b>cliente/abonado</b>, la <b>accion</b> (a que lista), el <b>nivel de confianza</b>, la
+<b>evidencia</b> (top 3) y un enlace a la <b>ficha</b>. Hay dedupe por IP (no re-avisa dentro de 6&nbsp;h)
+y los envios masivos mandan un solo resumen. Usa el mismo <code>TELEGRAM_TOKEN</code>/<code>CHAT_ID</code>
+del informe diario. Para que el enlace de la ficha sea clicable, pon <code>PANEL_URL</code> en
+<code>/etc/suricata-dashboard.conf</code>.</p>
+
+<h2>Actualizar el panel (boton) y recuperacion</h2>
+<p>En <b>Ajustes &rarr; Actualizaciones</b> el admin ve la version desplegada y, si hay una nueva en
+GitHub, un boton con la lista de mejoras. El actualizador (<code>suricata-panel-update</code>) baja el
+ultimo commit por SHA, valida el codigo (<code>ast</code>/<code>sh -n</code>), <b>respalda la version
+actual</b> en <code>/root/backups/panel/</code> (conserva 5) y reinicia el panel. Luego hace un
+<b>health-check</b>: si el panel no responde, <b>revierte solo</b> al respaldo previo. No toca tu
+configuracion (usuarios, exclusiones, empresa, IPs de confianza, <code>.conf</code>, suricata.yaml ni
+las units). El registro queda en <code>/tmp/suricata-panel-update.log</code> y el resultado en
+<code>/var/log/suricata-update-result.json</code>.</p>
 
 <h2>Reinstalar o actualizar</h2>
 <p>Todo esta en un instalador idempotente. Para actualizar a la ultima version

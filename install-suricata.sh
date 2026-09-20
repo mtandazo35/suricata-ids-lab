@@ -1759,7 +1759,61 @@ def top_origenes_section(n_src=5, n_sub=8):
         "<span style='color:#a15c12;font-weight:700'>naranja</span> = dominio del dueño pero no es un gran servicio; "
         "<b>sin PTR</b> = IP sin nombre publico (frecuente en botnets/hosting sucio).</p>"
         f"<div class=\"topwrap\">{''.join(cards)}</div></section>"
+        + top_destinos_section() +
         "<!--TOP_FIN-->")
+
+def _dst_badge(dst):
+    """Chip del dueño/reputacion de una IP destino, para la cabecera de su tarjeta."""
+    fuente = es_malo(dst)
+    if fuente:
+        return (f"<span class='obadge bad' title='Destino en lista de reputacion ({esc(fuente)})'>"
+                f"&#9888; {esc(fuente)}</span>")
+    org, legit = duenio(dst)
+    if org in ("-", "sin PTR"):
+        return "<span class='obadge none'>sin PTR</span>"
+    cls = "ok" if legit else "unk"
+    return f"<span class='obadge {cls}'>{esc(org)}</span>"
+
+def top_destinos_section(n_dst=5, n_sub=8):
+    """Espejo del anterior: IPs DESTINO mas atacadas (las mas golpeadas) y QUE CPEs las
+    atacan. Sirve para ver blancos comunes (un mismo C2/servidor tocado por varios CPEs)."""
+    tops = [(d, c) for d, c in by_dst.most_common() if d and d != "?"][:n_dst]
+    if not tops:
+        return ("<section class=\"card\"><h2>Top IPs destino mas atacadas</h2>"
+                "<p class=\"muted\">Sin ataques en la ventana.</p></section>")
+    cards = []
+    for i, (dst, tot) in enumerate(tops, 1):
+        agg = {}                       # (src,sport,dport,proto) -> veces
+        srcs = set()
+        for (s, sp, d, dp, pr, sig), v in flujos.items():
+            if d != dst:
+                continue
+            agg[(s, sp, dp, pr)] = agg.get((s, sp, dp, pr), 0) + v[0]
+            srcs.add(s)
+        sub = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:n_sub]
+        rows = "".join(
+            f"<tr><td class='mono' style='color:#184f95'>{esc(s or '-')}</td>"
+            f"<td class='mono'>{esc(sp or '-')}</td>"
+            f"<td class='mono'>{esc(dp or '-')}</td>"
+            f"<td class='mono'>{esc((pr or '-').upper())}</td>"
+            f"<td class='num'>{c:,}</td></tr>" for (s, sp, dp, pr), c in sub)
+        cards.append(
+            f"<div class='tcard'>"
+            f"<div class='thd'><span class='rank'>#{i}</span>"
+            f"<span class='ipx mono'>{esc(dst)}</span>{_dst_badge(dst)}"
+            f"<span class='tot'>{tot:,} alertas</span>"
+            f"<span class='meta'>&larr; {len(srcs):,} CPE origen lo atacan</span></div>"
+            f"<div class='tablewrap'><table><thead><tr>"
+            f"<th>CPE origen (quien ataca)</th><th>Puerto origen</th>"
+            f"<th class='num'>Puerto destino</th><th>Protocolo</th><th class='num'>Peticiones</th>"
+            f"</tr></thead><tbody>{rows}</tbody></table></div></div>")
+    _guardar_ipinfo()
+    return (
+        "<section class=\"card\" style=\"margin-top:16px\"><h2>Top IPs destino mas atacadas (y quien las ataca)</h2>"
+        "<p class=\"muted\" style=\"margin:0 0 12px\">El espejo del cuadro anterior: los blancos que reciben mas alertas y "
+        "los CPEs de tu red que los golpean. Util para detectar un <b>destino comun</b> (un mismo C2 o servidor tocado por "
+        "varios CPEs a la vez). El chip muestra el dueño/reputacion del destino.</p>"
+        f"<div class=\"topwrap\">{''.join(cards)}</div></section>")
 
 top_sec = top_origenes_section()
 

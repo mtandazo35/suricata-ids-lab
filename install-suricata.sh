@@ -2084,15 +2084,34 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
 out = os.path.join(LOGDIR, "report-" + datetime.now(TZ_EC).strftime("%Y%m%d-%H%M") + ".html")
 open(out, "w", encoding="utf-8").write(doc)
 
-# Historico acotado: conservar solo los 20 reportes HTML mas recientes (el panel genera
-# uno cada 10 min, asi que sin esto se acumulan). Se corre en cada generacion.
+# Historico acotado: conservar los reportes de los ULTIMOS 3 DIAS, pero solo UNA
+# instantanea por hora (el panel regenera cada ~5 min; sin adelgazar serian ~864
+# archivos). Se conserva SIEMPRE el mas nuevo. Se corre en cada generacion.
 try:
-    hs = sorted(glob.glob(f"{LOGDIR}/report-*.html"), key=os.path.getmtime, reverse=True)
-    for viejo in hs[20:]:
+    RET_DIAS = 3
+    ahora = time.time()
+    hs = glob.glob(f"{LOGDIR}/report-*.html")
+    nuevo = max(hs, key=os.path.getmtime) if hs else None
+    vistos = set()
+    if nuevo:
+        vistos.add(int(os.path.getmtime(nuevo) // 3600))   # la hora del mas nuevo ya esta cubierta
+    for f in sorted(hs, key=os.path.getmtime, reverse=True):
+        if f == nuevo:
+            continue
         try:
-            os.remove(viejo)
+            mt = os.path.getmtime(f)
         except OSError:
-            pass
+            continue
+        if ahora - mt > RET_DIAS * 86400:          # mas viejo que la retencion -> fuera
+            try: os.remove(f)
+            except OSError: pass
+            continue
+        bucket = int(mt // 3600)                    # 1 por hora: el primero (mas nuevo) manda
+        if bucket in vistos:
+            try: os.remove(f)                        # ya hay uno mas nuevo en esa hora
+            except OSError: pass
+        else:
+            vistos.add(bucket)
 except OSError:
     pass
 
@@ -5750,7 +5769,8 @@ def historico_page():
             ".pager button:disabled{opacity:.4;cursor:default}.pager #hpi{font-weight:600;font-size:13px;color:#52514e}"
             "</style></head><body>"
             "<main><h1>Reportes guardados</h1>"
-            "<p style='color:#8a8a86;font-size:13px;margin:0 0 8px'>Se guardan los ultimos 3 dias.</p>"
+            "<p style='color:#8a8a86;font-size:13px;margin:0 0 8px'>Se guardan los ultimos 3 dias "
+            "(una instantanea por hora, mas el mas reciente).</p>"
             "<table><tbody id=hbody>"
             + ("".join(rows) or "<tr><td>Sin reportes todavia.</td></tr>")
             + "</tbody></table>" + pager + script + "</main></body></html>")

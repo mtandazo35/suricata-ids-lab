@@ -1112,10 +1112,21 @@ by_src = Counter()
 by_dst = Counter()
 by_hour = Counter()
 pais_dst = Counter()   # alertas por PAIS del destino (para el mapa "a donde atacan")
-# detalle por pais para el mapa: que IPs destino, que puertos y que CPEs (tu red) peticionan
+# Detalle por pais para el mapa: que IPs destino, que puertos y que CPEs (tu red) peticionan.
+# OJO con la cardinalidad: pais_srcs y pais_ports no guardan "uno por CPE/puerto" sino un
+# par (pais, CPE) y (pais, puerto) -> en un espejo de ISP un CPE que toca 20 paises ocupa
+# 20 entradas y el crecimiento es MULTIPLICATIVO. Sin tope es el mismo tipo de fuga que
+# tumbo la VM por OOM. Solo se muestran los 4-6 primeros de cada lista, asi que acotar no
+# cambia lo que se ve (el "+N mas" pasa a ser un minimo, que sigue siendo cierto).
+MAX_PAIS_CARD = 800
 pais_ips = defaultdict(Counter)     # cc -> Counter(ip_destino -> alertas)
 pais_ports = defaultdict(Counter)   # cc -> Counter("dport/proto" -> alertas)
 pais_srcs = defaultdict(Counter)    # cc -> Counter(cpe_origen -> alertas)
+
+def _cuenta_acotada(contador, clave):
+    """Suma 1 solo si la clave ya existe o aun hay sitio: cota la RAM por pais."""
+    if clave in contador or len(contador) < MAX_PAIS_CARD:
+        contador[clave] += 1
 
 # --- GeoIP IP->pais (offline, base DB-IP lite via ip-location-db, CC-BY-4.0) ---
 # Formato compacto en /var/lib/suricata-geoip/ipv4.bin: [uint32 N][N x start u32]
@@ -1254,7 +1265,12 @@ for p in files:
                         if _tv is None or _tv >= cutoff:
                             _s = _sm.group(1)
                             dns_hits[_s] += 1
-                            dns_sids[_s].add("dom:" + _dom)
+                            # tope como el de dst_by_src: con tunel DNS o dominios DGA
+                            # (subdominios aleatorios bajo un dominio de los feeds) este
+                            # set crecia sin fin. Solo se usa su len(), asi que acotarlo
+                            # no cambia ninguna decision.
+                            if len(dns_sids[_s]) < MAX_CARD:
+                                dns_sids[_s].add("dom:" + _dom[:80])
                             dns_sig[_s] = "DNS a dominio malo: " + _dom[:60]
             if '"event_type":"alert"' not in line:
                 continue
@@ -1277,10 +1293,10 @@ for p in files:
             _cc = pais(dst)                    # pais del destino (mapa "a donde atacan")
             if _cc:
                 pais_dst[_cc] += 1
-                pais_ips[_cc][dst] += 1        # detalle del mapa: a que IPs y puertos, y desde que CPE
-                pais_srcs[_cc][src] += 1
+                _cuenta_acotada(pais_ips[_cc], dst)    # detalle del mapa: a que IPs, puertos y desde que CPE
+                _cuenta_acotada(pais_srcs[_cc], src)
                 if dport != "":
-                    pais_ports[_cc][f"{dport}/{proto}"] += 1
+                    _cuenta_acotada(pais_ports[_cc], f"{dport}/{proto}")
             if dport != "":
                 by_dport[f"{dport}/{proto}"] += 1
             # --- senales de riesgo por CPE ---
@@ -2525,7 +2541,14 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
 </main></body></html>"""
 
 out = os.path.join(LOGDIR, "report-" + datetime.now(TZ_EC).strftime("%Y%m%d-%H%M") + ".html")
-open(out, "w", encoding="utf-8").write(doc)
+# Escritura atomica (.tmp + replace), como el resto del script. Si no, el archivo existe
+# con mtime nuevo desde el primer byte: el panel lo elige por mtime, no encuentra el
+# <main> y sirve "En vivo" en blanco mientras se escribe; y si el generador muere a
+# media escritura, ese HTML truncado queda como el mas reciente hasta el ciclo siguiente.
+_tmp_out = out + ".tmp"
+with open(_tmp_out, "w", encoding="utf-8") as _fo:
+    _fo.write(doc)
+os.replace(_tmp_out, out)
 
 # Historico acotado: conservar los reportes de los ULTIMOS 3 DIAS, pero solo UNA
 # instantanea por hora (el panel regenera cada ~5 min; sin adelgazar serian ~864
@@ -3091,6 +3114,15 @@ GEN = "/usr/local/bin/suricata-html-report"
 CONF = "/etc/suricata-dashboard.conf"
 REFRESH_SECS = 300    # regeneracion del resumen en segundo plano: cada 5 min (tiles, graficos, linea de tiempo y Top 5)
 FORCE_REGEN = False   # el selector de ventana lo pone True para regenerar el resumen ya
+REGEN_MIN_SECS = 60   # separacion minima entre regeneraciones FORZADAS (ver pedir_regen)
+
+def pedir_regen():
+    """Pide regenerar el resumen cuanto antes. Es solo una marca: el hilo de fondo la
+    atiende como mucho una vez cada REGEN_MIN_SECS. Importa porque un quitado masivo o
+    una politica que mete y saca al mismo CPE pueden pedirlo decenas de veces seguidas, y
+    generar el reporte es caro: mientras corre, ese mismo hilo no hace el barrido rapido
+    ni mide la salud del sensor."""
+    globals()["FORCE_REGEN"] = True
 
 def conf():
     # PROXIES: IPs de los proxies inversos de confianza, separadas por coma. SOLO desde
@@ -3344,11 +3376,34 @@ def mk_remove(ip, lista=None):
         try: s.close()
         except Exception: pass
 
+# Un solo cerrojo para el registro de enviados. Lo tocan a la vez los hilos de las
+# peticiones HTTP y el hilo de fondo (barrido rapido, reconciliador, politicas). Sin el,
+# dos escrituras solapadas sobre el mismo temporal pueden publicar un JSON a medias, y
+# como cargar_enviados() se traga cualquier error devolviendo {}, se perderia el registro
+# ENTERO en silencio: los CPEs seguirian bloqueados en el router pero el panel ya no los
+# veria (ni los liberaria).
+_ENV_LOCK = threading.RLock()
+
 def cargar_enviados(path=MK_SENT):
     try:
         return json.load(open(path, encoding="utf-8"))
     except Exception:
         return {}
+
+def quitar_enviados(ips, path=MK_SENT):
+    """Saca IPs del registro releyendolo DENTRO del cerrojo. Importa porque entre que se
+    decide quitar y se guarda pueden pasar minutos hablando con el router: guardar una
+    foto vieja borraria lo que otro hilo anoto mientras tanto (p.ej. un CPE que el barrido
+    rapido acaba de mandar a cuarentena), dejandolo bloqueado y fuera del panel."""
+    quitadas = []
+    with _ENV_LOCK:
+        env = cargar_enviados(path)
+        for ip in ips:
+            if env.pop(ip, None) is not None:
+                quitadas.append(ip)
+        if quitadas:
+            guardar_enviados(env, path)
+    return quitadas
 
 def guardar_enviados(d, path=MK_SENT):
     # El Top del resumen es una FOTO que se regenera cada 5 min y lee este archivo para
@@ -3358,19 +3413,22 @@ def guardar_enviados(d, path=MK_SENT):
     # ruta por ruta ya fallo (enviar lo hacia, quitar no).
     # Solo cuenta el alta/baja de IPs; el refresco de metadatos (last_eval/sigue) ocurre
     # en cada ciclo y regenerar por eso anularia la cache de 5 min.
-    try:
+    # El temporal lleva pid+hilo: con uno compartido, dos escrituras solapadas (una
+    # peticion HTTP y el hilo de fondo) se pisan y pueden publicar un JSON a medias;
+    # cargar_enviados() devolveria {} y se perderia el registro entero en silencio.
+    tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+    with _ENV_LOCK:
         antes = set(cargar_enviados(path).keys())
-    except Exception:
-        antes = None
-    try:
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(d, f)
-        os.replace(tmp, path)
-    except OSError:
-        return
-    if antes is not None and antes != set(d.keys()):
-        globals()["FORCE_REGEN"] = True
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(d, f)
+            os.replace(tmp, path)
+        except OSError:
+            try: os.unlink(tmp)
+            except OSError: pass
+            return
+    if antes != set(d.keys()):
+        pedir_regen()
 
 BITACORA_LOG = "/var/log/suricata-bitacora.log"   # auditoria: quien hizo que y cuando
 
@@ -4713,6 +4771,7 @@ def refrescador():
     ult_updchk = 0.0
     ult_sensor = 0.0
     ult_fast = 0.0
+    ult_forzado = 0.0   # ultima regeneracion pedida a mano/por cambios (ver REGEN_MIN_SECS)
     while True:
         global FORCE_REGEN
         if time.time() - ult_fast > 60:        # cada ~60s: enviar YA los ALTO/infeccion confirmada
@@ -4734,13 +4793,20 @@ def refrescador():
             except Exception: pass
             ult_sensor = time.time()
         nr = newest_report()
-        stale = FORCE_REGEN or (nr is None) or (time.time() - os.path.getmtime(nr) >= REFRESH_SECS)
+        # una regeneracion FORZADA se atiende como mucho cada REGEN_MIN_SECS; la marca no
+        # se pierde, solo se agrupa (un lote de cambios = una sola generacion)
+        forzado = FORCE_REGEN and (time.time() - ult_forzado >= REGEN_MIN_SECS)
+        stale = forzado or (nr is None) or (time.time() - os.path.getmtime(nr) >= REFRESH_SECS)
         if stale:
-            FORCE_REGEN = False
+            if forzado:
+                ult_forzado = time.time()
             try:
                 mk_sync_enviados()   # el registro del panel refleja la lista real del MikroTik
             except Exception:
                 pass
+            # se limpia DESPUES del sync: lo que cambie el sync ya entra en esta misma
+            # generacion, asi no queda pidiendo otra identica para el ciclo siguiente
+            FORCE_REGEN = False
             try:
                 refrescar_abonados()  # mapa IP->abonado (PPPoE/DHCP) para la ficha de evidencia
             except Exception:
@@ -7198,8 +7264,13 @@ def cuarentena_page(msg="", es_admin=False):
             "var i=0,ok=0,mal=0;"
             "function pinta(){barra.style.width=Math.round(i/filas.length*100)+'%';"
             "sub.innerHTML='Quitando <b>'+i+'</b> de <b>'+filas.length+'</b>\\u2026';}"
-            "function fin(){sub.innerHTML='Listo: <b>'+ok+'</b> quitada(s)'"
+            "function fin(){window.masRun=false;bn.disabled=false;refresca();"
+            "sub.innerHTML='Listo: <b>'+ok+'</b> quitada(s)'"
             "+(mal?', <b>'+mal+'</b> con error':'')+'. Actualizando\\u2026';"
+            # esta recarga no es un submit ni un refresco del navegador, asi que _POS_JS no
+            # restauraria la posicion y la pagina saltaria arriba: se deja marcada a mano
+            "try{sessionStorage.setItem('pos:'+location.pathname,String(window.scrollY||0));"
+            "sessionStorage.setItem('posact:'+location.pathname,'1');}catch(e){}"
             "setTimeout(function(){location.href='/cuarentena?msg='"
             "+encodeURIComponent(ok+' entrada(s) quitada(s)'+(mal?'; '+mal+' con error':''));},900);}"
             "function paso(){if(i>=filas.length)return fin();var fila=filas[i];"
@@ -7811,7 +7882,11 @@ class H(BaseHTTPRequestHandler):
                 ok, err = mk_remove(ip)
             except Exception as ex:
                 ok, err = False, str(ex)
-            env = cargar_enviados(); env.pop(ip, None); guardar_enviados(env)
+            # solo se saca del registro si el router confirmo: si falla y se borraba
+            # igual, el CPE quedaba bloqueado en el router pero invisible en el panel,
+            # sin forma de reintentarlo ni de liberarlo
+            if ok:
+                quitar_enviados([ip])
             mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), err)
             return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
         if ruta == "/cuarentena/quitar-uno":
@@ -7827,16 +7902,20 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 return self._json({"ok": False, "ip": ip, "err": "IP invalida"})
             es_dns = (tipo == "dns")
+            reg = MK_SENT_DNS if es_dns else MK_SENT
+            # La IP debe estar en ESE registro. Si no, mk_remove consultaria la otra
+            # address-list, no encontraria nada y devolveria "0 entradas quitadas" como
+            # exito: saldria un visto bueno sin haber quitado nada del router.
+            if ip not in cargar_enviados(reg):
+                return self._json({"ok": False, "ip": ip,
+                                   "err": "no esta en esa lista del panel"})
             lst = cargar_mk().get("LIST_DNS", "suricata-dns-sospechoso") if es_dns else ""
             try:
                 ok, err = mk_remove(ip, lista=lst) if es_dns else mk_remove(ip)
             except Exception as ex:
                 ok, err = False, str(ex)
             if ok:
-                cual = MK_SENT_DNS if es_dns else None
-                env = cargar_enviados(cual) if es_dns else cargar_enviados()
-                env.pop(ip, None)
-                guardar_enviados(env, cual) if es_dns else guardar_enviados(env)
+                quitar_enviados([ip], reg)
             mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"),
                    (f"lista={lst} " if es_dns else "") + f"masivo {err}")
             return self._json({"ok": bool(ok), "ip": ip, "err": "" if ok else (err or "fallo")})
@@ -7849,37 +7928,52 @@ class H(BaseHTTPRequestHandler):
             if not sels:
                 return self._redirect("/cuarentena?msg=" + _up.quote("No seleccionaste ninguna IP"))
             m = cargar_mk(); lst_dns = m.get("LIST_DNS", "suricata-dns-sospechoso")
-            env = cargar_enviados(); env_dns = cargar_enviados(MK_SENT_DNS)
             quien = getattr(CTX, "user", "?")
-            ok_n = 0; errores = []
-            for s in sels[:500]:               # tope defensivo por si llega un POST enorme
+            TOPE = 500                          # tope defensivo por si llega un POST enorme
+            sobran = max(0, len(sels) - TOPE)
+            en_reg = {MK_SENT: cargar_enviados(MK_SENT), MK_SENT_DNS: cargar_enviados(MK_SENT_DNS)}
+            quitadas = {MK_SENT: [], MK_SENT_DNS: []}
+            errores = []; corte = ""
+            for s in sels[:TOPE]:
                 tipo, _, ip = (s or "").partition("|")
                 ip = ip.strip()
                 try:
                     ipaddress.ip_address(ip)
                 except Exception:
                     errores.append(f"{ip or '?'} (IP invalida)"); continue
-                es_dns = (tipo == "dns")
+                reg = MK_SENT_DNS if tipo == "dns" else MK_SENT
+                if ip not in en_reg[reg]:      # evita el falso exito de "0 entradas quitadas"
+                    errores.append(f"{ip} (no esta en esa lista)"); continue
                 try:
-                    ok, err = mk_remove(ip, lista=lst_dns) if es_dns else mk_remove(ip)
+                    ok, err = mk_remove(ip, lista=lst_dns) if reg == MK_SENT_DNS else mk_remove(ip)
                 except Exception as ex:
                     ok, err = False, str(ex)
                 if ok:
-                    ok_n += 1
-                    (env_dns if es_dns else env).pop(ip, None)
+                    quitadas[reg].append(ip)
                 else:
                     errores.append(f"{ip} ({err})")
                 mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, quien,
-                       (f"lista={lst_dns} " if es_dns else "") + f"masivo {err}")
-            # se guarda UNA vez al final: si el router falla a medias, no queda el registro
-            # a medio escribir ni se reescribe el archivo en cada iteracion
-            guardar_enviados(env); guardar_enviados(env_dns, MK_SENT_DNS)
-            resumen = f"{ok_n} entrada(s) quitada(s)"
+                       (f"lista={lst_dns} " if reg == MK_SENT_DNS else "") + f"masivo {err}")
+                if not ok and ("conexion" in (err or "") or "login" in (err or "")):
+                    # el router no responde: seguir seria esperar el timeout por cada IP
+                    # (500 x 6 s = mas de 45 min con el navegador esperando). Igual que
+                    # hace "Enviar todos".
+                    corte = " Se corto: el MikroTik no responde."
+                    break
+            # Se sacan del registro releyendo dentro del cerrojo: entre el primer mk_remove
+            # y este punto pueden haber pasado minutos, y guardar la foto de antes borraria
+            # lo que el hilo de fondo anoto mientras tanto.
+            n_ok = 0
+            for reg, ips in quitadas.items():
+                n_ok += len(quitar_enviados(ips, reg))
+            resumen = f"{n_ok} entrada(s) quitada(s)"
             if errores:
                 resumen += f"; {len(errores)} con error: " + ", ".join(errores[:3])
                 if len(errores) > 3:
                     resumen += f" y {len(errores)-3} mas"
-            return self._redirect("/cuarentena?msg=" + _up.quote(resumen))
+            if sobran:
+                resumen += f". Quedan {sobran} sin procesar (tope de {TOPE} por peticion): repite la operacion."
+            return self._redirect("/cuarentena?msg=" + _up.quote(resumen + corte))
         if ruta == "/cuarentena/excluir-destino":
             if not self._operador():
                 return self._deny()
@@ -7903,7 +7997,8 @@ class H(BaseHTTPRequestHandler):
                 except Exception: return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
                 try: ok, err = mk_remove(ip, lista=lst)
                 except Exception as ex: ok, err = False, str(ex)
-                env = cargar_enviados(MK_SENT_DNS); env.pop(ip, None); guardar_enviados(env, MK_SENT_DNS)
+                if ok:                      # igual que la de infectados: solo si el router confirmo
+                    quitar_enviados([ip], MK_SENT_DNS)
                 mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), f"lista={lst} {err}")
                 return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
             if not (mk_configurado() and m.get("ENABLED") == "1"):

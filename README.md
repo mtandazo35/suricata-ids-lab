@@ -173,6 +173,20 @@ Linux y git no lo delata) y que el **SHA256** de los assets vendorizados siga cu
 las constantes del instalador. Lo mismo corre solo en cada push mediante GitHub Actions
 (`.github/workflows/ci.yml`).
 
+Al final ejecuta las **pruebas funcionales** de [`tests/`](tests/), que es lo que la sintaxis
+no puede decir: que el codigo *haga* lo correcto. No necesitan Suricata ni un MikroTik —
+`tests/extraer.py` saca la pieza real del instalador y la prueba contra dobles:
+
+| Prueba | Que garantiza |
+|---|---|
+| `test_mapa.js` | zoom por pais, detalle por IP/puerto, y que "Vista completa" no pinte paises de negro |
+| `test_orden*.js` | orden ascendente/descendente, fechas por tiempo real, y que el orden sobreviva a la recarga |
+| `test_posicion.js` | que una accion no te mande al principio de la pagina |
+| `test_masivo_*.js` | seleccion, avance visible y que un fallo a mitad no detenga el resto |
+| `test_ruta_*.py` | que el router caido **no** borre del registro, que no haya falsos exitos y que no se pise lo que escribe el hilo de fondo |
+
+Varias nacieron de fallos reales ya corregidos, asi que fallan si el fallo vuelve.
+
 ## Licencia
 
 [MIT](LICENSE). Los archivos bajo `vendor/` son de terceros y mantienen su propia licencia;

@@ -145,6 +145,20 @@ for f in countries-110m.json topojson-client.min.js; do
   fi
 done
 
+# ------------------------------------------------- 6) pruebas de comportamiento
+# La sintaxis no dice si el codigo HACE lo correcto. Estas pruebas ejecutan las
+# piezas reales contra dobles (ver tests/run.sh).
+paso "Pruebas funcionales"
+if [ -x tests/run.sh ] || [ -f tests/run.sh ]; then
+  if bash tests/run.sh >"$TMPD/tests" 2>&1; then
+    grep -E "^\s*(OK|\s)" "$TMPD/tests" | sed 's/^/ /'
+  else
+    mal "fallaron pruebas funcionales"; sed 's/^/        /' "$TMPD/tests"
+  fi
+else
+  avisa "no hay tests/run.sh"
+fi
+
 # ----------------------------------------------------------------------- resumen
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

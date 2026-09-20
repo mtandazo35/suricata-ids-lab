@@ -814,7 +814,7 @@ _mapa_get topojson-client.min.js ec362ac1599ef406ea9e79616a4ad47d4a3b3939882d47d
 if [ ! -s /var/lib/suricata-geoip/ipv4.bin ]; then
   python3 - <<'GEOPY' || echo "geoip: no se construyo (el mapa quedara vacio hasta reconstruir)"
 import urllib.request, ipaddress, array, struct, os
-URL = "https://raw.githubusercontent.com/sapics/ip-location-db/main/geo-whois-asn-country/geo-whois-asn-country-ipv4.csv"
+URL = "https://raw.githubusercontent.com/sapics/ip-location-db/main/dbip-country/dbip-country-ipv4.csv"
 try:
     data = urllib.request.urlopen(URL, timeout=180).read().decode("utf-8", "replace")
 except Exception as e:
@@ -1109,7 +1109,7 @@ by_dst = Counter()
 by_hour = Counter()
 pais_dst = Counter()   # alertas por PAIS del destino (para el mapa "a donde atacan")
 
-# --- GeoIP IP->pais (offline, base de dominio publico ip-location-db, CC0) ---
+# --- GeoIP IP->pais (offline, base DB-IP lite via ip-location-db, CC-BY-4.0) ---
 # Formato compacto en /var/lib/suricata-geoip/ipv4.bin: [uint32 N][N x start u32]
 # [N x end u32][N x 2 bytes cc]. Lo genera el instalador; aqui solo se consulta con
 # busqueda binaria (Python puro, sin dependencias). Si falta, pais() devuelve "".
@@ -1908,22 +1908,23 @@ def mapa_ataques_section():
         aviso = ""
     return (
         "<style>"
-        ".attmap .mapwrap{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}"
-        ".attmap .mapsvg{flex:1 1 520px;min-width:280px;background:#f7f9fc;border:1px solid #e7e6e2;border-radius:10px;overflow:hidden}"
+        ".attmap .mapwrap{display:block}"
+        ".attmap .mapsvg{width:100%;background:#f7f9fc;border:1px solid #e7e6e2;border-radius:10px;overflow:hidden}"
         ".attmap #attackmap{width:100%;height:auto;display:block}"
         ".attmap #attackmap path{transition:fill .2s}.attmap #attackmap path:hover{stroke:#0b0b0b;stroke-width:.8}"
-        ".attmap .maptop{flex:1 1 240px;min-width:220px}"
+        ".attmap .maptop{margin-top:12px}"
+        ".attmap .maptophdr{font-weight:700;font-size:13px;margin:0 0 6px}"
+        ".attmap .maptopgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:0 22px}"
         ".attmap .maprow{display:flex;align-items:center;gap:9px;padding:5px 0;border-bottom:1px solid #f2f1ee;font-size:13px}"
         ".attmap .maprow .cc{font:700 11px ui-monospace,Consolas,monospace;background:#eef2f7;color:#33322f;border-radius:5px;padding:2px 6px}"
         ".attmap .maprow .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
         ".attmap .maprow .ct{font-weight:700;font-variant-numeric:tabular-nums}"
         ".attmap .mapbar{height:6px;border-radius:4px;background:#e34948;min-width:6px}"
         ".attmap .mapempty{color:#6b6a66;font-size:13px;background:#faf9f6;border:1px dashed #e0dfda;border-radius:8px;padding:12px 14px;margin-top:8px}"
-        "@media(max-width:820px){.attmap .mapsvg{flex-basis:100%}}"
         "</style>"
         "<section class=\"card attmap\" style=\"margin-top:16px\"><h2>A donde atacan tus CPEs (destino por pais)</h2>"
         "<p class=\"muted\" style=\"margin:0 0 12px\">" + intro + "</p>" + aviso +
-        "<div class=mapwrap><div class=mapsvg><svg id=attackmap viewBox=\"0 0 1000 500\" "
+        "<div class=mapwrap><div class=mapsvg><svg id=attackmap viewBox=\"0 20 1000 392\" "
         "preserveAspectRatio=\"xMidYMid meet\" role=img aria-label=\"Mapa de destinos\"></svg></div>"
         "<div class=maptop id=attacktop></div></div>"
         "<script>window.__ATTACK_GEO=" + json.dumps(datos) + ";window.__ATTACK_TOTAL=" + str(total) + ";</script>"
@@ -1954,7 +1955,7 @@ def mapa_ataques_section():
         "rows.forEach(function(kv){var iso=kv[0],c=kv[1],nm=NAMES[iso]||iso,pct=tot?Math.max(6,Math.round(c/rows[0][1]*120)):6;"
         "html+='<div class=maprow><span class=cc>'+esc(iso)+'</span><span class=nm>'+esc(nm)+'</span>"
         "<span class=mapbar style=\"width:'+pct+'px\"></span><span class=ct>'+c+'</span></div>';});"
-        "var w=document.getElementById('attacktop');if(w)w.innerHTML=html?('<div style=\"font-weight:700;font-size:13px;margin:0 0 4px\">Top paises destino</div>'+html):'';"
+        "var w=document.getElementById('attacktop');if(w)w.innerHTML=html?('<div class=maptophdr>Top paises destino</div><div class=maptopgrid>'+html+'</div>'):'';"
         "})();</script></section>")
 
 def _dst_badge(dst):
@@ -2181,7 +2182,8 @@ h2{{position:relative}}
 .tile .lab{{font-size:12px;color:{INK2};margin-top:6px;display:flex;align-items:center;gap:6px}}
 .dot{{width:11px;height:11px;border-radius:3px;display:inline-block}}
 .grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
-.card{{border:1px solid {GRID};border-radius:10px;padding:16px;background:#fff;margin-bottom:16px;display:flex;flex-direction:column}}
+.card{{border:1px solid {GRID};border-radius:10px;padding:16px;background:#fff;margin-bottom:16px;display:flex;flex-direction:column;min-width:0}}
+.card>*{{min-width:0;max-width:100%}}  /* los hijos flex encogen y no desbordan la tarjeta (tablas anchas scrollean en su .tablewrap) */
 .card.wide{{grid-column:1/-1}}
 .lbl{{font-size:12.5px;fill:#2b2a27;font-weight:600}} .val{{font-size:12px;fill:{INK};font-weight:600}}
 .tick{{font-size:11px;fill:{INK2}}}
@@ -4431,7 +4433,7 @@ _MAPA_ASSETS = {
     "countries-110m.json": "a73ecc17bac82de28af19fa593f9e1a2e76619c51855490da735b7883ec48715",
     "topojson-client.min.js": "ec362ac1599ef406ea9e79616a4ad47d4a3b3939882d47da7e4bc827a56f629c",
 }
-_GEO_CSV_URL = "https://raw.githubusercontent.com/sapics/ip-location-db/main/geo-whois-asn-country/geo-whois-asn-country-ipv4.csv"
+_GEO_CSV_URL = "https://raw.githubusercontent.com/sapics/ip-location-db/main/dbip-country/dbip-country-ipv4.csv"
 
 def _provisionar_geo():
     """Asegura los assets del mapa y la base GeoIP si faltan. No bloquea el panel."""
@@ -4453,7 +4455,7 @@ def _provisionar_geo():
                 pass
     except OSError:
         pass
-    # 2) base GeoIP IP->pais (dominio publico ip-location-db, CC0) -> binario compacto
+    # 2) base GeoIP IP->pais (DB-IP lite via ip-location-db, CC-BY-4.0) -> binario compacto
     try:
         if os.path.exists(_GEOIP_BIN2) and os.path.getsize(_GEOIP_BIN2) > 0:
             return
@@ -6068,7 +6070,7 @@ trafico sospechoso de tus CPEs). El color sube con el nº de alertas y al lado s
 <b>Top paises destino</b>.</p>
 <ul>
 <li><b>Geolocalizacion offline:</b> la IP destino se traduce a pais con una base
-<b>IP&rarr;pais de dominio publico</b> (ip-location-db, CC0) que se guarda en el servidor
+<b>IP&rarr;pais DB-IP lite</b> (via ip-location-db, CC-BY-4.0, &copy; db-ip.com) que se guarda en el servidor
 (<code>/var/lib/suricata-geoip/ipv4.bin</code>). No usa servicios externos en caliente.</li>
 <li><b>Solo destinos publicos:</b> las IPs privadas (tu red) o sin pais no cuentan en el mapa.</li>
 <li><b>El mapa</b> se dibuja en el navegador con un <b>TopoJSON</b> del mundo servido por el
@@ -7895,7 +7897,7 @@ done
 if [ ! -s /var/lib/suricata-geoip/ipv4.bin ]; then
   python3 - >/dev/null 2>&1 <<'GEOPY' && log "geoip: base construida" || log "geoip: no se construyo (mapa vacio hasta reconstruir)"
 import urllib.request, ipaddress, array, struct, os
-URL="https://raw.githubusercontent.com/sapics/ip-location-db/main/geo-whois-asn-country/geo-whois-asn-country-ipv4.csv"
+URL="https://raw.githubusercontent.com/sapics/ip-location-db/main/dbip-country/dbip-country-ipv4.csv"
 data=urllib.request.urlopen(URL, timeout=180).read().decode("utf-8","replace")
 rows=[]
 for ln in data.splitlines():

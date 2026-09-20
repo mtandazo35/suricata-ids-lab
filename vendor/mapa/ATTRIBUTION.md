@@ -13,5 +13,8 @@ La lógica de coropleta por país (proyección equirectangular, tabla id→ISO2 
 render) se inspiró en **MikroDash** (https://github.com/mtandazo35/MikroDash),
 **MIT License**, © 2026 MikroDash. Reimplementada aquí en el estilo del panel.
 
-La geolocalización IP→país NO usa `geoip-lite` (Node/GeoLite2): se resuelve con una
-base IP→país de dominio público (ip-location-db, CC0) del lado del servidor en Python.
+La geolocalización IP→país NO usa `geoip-lite` (Node/GeoLite2): se resuelve del lado del
+servidor en Python con la base **DB-IP lite** (IP→país), distribuida por
+https://github.com/sapics/ip-location-db (`dbip-country/dbip-country-ipv4.csv`).
+Licencia **CC-BY-4.0**, © [db-ip.com](https://db-ip.com). El instalador la descarga y la
+convierte a un binario compacto en `/var/lib/suricata-geoip/ipv4.bin`.

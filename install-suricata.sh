@@ -2123,14 +2123,25 @@ def mapa_ataques_section():
         # (data-iso=\"\") y les pintaba el borde negro al pulsar 'Vista completa'.
         "function marcar(iso){sel=iso;Array.prototype.forEach.call(svg.querySelectorAll('path[data-iso]'),function(p){"
         "if(iso&&p.getAttribute('data-iso')===iso)p.classList.add('sel');else p.classList.remove('sel');});}"
-        "function abrir(iso){if(!panel)return;marcar(iso);fit(BBOX[iso]);"
+        "function panelDe(iso){if(!panel)return;"
         "panel.innerHTML='<div class=mapdethdr><span class=cc>'+esc(iso)+'</span><b>'+esc(nombre(iso))+'</b>'"
         "+'<span class=dsub>'+dirTxt(iso)+'</span>'"
         "+'<button type=button class=dclose title=\"Cerrar\">&times;</button></div>'"
         "+'<div class=mapdetgrid>'+grupos(iso)+'</div>';"
         "panel.style.display='block';"
         "var b=panel.querySelector('.dclose');if(b)b.addEventListener('click',cerrar);}"
-        "function cerrar(){if(panel)panel.style.display='none';marcar('');reset();}"
+        "function abrir(iso){if(!panel)return;marcar(iso);fit(BBOX[iso]);panelDe(iso);guardarVista();}"
+        "function cerrar(){if(panel)panel.style.display='none';marcar('');reset();guardarVista();}"
+        # --- la pagina se recarga sola cada 5 min: sin esto el mapa volvia al mundo entero
+        # y perdias el pais que estabas mirando ---
+        "var MK='mapa:'+location.pathname,guardaPend=null;"
+        "function guardarVista(){clearTimeout(guardaPend);guardaPend=setTimeout(function(){"
+        "try{sessionStorage.setItem(MK,JSON.stringify({v:vb,s:sel}));}catch(e){}},300);}"
+        "function restaurarVista(){try{var g=JSON.parse(sessionStorage.getItem(MK)||'null');"
+        "if(!g||!g.v||!g.v.w)return;"
+        "vb={x:+g.v.x,y:+g.v.y,w:+g.v.w,h:+g.v.h};setVB();"
+        # se repone la vista exacta (incluido el desplazamiento), no se re-encuadra el pais
+        "if(g.s&&DATA[g.s]){marcar(g.s);panelDe(g.s);}}catch(e){}}"
         "var HOME=window.__ATTACK_HOME||[-78.1,-1.8],home=proj(HOME[0],HOME[1]);"
         "fetch('/vendor/mapa/countries-110m.json').then(function(r){return r.json();}).then(function(topo){"
         "var feats=topojson.feature(topo,topo.objects.countries).features,frag='',cents={};"
@@ -2144,25 +2155,35 @@ def mapa_ataques_section():
         "if(iso){var bb=bboxMain(ft.geometry);if(bb)BBOX[iso]=bb;}"
         "if(c>0){var ce=centroid(ft.geometry);if(ce)cents[iso]=ce;}});"
         # --- flujo de donde -> a donde: arcos animados desde tu red hacia cada pais destino ---
-        "var arcs='';Object.keys(cents).forEach(function(iso){var ce=cents[iso],n=DATA[iso];"
+        "var arcs='';Object.keys(cents).forEach(function(iso,idx){var ce=cents[iso],n=DATA[iso];"
         "var dx=ce[0]-home[0],dy=ce[1]-home[1],len=Math.sqrt(dx*dx+dy*dy);"
         "var mid=[(home[0]+ce[0])/2-dy*0.18,(home[1]+ce[1])/2+dx*0.18];"
         "var d='M'+home[0].toFixed(1)+' '+home[1].toFixed(1)+' Q'+mid[0].toFixed(1)+' '+mid[1].toFixed(1)+' '+ce[0].toFixed(1)+' '+ce[1].toFixed(1);"
         "var w=(0.8+1.8*(n/mx)).toFixed(2);"
         "arcs+='<path d=\"'+d+'\" fill=\"none\" stroke=\"#e34948\" stroke-opacity=\"0.5\" stroke-width=\"'+w+'\" "
         "vector-effect=\"non-scaling-stroke\" pointer-events=\"none\"/>';"
-        "arcs+='<circle r=\"2.1\" fill=\"#e34948\" pointer-events=\"none\"><animateMotion dur=\"'+(1.6+len/900).toFixed(1)+'s\" repeatCount=\"indefinite\" path=\"'+d+'\"/></circle>';});"
+        "arcs+='<circle r=\"2.1\" fill=\"#e34948\" pointer-events=\"none\"><animateMotion dur=\"'+(1.6+len/900).toFixed(1)+'s\" repeatCount=\"indefinite\" path=\"'+d+'\"/></circle>';"
+        # punta del arco: mismo latido que el origen, para ver de un vistazo donde cae cada
+        # flujo. Se desfasa un poco cada uno (begin) para que no parpadeen todos a la vez.
+        "var cx=ce[0].toFixed(1),cy=ce[1].toFixed(1),dl=((idx%7)*0.22).toFixed(2);"
+        "arcs+='<circle cx=\"'+cx+'\" cy=\"'+cy+'\" r=\"2.6\" fill=\"#e34948\" pointer-events=\"none\"/>';"
+        "arcs+='<circle cx=\"'+cx+'\" cy=\"'+cy+'\" r=\"2.6\" fill=\"none\" stroke=\"#e34948\" "
+        "stroke-width=\"1.2\" vector-effect=\"non-scaling-stroke\" pointer-events=\"none\">"
+        "<animate attributeName=\"r\" values=\"2.6;10\" dur=\"1.8s\" begin=\"'+dl+'s\" repeatCount=\"indefinite\"/>"
+        "<animate attributeName=\"stroke-opacity\" values=\"0.7;0\" dur=\"1.8s\" begin=\"'+dl+'s\" repeatCount=\"indefinite\"/>"
+        "</circle>';});"
         "if(Object.keys(cents).length){arcs+='<circle cx=\"'+home[0].toFixed(1)+'\" cy=\"'+home[1].toFixed(1)+'\" r=\"3\" fill=\"#0b0b0b\" pointer-events=\"none\"/>';"
         "arcs+='<circle cx=\"'+home[0].toFixed(1)+'\" cy=\"'+home[1].toFixed(1)+'\" r=\"3\" fill=\"none\" stroke=\"#0b0b0b\" pointer-events=\"none\">"
         "<animate attributeName=\"r\" values=\"3;12\" dur=\"1.8s\" repeatCount=\"indefinite\"/>"
         "<animate attributeName=\"stroke-opacity\" values=\"0.55;0\" dur=\"1.8s\" repeatCount=\"indefinite\"/></circle>';}"
-        "svg.innerHTML=frag+arcs;if(sel)marcar(sel);pintarTop();"
+        "svg.innerHTML=frag+arcs;if(sel)marcar(sel);pintarTop();restaurarVista();"
         "}).catch(function(e){var w=document.getElementById('attacktop');if(w)w.innerHTML='<div class=mapempty>No se pudo cargar el mapa.</div>';});"
         # --- interaccion: hover = detalle, clic = acercar el pais, arrastrar = mover, Ctrl+rueda = zoom ---
         "function isoDe(e){var t=e.target;return (t&&t.getAttribute)?(t.getAttribute('data-iso')||''):'';}"
         "var drag=null,movido=false;"
         "svg.addEventListener('mousedown',function(e){drag={x:e.clientX,y:e.clientY,vx:vb.x,vy:vb.y};movido=false;svg.classList.add('grab');});"
-        "window.addEventListener('mouseup',function(){if(drag){drag=null;svg.classList.remove('grab');}});"
+        "window.addEventListener('mouseup',function(){if(drag){drag=null;svg.classList.remove('grab');"
+        "if(movido)guardarVista();}});"
         "svg.addEventListener('mousemove',function(e){"
         "if(drag){var r=svg.getBoundingClientRect(),dx=e.clientX-drag.x,dy=e.clientY-drag.y;"
         "if(Math.abs(dx)>3||Math.abs(dy)>3){movido=true;hideTip();"
@@ -2172,10 +2193,10 @@ def mapa_ataques_section():
         "svg.addEventListener('click',function(e){if(movido){movido=false;return;}"
         "var iso=isoDe(e);if(iso)abrir(iso);else cerrar();});"
         "svg.addEventListener('wheel',function(e){if(!(e.ctrlKey||e.metaKey))return;"
-        "e.preventDefault();var p=at(e);zoom(e.deltaY<0?0.82:1.22,p[0],p[1]);},{passive:false});"
+        "e.preventDefault();var p=at(e);zoom(e.deltaY<0?0.82:1.22,p[0],p[1]);guardarVista();},{passive:false});"
         "var bi=document.getElementById('mzin'),bo=document.getElementById('mzout'),br=document.getElementById('mzrst');"
-        "if(bi)bi.addEventListener('click',function(){zoom(0.7);});"
-        "if(bo)bo.addEventListener('click',function(){zoom(1.43);});"
+        "if(bi)bi.addEventListener('click',function(){zoom(0.7);guardarVista();});"
+        "if(bo)bo.addEventListener('click',function(){zoom(1.43);guardarVista();});"
         "if(br)br.addEventListener('click',cerrar);"
         "var w=document.getElementById('attacktop');"
         # se pinta ya (aunque el mapa tarde) y otra vez al cargarlo, cuando ya hay nombres de pais
@@ -6564,7 +6585,8 @@ trafico sospechoso de tus CPEs). El color sube con el nº de alertas y al lado s
 <b>IP&rarr;pais DB-IP lite</b> (via ip-location-db, CC-BY-4.0, &copy; db-ip.com) que se guarda en el servidor
 (<code>/var/lib/suricata-geoip/ipv4.bin</code>). No usa servicios externos en caliente.</li>
 <li><b>Flujo "de donde -> a donde":</b> ademas del color, salen <b>arcos animados</b> desde tu red
-hacia cada pais destino (un punto viaja por el arco = sensacion de trafico en vivo). El punto de
+hacia cada pais destino (un punto viaja por el arco = sensacion de trafico en vivo), y <b>cada punta
+late</b> igual que el origen, para ver de un vistazo donde cae cada flujo. El punto de
 origen se puede fijar con <code>MAPA_ORIGEN=lon,lat</code> en <code>/etc/suricata-dashboard.conf</code>
 (por defecto Ecuador); es solo el inicio visual del arco, no un dato real.</li>
 <li><b>Detalle por pais:</b> al <b>pasar el mouse</b> por un pais sale un recuadro con <b>a que IPs
@@ -6575,6 +6597,9 @@ mas repetidos y se indica cuantos mas hay.</li>
 un panel fijo con ese mismo detalle, comodo de leer en el telefono. Puedes <b>arrastrar</b> para
 mover el mapa, usar <b>+</b> / <b>&minus;</b> o <b>Ctrl + rueda</b> para acercar, y <b>Vista completa</b>
 para volver al mundo entero.</li>
+<li><b>No pierde el zoom:</b> la pagina se recarga sola cada 5 min; el mapa <b>repone la vista</b>
+(el zoom, el desplazamiento y el pais que tenias abierto) en vez de volver al mundo entero. Se
+guarda por pestana del navegador, asi que otra pestana o una sesion nueva empiezan limpias.</li>
 <li><b>Cobertura:</b> el mapa reconoce los <b>174 paises</b> del atlas (todos los que trae el
 TopoJSON, mas Kosovo). Si un pais no tiene nombre traducido, se usa el del propio mapa.</li>
 <li><b>Solo destinos publicos:</b> las IPs privadas (tu red) o sin pais no cuentan en el mapa.</li>

@@ -26,6 +26,11 @@ global.topojson={feature:()=>({features:[
   {id:528,properties:{name:'Netherlands'},geometry:{type:'Polygon',coordinates:[[[4,53],[7,53],[7,51],[4,51],[4,53]]]}},
   {id:466,properties:{name:'Mali'},geometry:{type:'Polygon',coordinates:[[[-12,25],[4,25],[4,10],[-12,10],[-12,25]]]}},
   {id:-99,properties:{name:'Kosovo'},geometry:{type:'Polygon',coordinates:[[[20,43],[22,43],[22,42],[20,42],[20,43]]]}}]})};
+global.location={pathname:'/'};
+const guardado=(global.__MAPSTORE=global.__MAPSTORE||{});
+global.sessionStorage={getItem:k=>k in guardado?guardado[k]:null,setItem:(k,v)=>{guardado[k]=String(v);},removeItem:k=>{delete guardado[k];}};
+const realTimeout=setTimeout; global.setTimeout=(f,ms)=>realTimeout(f,0);
+global.clearTimeout=id=>clearInterval(id);
 global.fetch=()=>Promise.resolve({json:()=>Promise.resolve({objects:{countries:{}}})});
 process.on('unhandledRejection',e=>{console.log('REJECT:',e&&e.message,e&&e.stack);});
 try{eval(js);}catch(e){console.log('THROW:',e.message);console.log(e.stack.split('\n').slice(0,4).join('\n'));process.exit(1);}
@@ -50,5 +55,36 @@ setTimeout(()=>{
   console.log('pais sin traduccion usa el nombre del mapa (Mali) y trae su detalle');
   if(els.attacktop.innerHTML.indexOf('Mali')<0)throw new Error('el Top no muestra el nombre');
   console.log('Top paises con nombre correcto');
-  console.log('TODO OK');
+  // punta palpitante en CADA destino (antes solo palpitaba el origen)
+  const pulsos=(out.match(/values="2.6;10"/g)||[]).length;
+  if(pulsos<2) throw new Error('faltan marcas palpitantes en las puntas: '+pulsos);
+  console.log('cada destino tiene su marca palpitante OK ('+pulsos+' puntas)');
+  // la vista debe sobrevivir a la recarga automatica (antes volvia al mundo entero)
+  handlers.attackmap.click({target:{getAttribute:k=>k==='data-iso'?'NL':null}});
+  const vbZoom=svg.getAttribute('viewBox');
+  realTimeout(()=>{
+    const crudo=guardado['mapa:/'];
+    if(!crudo) throw new Error('no guardo la vista del mapa');
+    const g=JSON.parse(crudo);
+    if(g.s!=='NL') throw new Error('no recordo el pais abierto: '+g.s);
+    if(Math.round(g.v.w)!==Math.round(parseFloat(vbZoom.split(' ')[2])))
+      throw new Error('no guardo el zoom real: '+crudo+' vs '+vbZoom);
+    console.log('la vista con zoom se guarda para la recarga OK');
+    // --- SEGUNDA carga de pagina (la recarga automatica de cada 5 min) ---
+    // El mapa se dibuja de cero; debe reponer el zoom y el pais, no volver al mundo.
+    Object.keys(handlers).forEach(k=>delete handlers[k]);
+    Object.keys(els).forEach(k=>{els[k].innerHTML='';els[k].a_viewBox=null;});
+    eval(js);
+    realTimeout(()=>{
+      const vb2=els.attackmap.getAttribute('viewBox');
+      if(vb2===null) throw new Error('la segunda carga no dibujo el mapa');
+      if(vb2==='0.0 20.0 1000.0 392.0')
+        throw new Error('volvio al mundo entero: se perdio el zoom en la recarga');
+      if(vb2!==vbZoom) throw new Error('no repuso la MISMA vista: '+vb2+' vs '+vbZoom);
+      if(els.mapdet.innerHTML.indexOf('Paises Bajos')<0)
+        throw new Error('no repuso el detalle del pais abierto');
+      console.log('tras recargar, conserva zoom y pais abierto OK ('+vb2+')');
+      console.log('TODO OK');
+    },40);
+  },10);
 },80);

@@ -4652,7 +4652,33 @@ border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0
  .nav a.tab{padding:7px 9px;font-size:13px}
  .nav .brand .bn{max-width:150px}
 }
+/* --- tablas ordenables: click en la cabecera ordena asc/desc (JS en _SORT_JS) --- */
+table.orden th[data-sort]{cursor:pointer;user-select:none;white-space:nowrap;position:relative;padding-right:20px}
+table.orden th[data-sort]:hover{color:#2a78d6}
+table.orden th[data-sort]::after{content:"⇅";position:absolute;right:6px;opacity:.32;font-size:11px;font-weight:700}
+table.orden th[data-sort][aria-sort="ascending"]::after{content:"▲";opacity:.9;color:#2a78d6}
+table.orden th[data-sort][aria-sort="descending"]::after{content:"▼";opacity:.9;color:#2a78d6}
+@media(max-width:820px){table.orden th[data-sort]::after{display:none}}
 </style>"""
+
+# Ordenamiento de tablas del lado del cliente. Se aplica a cualquier <table class="orden">:
+# al pulsar una cabecera con data-sort ordena su columna (asc/desc alterno). La clave de
+# orden es data-sort de la celda si existe (util para fechas: epoch), si no su texto; si
+# todas las claves son numericas ordena por numero. Se inyecta una sola vez por pagina.
+_SORT_JS = ("<script>(function(){function key(td){var d=td.getAttribute('data-sort');"
+            "return d!==null?d:(td.textContent||'').trim();}"
+            "function isnum(v){return v!==''&&!isNaN(parseFloat(v))&&isFinite(v);}"
+            "function sortBy(tb,i,dir){var rows=Array.prototype.slice.call(tb.rows);"
+            "var num=rows.every(function(r){return !r.cells[i]||isnum(key(r.cells[i]));});"
+            "rows.sort(function(a,b){var x=a.cells[i]?key(a.cells[i]):'',y=b.cells[i]?key(b.cells[i]):'';"
+            "var c=num?(parseFloat(x)||0)-(parseFloat(y)||0):x.localeCompare(y,'es',{numeric:true,sensitivity:'base'});"
+            "return dir*c;});rows.forEach(function(r){tb.appendChild(r);});}"
+            "document.querySelectorAll('table.orden').forEach(function(t){var tb=t.tBodies[0];if(!tb)return;"
+            "var ths=t.tHead?t.tHead.rows[0].cells:[];Array.prototype.forEach.call(ths,function(th,i){"
+            "if(th.hasAttribute('data-nosort'))return;th.setAttribute('data-sort','');"
+            "th.addEventListener('click',function(){var asc=th.getAttribute('aria-sort')!=='ascending';"
+            "Array.prototype.forEach.call(ths,function(o){o.removeAttribute('aria-sort');});"
+            "th.setAttribute('aria-sort',asc?'ascending':'descending');sortBy(tb,i,asc?1:-1);});});});})();</script>")
 
 # Base de estilos COMPARTIDA por los apartados del panel (fuente unica de tokens y
 # componentes). Se incluye al PRINCIPIO del <style> de cada pagina migrada; las reglas
@@ -4749,7 +4775,7 @@ def nav(active=""):
         elogo = f'<img class="elogo" src="{html.escape(emp["logo"])}" alt="">' if tiene_logo else ""
         enom = f'<span class="en">{html.escape(emp["nombre"])}</span>' if emp.get("nombre") else ""
         empbar = f'<div class="empbar"><div class="empwrap">{elogo}{enom}</div></div>'
-    return _NAV_CSS + navbar + empbar
+    return _NAV_CSS + _SORT_JS + navbar + empbar
 
 # compat: algunas plantillas todavia interpolan {NAV} (barra sin pestana activa marcada)
 NAV = nav()
@@ -5981,6 +6007,10 @@ address-list y TTL. Marca <b>Habilitar</b>.</li>
 (lo agrega a la lista) y luego <b>Quitar</b> (lo saca). Todo queda en
 <code>/var/log/suricata-cuarentena.log</code>.</li>
 </ol>
+<p>En la tabla <b>Enviados manualmente</b> puedes <b>ordenar por cualquier columna</b>: haz
+clic en la cabecera (CPE, Lista, Por, Enviado, Ultima revision&hellip;) para ordenar de forma
+<b>ascendente</b>, y otra vez para <b>descendente</b>. Las columnas de fecha ordenan por
+tiempo real, no por texto.</p>
 <p><b>Seguridad:</b> usa un usuario API solo con <code>api,read,write,test</code> (no full), limita el
 servicio API a la IP del servidor Suricata, y si el enlace no es de confianza usa <b>API-SSL</b>. Si
 dejas el envio <b>deshabilitado</b>, la pestana Cuarentena solo <b>sugiere</b> (no toca el router).</p>
@@ -6686,7 +6716,9 @@ def cuarentena_page(msg="", es_admin=False):
                        "Sin CPEs consultando dominios maliciosos en la ventana.")
     # --- Enviados manualmente (desde Top origenes): IPs en la lista que NO son candidatos ---
     def _fila_manual(ip, mm, pref, lista):
-        cuando = time.strftime("%d/%m %H:%M", time.localtime(mm.get("cuando", 0)))
+        _cuando_ts = mm.get("cuando", 0)
+        cuando = time.strftime("%d/%m %H:%M", time.localtime(_cuando_ts))
+        _rev_ts = mm.get("last_eval", 0)
         quitar = (f"<form method=post action='/{pref}/quitar' style='display:inline'>"
                   f"<input type=hidden name=ip value='{esc(ip)}'>"
                   f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de {esc(lista)}?')\">Quitar</button></form>"
@@ -6695,8 +6727,8 @@ def cuarentena_page(msg="", es_admin=False):
         return (f"<tr><td data-label='CPE' class='mono ipx'>{esc(ip)}{_cli(ip)}</td>"
                 f"<td data-label='Lista' class='mono'>{esc(lista)}</td>"
                 f"<td data-label='Motivo' class='mot'>{mot}</td><td data-label='Por'>{esc(mm.get('por','?'))}</td>"
-                f"<td data-label='Enviado' class='mono'>{cuando}</td>"
-                f"<td data-label='Ultima revision' class='rowmeta' style='margin:0'>{_rev(mm) or '&mdash;'}</td>"
+                f"<td data-label='Enviado' class='mono' data-sort='{int(_cuando_ts)}'>{cuando}</td>"
+                f"<td data-label='Ultima revision' class='rowmeta' style='margin:0' data-sort='{int(_rev_ts)}'>{_rev(mm) or '&mdash;'}</td>"
                 f"<td data-label='Accion'>{quitar}</td></tr>")
     _ci = {c.get("ip") for c in cand}; _cd = {c.get("ip") for c in dns_cand}
     manual_rows = "".join(_fila_manual(ip, mm, "cuarentena", m.get("LIST", "")) for ip, mm in enviados.items() if ip not in _ci)
@@ -6705,9 +6737,9 @@ def cuarentena_page(msg="", es_admin=False):
         sec_manual = ("<div class='seccion'><div class='shead'><div><h2>Enviados manualmente</h2>"
                       "<p class='sub'>IPs que pusiste a mano (p.ej. desde Top origenes) y no son candidatos actuales. "
                       "Con auto-mantener <b>no</b> se liberan solas: quitalas tu aqui cuando quieras.</p></div></div>"
-                      "<div class='card'><table><thead><tr><th>CPE (IP origen)</th><th>Lista</th>"
+                      "<div class='card'><table class='orden'><thead><tr><th>CPE (IP origen)</th><th>Lista</th>"
                       "<th>Motivo (por que se bloqueo)</th><th>Por</th><th>Enviado</th>"
-                      "<th>Ultima revision</th><th>Accion</th></tr></thead>"
+                      "<th>Ultima revision</th><th data-nosort>Accion</th></tr></thead>"
                       f"<tbody>{manual_rows}</tbody></table></div></div>")
     else:
         sec_manual = ""

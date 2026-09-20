@@ -1892,14 +1892,24 @@ _MAP_NAMES = ("{AF:'Afganistan',AR:'Argentina',AU:'Australia',AT:'Austria',BD:'B
     "GB:'Reino Unido',US:'Estados Unidos',UY:'Uruguay',UZ:'Uzbekistan',VE:'Venezuela',VN:'Vietnam',"
     "HK:'Hong Kong',BY:'Bielorrusia',MD:'Moldavia',BZ:'Belice'}")
 
+def _mapa_origen():
+    """Punto de origen del mapa (tu red) como [lon, lat]. Configurable con MAPA_ORIGEN=lon,lat
+    en el .conf; por defecto Ecuador. Es solo el punto de partida de los arcos, no un dato real."""
+    try:
+        v = (conf().get("MAPA_ORIGEN", "") or "").split(",")
+        return [float(v[0]), float(v[1])]
+    except Exception:
+        return [-78.1, -1.8]
+
 def mapa_ataques_section():
-    """Mapa mundial (coropleta por pais) de los DESTINOS de las alertas: a donde atacan los
-    CPEs. Se dibuja en el navegador con el TopoJSON vendorizado; el color = nº de alertas."""
+    """Mapa mundial (coropleta por pais) de los DESTINOS de las alertas + arcos animados desde
+    tu red hacia cada pais (de donde -> a donde). Se dibuja en el navegador con el TopoJSON."""
     datos = {k: v for k, v in pais_dst.items() if k}
     total = sum(datos.values())
-    intro = ("Los paises <b>destino</b> de las alertas (a donde va el trafico sospechoso). El color "
-             "sube con el nº de alertas. Geolocalizacion <b>offline</b> (base de dominio publico); "
-             "las IPs privadas o sin pais no cuentan.")
+    intro = ("Los paises <b>destino</b> de las alertas (a donde va el trafico sospechoso de tus "
+             "CPEs). El color sube con el nº de alertas; los <b>arcos animados</b> muestran el flujo "
+             "desde tu red hacia cada pais. Geolocalizacion <b>offline</b>; las IPs privadas o sin "
+             "pais no cuentan.")
     if not datos:
         aviso = ("<div class='mapempty'>Sin datos de pais todavia. Puede que la base GeoIP aun no este "
                  "instalada (<code>/var/lib/suricata-geoip/ipv4.bin</code>) o que los destinos recientes "
@@ -1927,7 +1937,8 @@ def mapa_ataques_section():
         "<div class=mapwrap><div class=mapsvg><svg id=attackmap viewBox=\"0 20 1000 392\" "
         "preserveAspectRatio=\"xMidYMid meet\" role=img aria-label=\"Mapa de destinos\"></svg></div>"
         "<div class=maptop id=attacktop></div></div>"
-        "<script>window.__ATTACK_GEO=" + json.dumps(datos) + ";window.__ATTACK_TOTAL=" + str(total) + ";</script>"
+        "<script>window.__ATTACK_GEO=" + json.dumps(datos) + ";window.__ATTACK_TOTAL=" + str(total) +
+        ";window.__ATTACK_HOME=" + json.dumps(_mapa_origen()) + ";</script>"
         "<script src=\"/vendor/mapa/topojson-client.min.js\"></script>"
         "<script>(function(){"
         "var DATA=window.__ATTACK_GEO||{},NUM2=" + _MAP_NUM2ISO + ",NAMES=" + _MAP_NAMES + ";"
@@ -1937,18 +1948,38 @@ def mapa_ataques_section():
         "for(var j=0;j<st.length-1;j++){var a=st[j][0],ca=st[j][1],b=st[j+1][0],cb=st[j+1][1];"
         "if(f<=b){var t=b>a?(f-a)/(b-a):0,r=Math.round(ca[0]+(cb[0]-ca[0])*t),g=Math.round(ca[1]+(cb[1]-ca[1])*t),bl=Math.round(ca[2]+(cb[2]-ca[2])*t);"
         "return 'rgb('+r+','+g+','+bl+')';}}return '#e34948';}"
-        "function ringD(r){var d='';for(var i=0;i<r.length;i++){var p=proj(r[i][0],r[i][1]);d+=(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1);}return d+'Z';}"
+        "function ringD(r){var d='',prev=null;for(var i=0;i<r.length;i++){var lo=r[i][0],p=proj(lo,r[i][1]);"
+        # cruce del antimeridiano (salto de lon >180): cortar el trazo para evitar la banda horizontal
+        "if(prev!==null&&Math.abs(lo-prev)>180){d+='ZM'+p[0].toFixed(1)+' '+p[1].toFixed(1);}"
+        "else{d+=(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1);}prev=lo;}return d+'Z';}"
         "function geomD(g){var d='';if(!g)return d;if(g.type==='Polygon'){g.coordinates.forEach(function(r){d+=ringD(r);});}"
         "else if(g.type==='MultiPolygon'){g.coordinates.forEach(function(pl){pl.forEach(function(r){d+=ringD(r);});});}return d;}"
         "var mx=0;for(var k in DATA){if(DATA[k]>mx)mx=DATA[k];}if(mx<1)mx=1;"
         "function esc(s){return String(s).replace(/[&<>\"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c];});}"
+        "function centroid(g){var best=null,bn=0;function c(r){if(r.length>bn){bn=r.length;best=r;}}"
+        "if(!g)return null;if(g.type==='Polygon')g.coordinates.forEach(c);else if(g.type==='MultiPolygon')g.coordinates.forEach(function(pl){pl.forEach(c);});"
+        "if(!best)return null;var sx=0,sy=0;for(var i=0;i<best.length;i++){var p=proj(best[i][0],best[i][1]);sx+=p[0];sy+=p[1];}return [sx/best.length,sy/best.length];}"
+        "var HOME=window.__ATTACK_HOME||[-78.1,-1.8],home=proj(HOME[0],HOME[1]);"
         "fetch('/vendor/mapa/countries-110m.json').then(function(r){return r.json();}).then(function(topo){"
-        "var feats=topojson.feature(topo,topo.objects.countries).features,frag='';"
+        "var feats=topojson.feature(topo,topo.objects.countries).features,frag='',cents={};"
         "feats.forEach(function(ft){var iso=NUM2[+ft.id]||'',c=DATA[iso]||0;"
         "var fill=c>0?heat(c/mx):'#e7ebf0';var nm=NAMES[iso]||iso||'?';"
         "frag+='<path d=\"'+geomD(ft.geometry)+'\" fill=\"'+fill+'\" stroke=\"#fff\" stroke-width=\"0.4\">"
-        "<title>'+esc(nm)+(c>0?': '+c+' alertas':'')+'</title></path>';});"
-        "svg.innerHTML=frag;"
+        "<title>'+esc(nm)+(c>0?': '+c+' alertas':'')+'</title></path>';"
+        "if(c>0){var ce=centroid(ft.geometry);if(ce)cents[iso]=ce;}});"
+        # --- flujo de donde -> a donde: arcos animados desde tu red hacia cada pais destino ---
+        "var arcs='';Object.keys(cents).forEach(function(iso){var ce=cents[iso],n=DATA[iso];"
+        "var dx=ce[0]-home[0],dy=ce[1]-home[1],len=Math.sqrt(dx*dx+dy*dy);"
+        "var mid=[(home[0]+ce[0])/2-dy*0.18,(home[1]+ce[1])/2+dx*0.18];"
+        "var d='M'+home[0].toFixed(1)+' '+home[1].toFixed(1)+' Q'+mid[0].toFixed(1)+' '+mid[1].toFixed(1)+' '+ce[0].toFixed(1)+' '+ce[1].toFixed(1);"
+        "var w=(0.8+1.8*(n/mx)).toFixed(2);"
+        "arcs+='<path d=\"'+d+'\" fill=\"none\" stroke=\"#e34948\" stroke-opacity=\"0.5\" stroke-width=\"'+w+'\"/>';"
+        "arcs+='<circle r=\"2.1\" fill=\"#e34948\"><animateMotion dur=\"'+(1.6+len/900).toFixed(1)+'s\" repeatCount=\"indefinite\" path=\"'+d+'\"/></circle>';});"
+        "if(Object.keys(cents).length){arcs+='<circle cx=\"'+home[0].toFixed(1)+'\" cy=\"'+home[1].toFixed(1)+'\" r=\"3\" fill=\"#0b0b0b\"/>';"
+        "arcs+='<circle cx=\"'+home[0].toFixed(1)+'\" cy=\"'+home[1].toFixed(1)+'\" r=\"3\" fill=\"none\" stroke=\"#0b0b0b\">"
+        "<animate attributeName=\"r\" values=\"3;12\" dur=\"1.8s\" repeatCount=\"indefinite\"/>"
+        "<animate attributeName=\"stroke-opacity\" values=\"0.55;0\" dur=\"1.8s\" repeatCount=\"indefinite\"/></circle>';}"
+        "svg.innerHTML=frag+arcs;"
         "}).catch(function(e){var w=document.getElementById('attacktop');if(w)w.innerHTML='<div class=mapempty>No se pudo cargar el mapa.</div>';});"
         "var rows=Object.keys(DATA).map(function(k){return [k,DATA[k]];}).sort(function(a,b){return b[1]-a[1];}).slice(0,10);"
         "var tot=window.__ATTACK_TOTAL||0,html='';"
@@ -6072,6 +6103,10 @@ trafico sospechoso de tus CPEs). El color sube con el nº de alertas y al lado s
 <li><b>Geolocalizacion offline:</b> la IP destino se traduce a pais con una base
 <b>IP&rarr;pais DB-IP lite</b> (via ip-location-db, CC-BY-4.0, &copy; db-ip.com) que se guarda en el servidor
 (<code>/var/lib/suricata-geoip/ipv4.bin</code>). No usa servicios externos en caliente.</li>
+<li><b>Flujo "de donde -> a donde":</b> ademas del color, salen <b>arcos animados</b> desde tu red
+hacia cada pais destino (un punto viaja por el arco = sensacion de trafico en vivo). El punto de
+origen se puede fijar con <code>MAPA_ORIGEN=lon,lat</code> en <code>/etc/suricata-dashboard.conf</code>
+(por defecto Ecuador); es solo el inicio visual del arco, no un dato real.</li>
 <li><b>Solo destinos publicos:</b> las IPs privadas (tu red) o sin pais no cuentan en el mapa.</li>
 <li><b>El mapa</b> se dibuja en el navegador con un <b>TopoJSON</b> del mundo servido por el
 propio panel (<code>/var/lib/suricata-mapa/</code>); no llama a ningun CDN externo.</li>

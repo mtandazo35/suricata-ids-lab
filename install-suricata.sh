@@ -1862,7 +1862,7 @@ def top_origenes_section(n_src=5, n_sub=8):
         "<span style='color:#a15c12;font-weight:700'>naranja</span> = dominio del dueño pero no es un gran servicio; "
         "<b>sin PTR</b> = IP sin nombre publico (frecuente en botnets/hosting sucio).</p>"
         f"<div class=\"topwrap\">{''.join(cards)}</div></section>"
-        + top_destinos_section() + mapa_ataques_section() +
+        + top_destinos_section() +
         "<!--TOP_FIN-->")
 
 # id numerico del TopoJSON (countries-110m) -> ISO2, y nombres, para el mapa del cliente.
@@ -2237,6 +2237,7 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
       <span class="tip"><b>Puertos de destino distintos</b> que aparecieron en las alertas de {COB} (443, 80, 53, 22...). El top esta en la grafica "Puertos de destino mas atacados".</span></div>
   </div>
   {timeline(by_hour)}
+  {mapa_ataques_section()}
   <div class="grid">
     {hbar("Puertos de destino mas atacados", top(by_dport), "alertas", que="puerto", tip="Puertos de destino con mas alertas (443 HTTPS, 80 HTTP, 53 DNS, 22 SSH...). Muestra a que servicios apunta el trafico sospechoso. Solo el top; el total de puertos distintos esta en el recuadro de arriba.")}
     {hbar("IPs origen (atacantes)", top(by_src), "alertas", que="IP", tip="IPs de ORIGEN que mas alertas dispararon (los equipos/CPE que generan el trafico). Ojo: muchas pueden ser solo consultas DNS sospechosas, no ataque real. Solo el top; el total esta arriba.")}
@@ -6061,9 +6062,10 @@ las units). El registro queda en <code>/tmp/suricata-panel-update.log</code> y e
 <code>/var/log/suricata-update-result.json</code>.</p>
 
 <h2>Mapa: a donde atacan tus CPEs</h2>
-<p>En la pestana <b>Top origenes</b>, debajo de los rankings, hay un <b>mapa mundial</b> que
-pinta los <b>paises destino</b> de las alertas (a donde va el trafico sospechoso de tus CPEs).
-El color sube con el nº de alertas y al lado sale el <b>Top paises destino</b>.</p>
+<p>En la pestana <b>En vivo</b>, <b>debajo de la linea de tiempo</b> ("Ataques por hora y minuto"),
+hay un <b>mapa mundial</b> que pinta los <b>paises destino</b> de las alertas (a donde va el
+trafico sospechoso de tus CPEs). El color sube con el nº de alertas y al lado sale el
+<b>Top paises destino</b>.</p>
 <ul>
 <li><b>Geolocalizacion offline:</b> la IP destino se traduce a pais con una base
 <b>IP&rarr;pais de dominio publico</b> (ip-location-db, CC0) que se guarda en el servidor

@@ -6186,6 +6186,13 @@ clic en la cabecera (CPE, Lista, Por, Enviado, Ultima revision&hellip;) para ord
 tiempo real, no por texto. El orden que elijas <b>se conserva</b> al pulsar <b>Quitar</b> o
 al recargarse la pagina, y esta <b>vuelve a la altura donde estabas</b> en vez de saltar
 arriba del todo (tambien en el refresco automatico de cada 5 min).</p>
+<p><b>Quitar varias a la vez:</b> cada fila tiene una <b>casilla</b> (y la cabecera una para
+<b>seleccionar todas</b>). Al marcar alguna se activa <b>Quitar seleccionados (N)</b>, que abre
+una <b>ventana de confirmacion</b> con la lista de IPs antes de tocar nada; las de la lista de
+DNS salen marcadas como tal. Puedes mezclar IPs de <b>ambas listas</b>: cada una se saca de la
+suya. Es reversible (puedes volver a enviarlas) y queda todo en
+<code>/var/log/suricata-cuarentena.log</code>. Si el router falla con alguna, se te dice
+<b>cual y por que</b>, y esa IP <b>se queda</b> en el registro para reintentarla.</p>
 <p><b>Seguridad:</b> usa un usuario API solo con <code>api,read,write,test</code> (no full), limita el
 servicio API a la IP del servidor Suricata, y si el enlace no es de confianza usa <b>API-SSL</b>. Si
 dejas el envio <b>deshabilitado</b>, la pestana Cuarentena solo <b>sugiere</b> (no toca el router).</p>
@@ -6909,7 +6916,11 @@ def cuarentena_page(msg="", es_admin=False):
                   f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de {esc(lista)}?')\">Quitar</button></form>"
                   ) if es_admin else ""
         mot = _mot_txt(mm) or "<span class='muted'>manual / sin motivo registrado</span>"
-        return (f"<tr><td data-label='CPE' class='mono ipx'>{esc(ip)}{_cli(ip)}</td>"
+        # token lista|ip: el quitado masivo necesita saber de CUAL address-list sacarla
+        _tok = ("dns|" if pref.endswith("/dns") else "cuar|") + ip
+        marca = (f"<td data-label='Seleccionar' class='selc'><input type=checkbox class=selm "
+                 f"value='{esc(_tok)}' aria-label='Seleccionar {esc(ip)}'></td>") if es_admin else ""
+        return (f"<tr>{marca}<td data-label='CPE' class='mono ipx'>{esc(ip)}{_cli(ip)}</td>"
                 f"<td data-label='Lista' class='mono'>{esc(lista)}</td>"
                 f"<td data-label='Motivo' class='mot'>{mot}</td><td data-label='Por'>{esc(mm.get('por','?'))}</td>"
                 f"<td data-label='Enviado' class='mono' data-sort='{int(_cuando_ts)}'>{cuando}</td>"
@@ -6919,13 +6930,31 @@ def cuarentena_page(msg="", es_admin=False):
     manual_rows = "".join(_fila_manual(ip, mm, "cuarentena", m.get("LIST", "")) for ip, mm in enviados.items() if ip not in _ci)
     manual_rows += "".join(_fila_manual(ip, mm, "cuarentena/dns", m.get("LIST_DNS", "")) for ip, mm in enviados_dns.items() if ip not in _cd)
     if manual_rows:
+        # --- quitado masivo: casillas + boton que abre un modal de confirmacion ---
+        selth = ("<th data-nosort class=selc><input type=checkbox id=selall "
+                 "aria-label='Seleccionar todas'></th>") if es_admin else ""
+        barra = ("<div class=masivo><button type=button id=bmasivo class='qbtn quit' disabled>"
+                 "Quitar seleccionados <span id=nmasivo>(0)</span></button>"
+                 "<span class=mashint>Marca las casillas para sacar varias IPs de una vez</span></div>"
+                 ) if es_admin else ""
+        modal = ("<div id=mmasivo class=masov onclick=\"if(event.target===this)masCerrar()\">"
+                 "<div class=masbox><h3>Quitar de la lista</h3>"
+                 "<p class=massub>Se sacaran del MikroTik estas IPs. Es <b>reversible</b>: puedes volver "
+                 "a enviarlas cuando quieras.</p><ul id=maslista class=maslist></ul>"
+                 "<form id=fmasivo method=post action='/cuarentena/quitar-varios'>"
+                 "<div id=mascampos></div><div class=masacts>"
+                 "<button type=button class=masno onclick=masCerrar()>Cancelar</button>"
+                 "<button type=submit class=massi>Quitar</button></div></form></div></div>"
+                 ) if es_admin else ""
         sec_manual = ("<div class='seccion'><div class='shead'><div><h2>Enviados manualmente</h2>"
                       "<p class='sub'>IPs que pusiste a mano (p.ej. desde Top origenes) y no son candidatos actuales. "
                       "Con auto-mantener <b>no</b> se liberan solas: quitalas tu aqui cuando quieras.</p></div></div>"
-                      "<div class='card'><table class='orden'><thead><tr><th>CPE (IP origen)</th><th>Lista</th>"
+                      + barra +
+                      "<div class='card'><table class='orden'><thead><tr>" + selth +
+                      "<th>CPE (IP origen)</th><th>Lista</th>"
                       "<th>Motivo (por que se bloqueo)</th><th>Por</th><th>Enviado</th>"
                       "<th>Ultima revision</th><th data-nosort>Accion</th></tr></thead>"
-                      f"<tbody>{manual_rows}</tbody></table></div></div>")
+                      f"<tbody>{manual_rows}</tbody></table></div>" + modal + "</div>")
     else:
         sec_manual = ""
     # --- Excluir destino (falso positivo): un DNS u otro destino que dispara alertas en muchos CPEs ---
@@ -6992,6 +7021,26 @@ def cuarentena_page(msg="", es_admin=False):
            ".qbtn{font:12px system-ui;font-weight:700;border:0;border-radius:7px;padding:5px 11px;cursor:pointer;color:#fff}"
            ".qbtn.send{background:#e34948}.qbtn.send:hover{background:#c93b3a}"
            ".qbtn.quit{background:#6b6a66;margin-left:6px}.qbtn.quit:hover{background:#524f4c}"
+           # --- quitado masivo: barra de seleccion + modal flotante ---
+           ".masivo{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 10px}"
+           ".masivo .qbtn:disabled{background:#d7d6d2;color:#8a8984;cursor:default}"
+           ".mashint{color:#8a8984;font-size:12px}"
+           ".selc{width:34px;text-align:center}"
+           ".selc input{width:16px;height:16px;cursor:pointer;accent-color:#2a78d6}"
+           ".masov{display:none;position:fixed;inset:0;background:rgba(11,11,11,.55);z-index:150;"
+           "align-items:center;justify-content:center;padding:24px}"
+           ".masbox{background:#fff;border-radius:14px;max-width:440px;width:100%;padding:22px 24px;"
+           "box-shadow:0 16px 54px rgba(0,0,0,.45)}"
+           ".masbox h3{margin:0 0 8px;font-size:19px}"
+           ".massub{margin:0 0 12px;color:#52514e;font-size:14px;line-height:1.5}"
+           ".maslist{margin:0 0 16px;padding:10px 12px;list-style:none;background:#faf9f6;border:1px solid #e7e6e2;"
+           "border-radius:9px;max-height:200px;overflow:auto;font:13px ui-monospace,Consolas,monospace}"
+           ".maslist li{padding:2px 0}"
+           ".masacts{display:flex;gap:10px;justify-content:flex-end}"
+           ".masno{background:#eef0f2;color:#33322f;border:1px solid #d7d6d2;padding:10px 16px;border-radius:9px;"
+           "font:600 14px system-ui;cursor:pointer}.masno:hover{background:#e2e5e8}"
+           ".massi{background:#e34948;color:#fff;border:0;padding:10px 18px;border-radius:9px;"
+           "font:600 14px system-ui;cursor:pointer}.massi:hover{background:#c93b3a}"
            ".seccion{margin:0 0 26px}.shead{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:0 0 10px}"
            ".shead h2{font-size:16px;margin:0}.shead .sub{margin:2px 0 0}"
            ".notifm{position:fixed;top:18px;left:50%;transform:translateX(-50%) translateY(-16px);z-index:140;display:flex;align-items:center;gap:10px;max-width:560px;padding:12px 16px;border-radius:12px;font-size:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);opacity:0;transition:opacity .25s,transform .25s;pointer-events:none}"
@@ -7037,7 +7086,32 @@ def cuarentena_page(msg="", es_admin=False):
             "document.getElementById('fichamodal').style.display='none';});"
             "(function(){var n=document.getElementById('notif');if(!n)return;"
             "setTimeout(function(){n.classList.add('show');},60);"
-            "setTimeout(function(){n.classList.remove('show');},3600);})();</script>"
+            "setTimeout(function(){n.classList.remove('show');},3600);})();"
+            # --- quitado masivo: seleccion + modal de confirmacion ---
+            "function masCerrar(){var m=document.getElementById('mmasivo');if(m)m.style.display='none';}"
+            "(function(){var b=document.getElementById('bmasivo');if(!b)return;"
+            "function sel(){return Array.prototype.filter.call("
+            "document.querySelectorAll('input.selm'),function(c){return c.checked;});}"
+            "function refresca(){var n=sel().length;"
+            "document.getElementById('nmasivo').textContent='('+n+')';b.disabled=n===0;"
+            "var t=document.getElementById('selall');"
+            "if(t){var tot=document.querySelectorAll('input.selm').length;"
+            "t.checked=tot>0&&n===tot;t.indeterminate=n>0&&n<tot;}}"
+            "document.addEventListener('change',function(e){var t=e.target;"
+            "if(t.id==='selall'){Array.prototype.forEach.call(document.querySelectorAll('input.selm'),"
+            "function(c){c.checked=t.checked;});refresca();}"
+            "else if(t.classList&&t.classList.contains('selm'))refresca();});"
+            "b.addEventListener('click',function(){var s=sel();if(!s.length)return;"
+            "var ul=document.getElementById('maslista'),campos=document.getElementById('mascampos');"
+            "ul.innerHTML='';campos.innerHTML='';"
+            "s.forEach(function(c){var p=c.value.split('|');"
+            "var li=document.createElement('li');"
+            "li.textContent=p[1]+(p[0]==='dns'?'  (DNS)':'');ul.appendChild(li);"
+            "var h=document.createElement('input');h.type='hidden';h.name='sel';h.value=c.value;"
+            "campos.appendChild(h);});"
+            "document.getElementById('mmasivo').style.display='flex';});"
+            "document.addEventListener('keydown',function(e){if(e.key==='Escape')masCerrar();});"
+            "refresca();})();</script>"
             "</main></body></html>")
     return wrap(body, refresh=False, active="/cuarentena")
 
@@ -7624,6 +7698,46 @@ class H(BaseHTTPRequestHandler):
             env = cargar_enviados(); env.pop(ip, None); guardar_enviados(env)
             mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), err)
             return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
+        if ruta == "/cuarentena/quitar-varios":
+            # quitado masivo desde la tabla "Enviados manualmente". Cada seleccion llega como
+            # "cuar|IP" o "dns|IP" porque cada una vive en una address-list distinta.
+            if not self._operador():
+                return self._deny()
+            sels = q.get("sel", [])
+            if not sels:
+                return self._redirect("/cuarentena?msg=" + _up.quote("No seleccionaste ninguna IP"))
+            m = cargar_mk(); lst_dns = m.get("LIST_DNS", "suricata-dns-sospechoso")
+            env = cargar_enviados(); env_dns = cargar_enviados(MK_SENT_DNS)
+            quien = getattr(CTX, "user", "?")
+            ok_n = 0; errores = []
+            for s in sels[:500]:               # tope defensivo por si llega un POST enorme
+                tipo, _, ip = (s or "").partition("|")
+                ip = ip.strip()
+                try:
+                    ipaddress.ip_address(ip)
+                except Exception:
+                    errores.append(f"{ip or '?'} (IP invalida)"); continue
+                es_dns = (tipo == "dns")
+                try:
+                    ok, err = mk_remove(ip, lista=lst_dns) if es_dns else mk_remove(ip)
+                except Exception as ex:
+                    ok, err = False, str(ex)
+                if ok:
+                    ok_n += 1
+                    (env_dns if es_dns else env).pop(ip, None)
+                else:
+                    errores.append(f"{ip} ({err})")
+                mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, quien,
+                       (f"lista={lst_dns} " if es_dns else "") + f"masivo {err}")
+            # se guarda UNA vez al final: si el router falla a medias, no queda el registro
+            # a medio escribir ni se reescribe el archivo en cada iteracion
+            guardar_enviados(env); guardar_enviados(env_dns, MK_SENT_DNS)
+            resumen = f"{ok_n} entrada(s) quitada(s)"
+            if errores:
+                resumen += f"; {len(errores)} con error: " + ", ".join(errores[:3])
+                if len(errores) > 3:
+                    resumen += f" y {len(errores)-3} mas"
+            return self._redirect("/cuarentena?msg=" + _up.quote(resumen))
         if ruta == "/cuarentena/excluir-destino":
             if not self._operador():
                 return self._deny()

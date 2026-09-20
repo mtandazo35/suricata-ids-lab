@@ -1874,19 +1874,24 @@ def top_origenes_section(n_src=5, n_sub=8):
         "<!--TOP_FIN-->")
 
 # id numerico del TopoJSON (countries-110m) -> ISO2, y nombres, para el mapa del cliente.
-_MAP_NUM2ISO = ("{4:'AF',8:'AL',12:'DZ',24:'AO',32:'AR',36:'AU',40:'AT',50:'BD',56:'BE',64:'BT',"
-    "68:'BO',76:'BR',100:'BG',104:'MM',116:'KH',120:'CM',124:'CA',144:'LK',152:'CL',156:'CN',"
-    "170:'CO',180:'CD',188:'CR',191:'HR',192:'CU',196:'CY',203:'CZ',204:'BJ',208:'DK',214:'DO',"
-    "218:'EC',818:'EG',222:'SV',231:'ET',246:'FI',250:'FR',266:'GA',276:'DE',288:'GH',300:'GR',"
-    "320:'GT',332:'HT',340:'HN',348:'HU',356:'IN',360:'ID',364:'IR',368:'IQ',372:'IE',376:'IL',"
-    "380:'IT',388:'JM',392:'JP',400:'JO',404:'KE',408:'KP',410:'KR',414:'KW',418:'LA',422:'LB',"
-    "430:'LR',434:'LY',442:'LU',484:'MX',504:'MA',508:'MZ',516:'NA',524:'NP',528:'NL',540:'NC',"
-    "554:'NZ',558:'NI',566:'NG',578:'NO',586:'PK',591:'PA',598:'PG',604:'PE',608:'PH',616:'PL',"
-    "620:'PT',630:'PR',634:'QA',642:'RO',643:'RU',682:'SA',686:'SN',694:'SL',706:'SO',710:'ZA',"
-    "724:'ES',729:'SD',752:'SE',756:'CH',760:'SY',762:'TJ',764:'TH',792:'TR',800:'UG',804:'UA',"
-    "784:'AE',826:'GB',840:'US',858:'UY',860:'UZ',862:'VE',704:'VN',887:'YE',894:'ZM',716:'ZW',"
-    "70:'BA',807:'MK',499:'ME',688:'RS',51:'AM',31:'AZ',112:'BY',268:'GE',398:'KZ',417:'KG',"
-    "498:'MD',496:'MN',795:'TM'}")
+_MAP_NUM2ISO = ("{4:'AF',8:'AL',10:'AQ',12:'DZ',24:'AO',31:'AZ',32:'AR',36:'AU',40:'AT',44:'BS',50:'BD',"
+    "51:'AM',56:'BE',64:'BT',68:'BO',70:'BA',72:'BW',76:'BR',84:'BZ',90:'SB',96:'BN',100:'BG',"
+    "104:'MM',108:'BI',112:'BY',116:'KH',120:'CM',124:'CA',140:'CF',144:'LK',148:'TD',152:'CL',"
+    "156:'CN',158:'TW',170:'CO',178:'CG',180:'CD',188:'CR',191:'HR',192:'CU',196:'CY',203:'CZ',"
+    "204:'BJ',208:'DK',214:'DO',218:'EC',222:'SV',226:'GQ',231:'ET',232:'ER',233:'EE',238:'FK',"
+    "242:'FJ',246:'FI',250:'FR',260:'TF',262:'DJ',266:'GA',268:'GE',270:'GM',275:'PS',276:'DE',"
+    "288:'GH',300:'GR',304:'GL',320:'GT',324:'GN',328:'GY',332:'HT',340:'HN',348:'HU',352:'IS',"
+    "356:'IN',360:'ID',364:'IR',368:'IQ',372:'IE',376:'IL',380:'IT',384:'CI',388:'JM',392:'JP',"
+    "398:'KZ',400:'JO',404:'KE',408:'KP',410:'KR',414:'KW',417:'KG',418:'LA',422:'LB',426:'LS',"
+    "428:'LV',430:'LR',434:'LY',440:'LT',442:'LU',450:'MG',454:'MW',458:'MY',466:'ML',478:'MR',"
+    "484:'MX',496:'MN',498:'MD',499:'ME',504:'MA',508:'MZ',512:'OM',516:'NA',524:'NP',528:'NL',"
+    "540:'NC',548:'VU',554:'NZ',558:'NI',562:'NE',566:'NG',578:'NO',586:'PK',591:'PA',598:'PG',"
+    "600:'PY',604:'PE',608:'PH',616:'PL',620:'PT',624:'GW',626:'TL',630:'PR',634:'QA',642:'RO',"
+    "643:'RU',646:'RW',682:'SA',686:'SN',688:'RS',694:'SL',703:'SK',704:'VN',705:'SI',706:'SO',"
+    "710:'ZA',716:'ZW',724:'ES',728:'SS',729:'SD',732:'EH',740:'SR',748:'SZ',752:'SE',756:'CH',"
+    "760:'SY',762:'TJ',764:'TH',768:'TG',780:'TT',784:'AE',788:'TN',792:'TR',795:'TM',800:'UG',"
+    "804:'UA',807:'MK',818:'EG',826:'GB',834:'TZ',840:'US',854:'BF',858:'UY',860:'UZ',862:'VE',"
+    "887:'YE',894:'ZM'}")
 _MAP_NAMES = ("{AF:'Afganistan',AR:'Argentina',AU:'Australia',AT:'Austria',BD:'Bangladesh',BE:'Belgica',"
     "BO:'Bolivia',BR:'Brasil',BG:'Bulgaria',CA:'Canada',CL:'Chile',CN:'China',CO:'Colombia',CR:'Costa Rica',"
     "CU:'Cuba',CZ:'Chequia',DK:'Dinamarca',DO:'Rep. Dominicana',EC:'Ecuador',EG:'Egipto',SV:'El Salvador',"
@@ -2002,7 +2007,9 @@ def mapa_ataques_section():
         "var DATA=window.__ATTACK_GEO||{},DET=window.__ATTACK_DET||{},NUM2=" + _MAP_NUM2ISO + ",NAMES=" + _MAP_NAMES + ";"
         "var W=1000,H=500,svg=document.getElementById('attackmap');if(!svg)return;"
         "var tip=document.getElementById('maptip'),panel=document.getElementById('mapdet'),box=svg.parentNode;"
-        "var BBOX={},sel='';"
+        "var BBOX={},NMAP={},sel='';"
+        # nombre del pais: el traducido si lo tenemos, si no el del propio mapa (ingles), si no el codigo
+        "function nombre(iso){return NAMES[iso]||NMAP[iso]||iso||'?';}"
         "function proj(lo,la){return [(lo+180)*(W/360),(90-la)*(H/180)];}"
         "function heat(f){f=f<0?0:(f>1?1:f);var st=[[0,[43,120,214]],[.35,[27,175,122]],[.65,[237,161,0]],[.85,[235,104,52]],[1,[227,73,72]]];"
         "for(var j=0;j<st.length-1;j++){var a=st[j][0],ca=st[j][1],b=st[j+1][0],cb=st[j+1][1];"
@@ -2045,14 +2052,14 @@ def mapa_ataques_section():
         "var h='<div class=grp><div class=glbl>'+lbl+'</div>';"
         "items.forEach(function(kv){h+='<div class=it><span>'+esc(kv[0])+'</span><b>'+kv[1]+'</b></div>';});"
         "if(tot>items.length)h+='<div class=mas>+'+(tot-items.length)+' mas</div>';return h+'</div>';}"
-        "function dirTxt(iso){var nm=NAMES[iso]||iso||'?',c=DATA[iso]||0;"
+        "function dirTxt(iso){var nm=nombre(iso),c=DATA[iso]||0;"
         "return c?('Direccion <b>saliente</b>: tus CPEs &rarr; '+esc(nm)+' &middot; <b>'+c+'</b> alertas')"
         ":('Sin alertas hacia '+esc(nm)+' en la ventana.');}"
         "function grupos(iso){var d=DET[iso];if(!d)return '';"
         "return grupo('IPs destino (a donde)',d.ips,d.nip)+grupo('Puertos destino',d.ports,d.npt)"
         "+grupo('CPEs de tu red (de donde)',d.srcs,d.nsr);}"
         "function showTip(iso,e){if(!tip)return;"
-        "tip.innerHTML='<h4><span class=cc>'+esc(iso)+'</span>'+esc(NAMES[iso]||iso)+'</h4>'"
+        "tip.innerHTML='<h4><span class=cc>'+esc(iso)+'</span>'+esc(nombre(iso))+'</h4>'"
         "+'<div class=dir>'+dirTxt(iso)+'</div>'+grupos(iso);"
         "tip.style.display='block';var r=box.getBoundingClientRect();"
         "var x=e.clientX-r.left+16,y=e.clientY-r.top+16,tw=tip.offsetWidth,th=tip.offsetHeight;"
@@ -2060,10 +2067,12 @@ def mapa_ataques_section():
         "if(y+th>r.height-6)y=Math.max(4,e.clientY-r.top-th-16);"
         "tip.style.left=x+'px';tip.style.top=y+'px';}"
         "function hideTip(){if(tip)tip.style.display='none';}"
+        # ojo: sin el guard de 'iso', marcar('') seleccionaba TODOS los paises sin codigo
+        # (data-iso=\"\") y les pintaba el borde negro al pulsar 'Vista completa'.
         "function marcar(iso){sel=iso;Array.prototype.forEach.call(svg.querySelectorAll('path[data-iso]'),function(p){"
-        "if(p.getAttribute('data-iso')===iso)p.classList.add('sel');else p.classList.remove('sel');});}"
+        "if(iso&&p.getAttribute('data-iso')===iso)p.classList.add('sel');else p.classList.remove('sel');});}"
         "function abrir(iso){if(!panel)return;marcar(iso);fit(BBOX[iso]);"
-        "panel.innerHTML='<div class=mapdethdr><span class=cc>'+esc(iso)+'</span><b>'+esc(NAMES[iso]||iso)+'</b>'"
+        "panel.innerHTML='<div class=mapdethdr><span class=cc>'+esc(iso)+'</span><b>'+esc(nombre(iso))+'</b>'"
         "+'<span class=dsub>'+dirTxt(iso)+'</span>'"
         "+'<button type=button class=dclose title=\"Cerrar\">&times;</button></div>'"
         "+'<div class=mapdetgrid>'+grupos(iso)+'</div>';"
@@ -2073,8 +2082,10 @@ def mapa_ataques_section():
         "var HOME=window.__ATTACK_HOME||[-78.1,-1.8],home=proj(HOME[0],HOME[1]);"
         "fetch('/vendor/mapa/countries-110m.json').then(function(r){return r.json();}).then(function(topo){"
         "var feats=topojson.feature(topo,topo.objects.countries).features,frag='',cents={};"
-        "feats.forEach(function(ft){var iso=NUM2[+ft.id]||'',c=DATA[iso]||0;"
-        "var fill=c>0?heat(c/mx):'#e7ebf0';var nm=NAMES[iso]||iso||'?';"
+        "feats.forEach(function(ft){var iso=NUM2[+ft.id]||'',pn=(ft.properties&&ft.properties.name)||'';"
+        "if(!iso&&pn==='Kosovo')iso='XK';"   # Kosovo no trae id ISO en el mapa; GeoIP si lo reporta
+        "if(iso&&pn)NMAP[iso]=pn;var c=DATA[iso]||0;"
+        "var fill=c>0?heat(c/mx):'#e7ebf0';var nm=nombre(iso)||pn||'?';"
         "frag+='<path data-iso=\"'+esc(iso)+'\" d=\"'+geomD(ft.geometry)+'\" fill=\"'+fill+'\" stroke=\"#fff\" "
         "stroke-width=\"0.4\" vector-effect=\"non-scaling-stroke\">"
         "<title>'+esc(nm)+(c>0?': '+c+' alertas':'')+'</title></path>';"
@@ -2093,7 +2104,7 @@ def mapa_ataques_section():
         "arcs+='<circle cx=\"'+home[0].toFixed(1)+'\" cy=\"'+home[1].toFixed(1)+'\" r=\"3\" fill=\"none\" stroke=\"#0b0b0b\" pointer-events=\"none\">"
         "<animate attributeName=\"r\" values=\"3;12\" dur=\"1.8s\" repeatCount=\"indefinite\"/>"
         "<animate attributeName=\"stroke-opacity\" values=\"0.55;0\" dur=\"1.8s\" repeatCount=\"indefinite\"/></circle>';}"
-        "svg.innerHTML=frag+arcs;if(sel)marcar(sel);"
+        "svg.innerHTML=frag+arcs;if(sel)marcar(sel);pintarTop();"
         "}).catch(function(e){var w=document.getElementById('attacktop');if(w)w.innerHTML='<div class=mapempty>No se pudo cargar el mapa.</div>';});"
         # --- interaccion: hover = detalle, clic = acercar el pais, arrastrar = mover, Ctrl+rueda = zoom ---
         "function isoDe(e){var t=e.target;return (t&&t.getAttribute)?(t.getAttribute('data-iso')||''):'';}"
@@ -2114,12 +2125,16 @@ def mapa_ataques_section():
         "if(bi)bi.addEventListener('click',function(){zoom(0.7);});"
         "if(bo)bo.addEventListener('click',function(){zoom(1.43);});"
         "if(br)br.addEventListener('click',cerrar);"
+        "var w=document.getElementById('attacktop');"
+        # se pinta ya (aunque el mapa tarde) y otra vez al cargarlo, cuando ya hay nombres de pais
+        "function pintarTop(){if(!w)return;"
         "var rows=Object.keys(DATA).map(function(k){return [k,DATA[k]];}).sort(function(a,b){return b[1]-a[1];}).slice(0,10);"
         "var tot=window.__ATTACK_TOTAL||0,html='';"
-        "rows.forEach(function(kv){var iso=kv[0],c=kv[1],nm=NAMES[iso]||iso,pct=tot?Math.max(6,Math.round(c/rows[0][1]*120)):6;"
+        "rows.forEach(function(kv){var iso=kv[0],c=kv[1],nm=nombre(iso),pct=tot?Math.max(6,Math.round(c/rows[0][1]*120)):6;"
         "html+='<div class=maprow data-iso=\"'+esc(iso)+'\" title=\"Ver detalle y acercar\"><span class=cc>'+esc(iso)+'</span><span class=nm>'+esc(nm)+'</span>"
         "<span class=mapbar style=\"width:'+pct+'px\"></span><span class=ct>'+c+'</span></div>';});"
-        "var w=document.getElementById('attacktop');if(w)w.innerHTML=html?('<div class=maptophdr>Top paises destino</div><div class=maptopgrid>'+html+'</div>'):'';"
+        "w.innerHTML=html?('<div class=maptophdr>Top paises destino</div><div class=maptopgrid>'+html+'</div>'):'';}"
+        "pintarTop();"
         # clic en una fila del top = mismo efecto que clic en el pais (acerca y abre el detalle)
         "if(w)w.addEventListener('click',function(e){var r=e.target.closest?e.target.closest('.maprow'):null;"
         "if(r&&r.getAttribute('data-iso')){abrir(r.getAttribute('data-iso'));"
@@ -6282,6 +6297,8 @@ mas repetidos y se indica cuantos mas hay.</li>
 un panel fijo con ese mismo detalle, comodo de leer en el telefono. Puedes <b>arrastrar</b> para
 mover el mapa, usar <b>+</b> / <b>&minus;</b> o <b>Ctrl + rueda</b> para acercar, y <b>Vista completa</b>
 para volver al mundo entero.</li>
+<li><b>Cobertura:</b> el mapa reconoce los <b>174 paises</b> del atlas (todos los que trae el
+TopoJSON, mas Kosovo). Si un pais no tiene nombre traducido, se usa el del propio mapa.</li>
 <li><b>Solo destinos publicos:</b> las IPs privadas (tu red) o sin pais no cuentan en el mapa.</li>
 <li><b>El mapa</b> se dibuja en el navegador con un <b>TopoJSON</b> del mundo servido por el
 propio panel (<code>/var/lib/suricata-mapa/</code>); no llama a ningun CDN externo.</li>

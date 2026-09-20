@@ -947,6 +947,38 @@ def _conf_key(k, default):
 # Se apaga con DOBLE_SENAL=0 en /etc/suricata-dashboard.conf.
 DOBLE_SENAL = _conf_key("DOBLE_SENAL", "1") == "1"
 
+# --- Que origenes son CPEs TUYOS ---
+# El motor de cuarentena existe para tus abonados. Sin este filtro, una IP de internet
+# que dispara una firma ENTRANTE (ET Open trae varias con la palabra "compromised", que
+# aqui cuenta como infeccion) entraba como "CPE infectado", puntuaba en el ranking de
+# riesgo y, con politicas automaticas, podia acabar en la address-list de cuarentena:
+# no bloquea nada util y ensucia la lista. Los ataques de fuera se siguen viendo, pero
+# en su propio apartado.
+# Configurable con MIS_REDES=CIDR,CIDR en /etc/suricata-dashboard.conf (util si das IP
+# publica a tus clientes). Por defecto: privadas RFC1918 + CGNAT.
+_MIS_NETS = []
+for _t in (_conf_key("MIS_REDES", "").replace(";", ",").split(",")
+           or []):
+    _t = _t.strip()
+    if not _t:
+        continue
+    try:
+        _MIS_NETS.append(_ipm.ip_network(_t, strict=False))
+    except ValueError:
+        pass
+if not _MIS_NETS:
+    for _t in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"):
+        _MIS_NETS.append(_ipm.ip_network(_t))
+
+def es_mi_cpe(ip):
+    """True si la IP pertenece a tus redes (un abonado), False si es de internet."""
+    try:
+        a = _ipm.ip_address(ip)
+    except ValueError:
+        return False
+    return any(a.version == n.version and a in n for n in _MIS_NETS)
+
+
 # Destinos CONFIABLES (falsos positivos): p.ej. un DNS que dispara alertas en muchos CPEs.
 # Las alertas HACIA estas IPs no cuentan -> los clientes dejan de ser candidatos por su culpa.
 DEST_OK_FILE = "/etc/suricata-destinos-confianza.lst"
@@ -1890,7 +1922,7 @@ def top_origenes_section(n_src=5, n_sub=8):
         "<span style='color:#a15c12;font-weight:700'>naranja</span> = dominio del dueño pero no es un gran servicio; "
         "<b>sin PTR</b> = IP sin nombre publico (frecuente en botnets/hosting sucio).</p>"
         f"<div class=\"topwrap\">{''.join(cards)}</div></section>"
-        + top_destinos_section() +
+        + top_destinos_section() + entrantes_section() +
         "<!--TOP_FIN-->")
 
 # id numerico del TopoJSON (countries-110m) -> ISO2, y nombres, para el mapa del cliente.
@@ -2214,6 +2246,61 @@ def top_destinos_section(n_dst=5, n_sub=8):
         "varios CPEs a la vez). El chip muestra el dueño/reputacion del destino.</p>"
         f"<div class=\"topwrap\">{''.join(cards)}</div></section>")
 
+def entrantes_section(n_src=8, n_sub=6, max_src=5000, max_det=60):
+    """Ataques ENTRANTES: origenes de INTERNET golpeando IPs de TU red.
+
+    Van aparte a proposito. No son abonados tuyos, asi que no se pueden mandar a la
+    cuarentena de CPEs (ahi solo entran tus IPs): se cortan en el borde, o se cierra la
+    exposicion del equipo golpeado. Mezclarlos con los CPEs hacia que un escaner de
+    internet insistente apareciera como 'CPE infectado'."""
+    agg = {}
+    for (s, sp, d, dp, pr, sig), v in flujos.items():
+        if es_mi_cpe(s) or not es_mi_cpe(d):
+            continue                      # solo internet -> tu red
+        e = agg.get(s)
+        if e is None:
+            if len(agg) >= max_src:       # cota de RAM, como el resto del script
+                continue
+            e = agg[s] = {"n": 0, "dst": set(), "det": {}}
+        e["n"] += v[0]
+        if len(e["dst"]) < 200:
+            e["dst"].add(d)
+        k = (d, dp, pr, sig)
+        if k in e["det"] or len(e["det"]) < max_det:
+            e["det"][k] = e["det"].get(k, 0) + v[0]
+    if not agg:
+        return ""                          # sin ataques entrantes: no se muestra el apartado
+    tops = sorted(agg.items(), key=lambda kv: kv[1]["n"], reverse=True)[:n_src]
+    cards = []
+    for i, (src, e) in enumerate(tops, 1):
+        sub = sorted(e["det"].items(), key=lambda kv: kv[1], reverse=True)[:n_sub]
+        rows = "".join(
+            f"<tr><td class='mono' style='color:#184f95'>{esc(d or '-')}</td>"
+            f"<td class='mono'>{esc(dp or '-')}</td>"
+            f"<td class='mono'>{esc((pr or '-').upper())}</td>"
+            f"<td class='fw'>{esc((sig or '-')[:70])}</td>"
+            f"<td class='num'>{c:,}</td></tr>" for (d, dp, pr, sig), c in sub)
+        _pa = pais(src)
+        _chip = f"<span class='obadge unk'>{esc(_pa)}</span>" if _pa else ""
+        cards.append(
+            f"<div class='tcard'>"
+            f"<div class='thd'><span class='rank'>#{i}</span>"
+            f"<span class='ipx mono'>{esc(src)}</span>{_chip}{_dst_badge(src)}"
+            f"<span class='tot'>{e['n']:,} alertas</span>"
+            f"<span class='meta'>&rarr; golpea {len(e['dst']):,} IP(s) de tu red</span></div>"
+            f"<div class='tablewrap'><table><thead><tr>"
+            f"<th>IP de tu red (a quien golpea)</th><th>Puerto destino</th>"
+            f"<th>Protocolo</th><th>Firma</th><th class='num'>Peticiones</th>"
+            f"</tr></thead><tbody>{rows}</tbody></table></div></div>")
+    return (
+        "<section class=\"card\" style=\"margin-top:16px\"><h2>Ataques entrantes desde internet</h2>"
+        "<p class=\"muted\" style=\"margin:0 0 12px\">Origenes de <b>fuera</b> golpeando IPs de tu red. "
+        "<b>No son abonados tuyos</b>, asi que no entran al motor de cuarentena: mandarlos a la "
+        "address-list de CPEs no bloquearia nada util. Lo que corresponde es <b>cortarlos en el borde</b> "
+        "(firewall de entrada) o <b>cerrar la exposicion</b> del equipo golpeado: si algo tuyo recibe "
+        "escaneo constante desde internet, casi siempre es que tiene un puerto publicado que no hacia falta.</p>"
+        f"<div class=\"topwrap\">{''.join(cards)}</div></section>")
+
 top_sec = top_origenes_section()
 
 # --- Cuarentena (Fase A, dry-run): CPEs INFECTADOS CONFIRMADOS (repeticion/contexto).
@@ -2262,6 +2349,8 @@ try:
 
     cand = []
     for src in inf_hits:
+        if not es_mi_cpe(src):
+            continue            # atacante de internet, no un abonado: va al apartado de entrantes
         if nunca_bloquear(src):
             continue                                    # allowlist: nunca a cuarentena
         # gatillo minimo para siquiera considerarlo (repeticion o >=2 firmas)
@@ -2308,6 +2397,8 @@ try:
         return len(ev), ev
     cand_dns = []
     for src in dns_hits:
+        if not es_mi_cpe(src):
+            continue            # solo tus abonados consultan "tu" DNS; lo de fuera no se cuarentena
         if nunca_bloquear(src):
             continue                                    # allowlist: nunca a cuarentena
         if dns_hits[src] >= UMBRAL_DNS or len(dns_sids[src]) >= 2:
@@ -2334,7 +2425,9 @@ try:
     cand_dns.sort(key=lambda c: (c["confianza"] == "alta", c["alertas_dns"], c["riesgo"]), reverse=True)
     # top con su banda de riesgo, para el motor de politicas del panel (tope 50 CPEs)
     top_r = []
-    for _s, _t in by_src.most_common(50):
+    for _s, _t in by_src.most_common(80):
+        if not es_mi_cpe(_s):
+            continue            # el ranking de riesgo es de TUS CPEs; lo de fuera no se cuarentena
         if nunca_bloquear(_s):
             continue                                    # allowlist: fuera del motor de politicas
         _sc, _bd, _c2, _d2 = riesgo(_s)
@@ -3684,6 +3777,32 @@ def guardar_nunca(texto):
         os.replace(tmp, NUNCA_FILE)
     except OSError:
         pass
+
+def mis_redes():
+    """Redes que son TUYAS (abonados). MIS_REDES=CIDR,CIDR en el .conf; por defecto las
+    privadas RFC1918 + CGNAT. Debe coincidir con lo que usa el generador."""
+    redes = []
+    for t in (conf().get("MIS_REDES", "") or "").replace(";", ",").split(","):
+        t = t.strip()
+        if not t:
+            continue
+        try:
+            redes.append(ipaddress.ip_network(t, strict=False))
+        except ValueError:
+            pass
+    if not redes:
+        for t in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"):
+            redes.append(ipaddress.ip_network(t))
+    return redes
+
+def es_mi_cpe(ip):
+    """False para una IP de internet: esas no van a la cuarentena de CPEs (no bloquea
+    nada util y ensucia la address-list). Se cortan en el borde."""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(a.version == n.version and a in n for n in mis_redes())
 
 def nunca_bloquear(ip):
     ips = set(); nets = []
@@ -6037,7 +6156,7 @@ que se actualiza solo cada 20 segundos.</td></tr>
 con el desglose de cada uno: puerto origen, IP destino, dueño/organizacion del destino, puerto y
 protocolo. Debajo, el <b>espejo</b>: <b>Top IPs destino mas atacadas</b> (los blancos que reciben mas
 alertas) y que CPEs las golpean &mdash; util para detectar un destino comun (un mismo C2/servidor
-tocado por varios CPEs).</td></tr>
+tocado por varios CPEs). Y al final, <b>Ataques entrantes desde internet</b> (ver abajo).</td></tr>
 <tr><td><b>Detalle</b></td><td>La tabla completa de ataques: quien ataca, a que IP y puerto,
 protocolo, tipo de ataque, cuantas veces y desde/hasta cuando. Paginada de 20 en 20; al
 imprimir a PDF salen todas las filas.</td></tr>
@@ -6350,6 +6469,25 @@ con su SID/firma/fecha/flow_id, las <b>coincidencias de reputacion</b> con su fu
 <p><b>Quien tenia la IP en el momento del evento:</b> el panel guarda un historico de asignaciones
 (PPPoE/DHCP). Si la IP cambio de dueño entre el ataque y ahora, la ficha lo avisa &mdash; asi no se
 culpa al cliente que hoy tiene esa IP por lo que hizo otro antes.</p>
+
+<h2>Ataques entrantes desde internet (y por que van aparte)</h2>
+<p>Suricata ve las <b>dos direcciones</b>: tus CPEs atacando hacia afuera y hosts de internet
+atacando hacia adentro. Este panel existe para lo primero, asi que <b>solo los origenes de tus
+redes</b> pueden ser candidatos a cuarentena, entrar al ranking de riesgo o ser enviados al
+MikroTik. Lo de fuera aparece en <b>Top &rarr; Ataques entrantes desde internet</b>.</p>
+<p><b>Por que importa:</b> ET Open trae firmas que disparan sobre trafico <b>entrante</b> (por
+ejemplo <code>ET COMPROMISED Known Compromised or Hostile Host Traffic</code>), y la palabra
+"compromised" cuenta aqui como infeccion. Sin este filtro, un escaner de internet insistente
+podia aparecer como "CPE infectado" y, con <b>politicas automaticas</b> activadas, acabar en la
+address-list de cuarentena: no bloquea nada util y ensucia la lista.</p>
+<p><b>Que hacer con un ataque entrante:</b> no va a la cuarentena de CPEs (esa lista es de
+abonados). Se corta en el <b>firewall de borde</b>, o mejor: se <b>cierra la exposicion</b> del
+equipo golpeado. Si algo tuyo recibe escaneo constante desde internet, casi siempre es que tiene
+un puerto publicado que no hacia falta.</p>
+<p><b>Si das IP publica a tus clientes</b>, dilo con <code>MIS_REDES=203.0.113.0/24,10.0.0.0/8</code>
+en <code>/etc/suricata-dashboard.conf</code>; por defecto son las privadas
+(<code>10/8</code>, <code>172.16/12</code>, <code>192.168/16</code>) mas CGNAT
+(<code>100.64/10</code>). Ojo: lo que pongas <b>reemplaza</b> el valor por defecto.</p>
 
 <h2>Cuarentena automatica (politicas por banda)</h2>
 <p>Ademas de enviar a mano, el panel puede actuar solo. En <b>Ajustes &rarr; MikroTik</b>, con
@@ -7806,6 +7944,10 @@ class H(BaseHTTPRequestHandler):
                 ipaddress.ip_address(ip)
             except Exception:
                 return _fin(False, "IP invalida")
+            if not es_mi_cpe(ip):
+                # una IP de internet no es un abonado: la cuarentena de CPEs no la frena
+                return _fin(False, f"{ip} no es de tus redes: es un atacante externo, "
+                                   f"se corta en el firewall de borde, no en la cuarentena de CPEs")
             if nunca_bloquear(ip):
                 return _fin(False, f"{ip} esta en la lista 'Nunca bloquear' (no se envia)")
             m = cargar_mk()
@@ -8007,6 +8149,9 @@ class H(BaseHTTPRequestHandler):
                 ip = (q.get("ip", [""])[0]).strip(); score = (q.get("score", [""])[0]).strip()[:8]
                 try: ipaddress.ip_address(ip)
                 except Exception: return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+                if not es_mi_cpe(ip):
+                    return self._redirect("/cuarentena?msg=" + _up.quote(
+                        f"{ip} no es de tus redes: se corta en el borde, no en la cuarentena de CPEs"))
                 if nunca_bloquear(ip):
                     return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} esta en la lista 'Nunca bloquear'"))
                 try: ok, err = mk_add(ip, comment=f"suricata DNS-sospechoso riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl=ttl)

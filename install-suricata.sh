@@ -1247,14 +1247,21 @@ def _cardq(tip):
     """Badge '?' con tooltip explicativo para la cabecera de un cuadro."""
     return f'<span class="chq">?<span class="chtip">{esc(tip)}</span></span>' if tip else ""
 
-def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_class="card", label_above=False, tip=""):
+def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_class="card",
+         label_above=False, tip="", piso=8, que="valor"):
     """Barras horizontales rankeadas, un solo tono, etiqueta de valor directa.
     label_above=True: el nombre va ENCIMA de la barra (a todo el ancho), no en una
-    columna a la izquierda; asi los nombres largos (firmas) no se recortan nunca."""
+    columna a la izquierda; asi los nombres largos (firmas) no se recortan nunca.
+    Escala HONESTA: el largo y el color van contra `ref = max(mx, piso)`, no contra el
+    maximo. Asi una sola alerta NO llena la barra ni la pinta de rojo (antes, con todo en
+    1, salia todo full y rojo como si fueran ataques intensos). `que` = nombre singular
+    de la fila (puerto/IP/firma) para el aviso de 'sin dominante'."""
     q = _cardq(tip)
     if not pares:
         return f'<section class="{card_class}"><h2>{esc(titulo)}{q}</h2><p class="muted">Sin datos.</p></section>'
     mx = max(v for _, v in pares) or 1
+    ref = max(mx, piso)                       # escala minima: hace falta ~`piso` para llenar/enrojecer
+    plano = len({v for _, v in pares}) <= 1   # todos iguales -> no hay un claro dominante
     rows = []
     if label_above:
         W = 900
@@ -1265,11 +1272,11 @@ def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_clas
         maxch = 120
         for i, (name, v) in enumerate(pares):
             top = i * rowh + 4
-            w = max(2, int(barmax * v / mx))
+            w = max(2, int(barmax * v / ref))
             etq = name if len(name) <= maxch else name[:maxch - 1] + "…"
             rows.append(
                 f'<text x="2" y="{top+13}" class="lbl">{esc(etq)}</text>'
-                f'<rect x="2" y="{top+labh}" width="{w}" height="{barh}" rx="4" fill="{heat(v/mx)}"/>'
+                f'<rect x="2" y="{top+labh}" width="{w}" height="{barh}" rx="4" fill="{heat(v/ref)}"/>'
                 f'<text x="{w+8}" y="{top+labh+barh*0.7:.0f}" class="val">{esc(fmt(v))}</text>')
     else:
         rowh, gap = 26, 8
@@ -1278,18 +1285,26 @@ def hbar(titulo, pares, unidad="alertas", fmt=str, lblw=125, barw=470, card_clas
         W = lblw + barw + 80
         for i, (name, v) in enumerate(pares):
             y = i * (rowh + gap) + 4
-            w = max(2, int(barw * v / mx))
+            w = max(2, int(barw * v / ref))
             etq = name if len(name) <= maxch else name[:maxch - 1] + "…"
             rows.append(
                 f'<text x="{lblw-8}" y="{y+rowh*0.68:.0f}" text-anchor="end" class="lbl">{esc(etq)}</text>'
-                f'<rect x="{lblw}" y="{y}" width="{w}" height="{rowh}" rx="4" fill="{heat(v/mx)}"/>'
+                f'<rect x="{lblw}" y="{y}" width="{w}" height="{rowh}" rx="4" fill="{heat(v/ref)}"/>'
                 f'<text x="{lblw+w+6}" y="{y+rowh*0.68:.0f}" class="val">{esc(fmt(v))}</text>')
+    # aviso honesto cuando la muestra es plana/pequeña (no hay un dominante real)
+    if plano:
+        aviso = (f' &middot; <b>sin {esc(que)} dominante</b>: los {len(pares)} van empatados '
+                 f'en {esc(fmt(mx))} {esc(unidad)} (muestra pequeña)')
+    elif mx < piso:
+        aviso = f' &middot; pocos datos todavia (maximo {esc(fmt(mx))} {esc(unidad)})'
+    else:
+        aviso = ""
     return (f'<section class="{card_class}"><h2>{esc(titulo)}{q}</h2>'
             f'<svg viewBox="0 0 {W} {h}" width="100%" role="img" aria-label="{esc(titulo)}">'
             f'{"".join(rows)}</svg>'
             f'<p class="muted leyenda">en {unidad} &middot; el color sube con la intensidad '
             f'(<span style="color:#1baf7a">bajo</span> &rarr; <span style="color:#eda100">medio</span> '
-            f'&rarr; <span style="color:#e34948">alto</span>)</p></section>')
+            f'&rarr; <span style="color:#e34948">alto</span>){aviso}</p></section>')
 
 def timeline(by_hour):
     # Ventana FIJA de 24h en intervalos de BUCKET_MIN minutos (detalle hora:minuto),
@@ -1974,10 +1989,10 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
   </div>
   {timeline(by_hour)}
   <div class="grid">
-    {hbar("Puertos de destino mas atacados", top(by_dport), "alertas", tip="Puertos de destino con mas alertas (443 HTTPS, 80 HTTP, 53 DNS, 22 SSH...). Muestra a que servicios apunta el trafico sospechoso. Solo el top; el total de puertos distintos esta en el recuadro de arriba.")}
-    {hbar("IPs origen (atacantes)", top(by_src), "alertas", tip="IPs de ORIGEN que mas alertas dispararon (los equipos/CPE que generan el trafico). Ojo: muchas pueden ser solo consultas DNS sospechosas, no ataque real. Solo el top; el total esta arriba.")}
-    {hbar("IPs destino (objetivos)", top(by_dst), "alertas", tip="IPs de DESTINO mas frecuentes: hacia donde va el trafico alertado (el objetivo). Suele ser tu DNS y unos pocos servidores.")}
-    {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas", tip="Tipos de ataque (firmas de Suricata) mas frecuentes, agrupados y traducidos al espanol. Indica que clase de amenaza predomina.")}
+    {hbar("Puertos de destino mas atacados", top(by_dport), "alertas", que="puerto", tip="Puertos de destino con mas alertas (443 HTTPS, 80 HTTP, 53 DNS, 22 SSH...). Muestra a que servicios apunta el trafico sospechoso. Solo el top; el total de puertos distintos esta en el recuadro de arriba.")}
+    {hbar("IPs origen (atacantes)", top(by_src), "alertas", que="IP", tip="IPs de ORIGEN que mas alertas dispararon (los equipos/CPE que generan el trafico). Ojo: muchas pueden ser solo consultas DNS sospechosas, no ataque real. Solo el top; el total esta arriba.")}
+    {hbar("IPs destino (objetivos)", top(by_dst), "alertas", que="IP", tip="IPs de DESTINO mas frecuentes: hacia donde va el trafico alertado (el objetivo). Suele ser tu DNS y unos pocos servidores.")}
+    {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas", que="firma", tip="Tipos de ataque (firmas de Suricata) mas frecuentes, agrupados y traducidos al espanol. Indica que clase de amenaza predomina.")}
   </div>
   {top_sec}
   <section class="card">

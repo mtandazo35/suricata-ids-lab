@@ -8896,9 +8896,25 @@ import ipaddress, os, socket, struct, sys, time
 
 PORT = int(os.environ.get("TZSP_PORT", "37008"))
 OUT_IF = os.environ.get("TZSP_OUT_IF", "ids-in")
+# --- Varios MikroTik: una interfaz por router ---
+# TZSP_MAP = "10.0.0.1=ids-in,10.9.9.1=ids-in2" manda el espejo de cada router a SU
+# interfaz. Es lo que permite despues saber de que nodo vino cada alerta (Suricata lo
+# apunta como in_iface): sin esto todos los espejos caen en la misma interfaz y dos
+# nodos que usan el mismo rango privado se vuelven indistinguibles, con el riesgo de
+# culpar al cliente equivocado y de mandar el bloqueo al router que no es.
+# Sin TZSP_MAP se usa TZSP_ALLOW + TZSP_OUT_IF, como siempre (un solo router).
+MAPA = []          # [(red, interfaz)]
+for _p in os.environ.get("TZSP_MAP", "").replace(" ", "").split(","):
+    if not _p or "=" not in _p:
+        continue
+    _red, _if = _p.split("=", 1)
+    try:
+        MAPA.append((ipaddress.ip_network(_red, strict=False), _if))
+    except ValueError:
+        pass
 # origenes autorizados del espejo (MikroTik). Vacio = NO arrancar (fail-closed):
 # sin lista, cualquiera en la red podria inyectar tramas forjadas en el IDS.
-ALLOW = []
+ALLOW = [r for r, _ in MAPA]
 for _c in os.environ.get("TZSP_ALLOW", "").replace(" ", "").split(","):
     if _c:
         try:
@@ -8947,11 +8963,41 @@ def main():
     rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     rx.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 << 20)
     rx.bind(("0.0.0.0", PORT))
-    tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
-    tx.bind((OUT_IF, 0))
-    print(f"tzsp-decap: escuchando UDP {PORT} -> {OUT_IF}"
-          f" (solo desde {os.environ.get('TZSP_ALLOW')})", flush=True)
+    # un socket por interfaz de salida (una por router con TZSP_MAP; si no, una sola)
+    salidas = {}
+    for _red, _if in MAPA:
+        if _if not in salidas:
+            s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+            s.bind((_if, 0))
+            salidas[_if] = s
+    if OUT_IF not in salidas:
+        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+        s.bind((OUT_IF, 0))
+        salidas[OUT_IF] = s
+    _cache = {}                       # ip origen -> interfaz (se resuelve una vez por router)
+
+    def salida_de(ip):
+        s = _cache.get(ip)
+        if s is None:
+            s = OUT_IF
+            if MAPA:
+                try:
+                    a = ipaddress.ip_address(ip)
+                    for red, iface in MAPA:
+                        if a.version == red.version and a in red:
+                            s = iface
+                            break
+                except ValueError:
+                    pass
+            if len(_cache) < 1000:    # cota: los origenes son un punado de routers
+                _cache[ip] = s
+        return salidas.get(s) or salidas[OUT_IF]
+
+    _destinos = ", ".join(f"{r}->{i}" for r, i in MAPA) or OUT_IF
+    print(f"tzsp-decap: escuchando UDP {PORT} -> {_destinos}"
+          f" (solo desde {os.environ.get('TZSP_MAP') or os.environ.get('TZSP_ALLOW')})", flush=True)
     rxn = txn = bad = big = rej = 0
+    porif = {}
     last = time.time()
     while True:
         d, peer = rx.recvfrom(65535)
@@ -8964,13 +9010,21 @@ def main():
             bad += 1
         else:
             try:
+                tx = salida_de(peer[0])
                 tx.send(f)
                 txn += 1
+                if MAPA:
+                    porif[peer[0]] = porif.get(peer[0], 0) + 1
             except OSError:
                 big += 1
         now = time.time()
         if now - last >= 60:
-            print(f"tzsp-decap: rx={rxn} tx={txn} descartados={bad} muy_grandes={big} rechazados_origen={rej} ultimo_origen={peer[0]}", flush=True)
+            # con varios routers interesa ver que TODOS estan mandando: si uno se calla,
+            # ese nodo se queda sin vigilancia y no hay ningun otro aviso
+            det = (" por_origen=" + ",".join(f"{k}:{v}" for k, v in sorted(porif.items()))) if porif else ""
+            print(f"tzsp-decap: rx={rxn} tx={txn} descartados={bad} muy_grandes={big} "
+                  f"rechazados_origen={rej} ultimo_origen={peer[0]}{det}", flush=True)
+            porif.clear()
             last = now
 
 if __name__ == "__main__":

@@ -2799,7 +2799,8 @@ reportes diarios, con login basico. Solo biblioteca estandar. Corre como servici
 
 Config: /etc/suricata-dashboard.conf  (PORT, USER, PASS)
 """
-import base64, glob, hashlib, html, json, os, re, secrets, subprocess, threading, time
+import base64, glob, hashlib, html, json, os, re, secrets, subprocess, sys, threading, time
+import traceback
 import urllib.request, urllib.parse, urllib.error, ipaddress
 from datetime import datetime, timezone, timedelta
 
@@ -7119,6 +7120,12 @@ re-ejecutando el instalador. Necesita salida a internet la primera vez.</li>
                 break
     actual = paginas[idx] if paginas else {"slug": "", "titulo": "", "cat": "", "html": ""}
 
+    def _ir(slug):
+        """Enlace a otro tema. Dentro del modal de Ajustes hay que arrastrar embed=1: sin
+        el, al pulsar un tema se cargaba el panel ENTERO (barra incluida) dentro de la
+        ventanita."""
+        return f"?p={slug}&embed=1" if embed else f"?p={slug}"
+
     # --- barra lateral: categorias -> temas, con buscador ---
     # ojo con el nombre: nav() es la funcion que dibuja la barra del panel, no tocar
     lateral = []
@@ -7130,7 +7137,7 @@ re-ejecutando el instalador. Necesita salida a internet la primera vez.</li>
             lateral.append(f"<div class=navcat>{html.escape(pg['cat'])}</div><ul class=navlist>")
             cat_prev = pg["cat"]
         act = " class=on" if (not todo and pg["slug"] == actual["slug"]) else ""
-        lateral.append(f'<li><a href="?p={pg["slug"]}"{act} data-t="{html.escape(pg["titulo"].lower())}">'
+        lateral.append(f'<li><a href="{_ir(pg["slug"])}"{act} data-t="{html.escape(pg["titulo"].lower())}">'
                        f'{html.escape(pg["titulo"])}</a></li>')
     if cat_prev is not None:
         lateral.append("</ul>")
@@ -7138,7 +7145,7 @@ re-ejecutando el instalador. Necesita salida a internet la primera vez.</li>
            " autocomplete=off aria-label='Buscar'>"
            + "".join(lateral)
            + f'<div class=navcat>Todo</div><ul class=navlist><li>'
-             f'<a href="?p=todo"{" class=on" if todo else ""}>Ver la guia completa</a></li></ul>')
+             f'<a href="{_ir("todo")}"{" class=on" if todo else ""}>Ver la guia completa</a></li></ul>')
 
     if todo:
         art = "".join(
@@ -7154,9 +7161,9 @@ re-ejecutando el instalador. Necesita salida a internet la primera vez.</li>
         ant = paginas[idx - 1] if idx > 0 else None
         sig = paginas[idx + 1] if idx + 1 < len(paginas) else None
         pies = ("<nav class=docpn>"
-                + (f'<a class=pnprev href="?p={ant["slug"]}"><span>Anterior</span>'
+                + (f'<a class=pnprev href="{_ir(ant["slug"])}"><span>Anterior</span>'
                    f'<b>{html.escape(ant["titulo"])}</b></a>' if ant else "<span></span>")
-                + (f'<a class=pnnext href="?p={sig["slug"]}"><span>Siguiente</span>'
+                + (f'<a class=pnnext href="{_ir(sig["slug"])}"><span>Siguiente</span>'
                    f'<b>{html.escape(sig["titulo"])}</b></a>' if sig else "<span></span>")
                 + "</nav>")
         art += pies
@@ -8121,7 +8128,63 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
+    def send_response(self, code, message=None):
+        # deja constancia de que ya empezo a responder: la red de seguridad de abajo no
+        # debe intentar escribir una segunda respuesta encima de una a medias
+        self._respondido = True
+        BaseHTTPRequestHandler.send_response(self, code, message)
+
+    def _seguro(self, fn):
+        """Red de seguridad de TODA peticion.
+
+        Si una pagina reventaba, el hilo moria y la conexion se cerraba sin responder
+        nada. Detras de un proxy inverso (nginx/openresty) eso llega al navegador como
+        un escueto "502 Bad Gateway" que no dice que fallo ni donde mirar. Ahora se
+        responde 500 con una explicacion y el fallo queda en el log y en la bitacora."""
+        try:
+            fn()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            raise                       # el cliente se fue: no hay a quien responderle
+        except Exception:
+            det = traceback.format_exc()
+            ruta = self.path.split("?", 1)[0]
+            try:
+                sys.stderr.write("ERROR en %s %s\n%s" % (self.command, self.path, det))
+                sys.stderr.flush()
+            except Exception:
+                pass
+            try:
+                bitacora("ERROR-PANEL", "%s %s: %s" % (self.command, ruta,
+                                                       det.strip().splitlines()[-1][:200]))
+            except Exception:
+                pass
+            if getattr(self, "_respondido", False):
+                self.close_connection = True   # ya iba una respuesta a medias: cortar
+                return
+            try:
+                self._html(
+                    "<!doctype html><html lang=es><head><meta charset=utf-8>"
+                    "<title>Error del panel</title><style>body{margin:0;padding:40px 24px;"
+                    "font:15px/1.6 system-ui,Segoe UI,sans-serif;color:#33322f;background:#fcfcfb}"
+                    "div{max-width:620px;margin:0 auto}h1{font-size:20px;margin:0 0 10px;color:#b52a2a}"
+                    "code{background:#f1f1ef;border:1px solid #e0dfda;border-radius:4px;padding:1px 6px;"
+                    "font:13px ui-monospace,Consolas,monospace}p{margin:10px 0}</style></head><body><div>"
+                    "<h1>Esta pagina del panel fallo</h1>"
+                    "<p>La peticion <code>" + html.escape(ruta) + "</code> no se pudo generar. "
+                    "El resto del panel sigue funcionando.</p>"
+                    "<p>El detalle queda en el registro del servicio:<br>"
+                    "<code>journalctl -u suricata-dashboard -n 50</code></p>"
+                    "</div></body></html>", 500)
+            except Exception:
+                self.close_connection = True
+
     def do_GET(self):
+        self._seguro(self._get)
+
+    def do_POST(self):
+        self._seguro(self._post)
+
+    def _get(self):
         path = self.path.split("?", 1)[0]
         if path in ("/logo.png", "/favicon.ico"):
             # publico y cacheable: el navegador lo guarda y el login pesa ~3 KB.
@@ -8284,7 +8347,7 @@ class H(BaseHTTPRequestHandler):
                     pass
             return self._html("<h1>No encontrado</h1>", 404)
         return self._html("<h1>No encontrado</h1>", 404)
-    def do_POST(self):
+    def _post(self):
         ruta = self.path.split("?", 1)[0]
         import urllib.parse, urllib.parse as _up, ipaddress
         try:

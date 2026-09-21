@@ -65,7 +65,8 @@ correr "instalador: una interfaz por router" bash tests/test_instalador_multi.sh
 correr "identidad (router, IP): dos nodos no se confunden" "$PY" tests/test_identidad_nodo.py
 correr "alta, edicion y baja de nodos" "$PY" tests/test_rutas_nodos.py
 correr "enviar/quitar de cuarentena van por identidad (router, IP)" "$PY" tests/test_cuarentena_identidad.py
-correr "documentacion: paginas, categorias y buscador" "$PY" tests/test_documentacion.py
+correr "documentacion: paginas, categorias, buscador y modal" "$PY" tests/test_documentacion.py
+correr "una pagina que revienta da 500 explicado, no 502 mudo" "$PY" tests/test_error_500.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

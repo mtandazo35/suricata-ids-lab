@@ -26,7 +26,7 @@ def check(d, c, e=""):
         fallos += 1
 
 
-def render(pagina=""):
+def render(pagina="", embed=False):
     """Ejecuta documentacion_page con dobles y devuelve el HTML."""
     fn = None
     for n in ARBOL.body:
@@ -43,7 +43,7 @@ def render(pagina=""):
           "NUNCA_FILE": "/etc/x", "MK_CONF": "/etc/y",
           "nav": lambda activa="": "<!--nav-->"}
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "<doc>", "exec"), ns)
-    return ns["documentacion_page"](pagina=pagina)
+    return ns["documentacion_page"](pagina=pagina, embed=embed)
 
 
 def main():
@@ -87,6 +87,20 @@ def main():
     # el ancla de cada tema se conserva (los avisos enlazan a #reglas, #cuarentena...)
     check("cada tema conserva su ancla",
           all(('id="%s"' % t) in render(t) for t in temas[:6]), temas[:6])
+
+    # --- dentro del modal de Ajustes (iframe /documentacion?embed=1) ---
+    # Es el camino que usa el boton "Documentacion" del panel y no se probaba.
+    emb = render("", embed=True)
+    check("en el modal no se mete la barra del panel", "<!--nav-->" not in emb)
+    check("y los temas siguen estando", emb.count('href="?p=') >= 20, emb.count('href="?p='))
+    sueltos = re.findall(r'href="\?p=([^"&]+)"(?!\S*embed)', emb)
+    check("cada enlace arrastra embed=1 (si no, el panel entero se carga dentro)",
+          not sueltos, sueltos[:5])
+    emb2 = render("salud-del-sensor", embed=True)
+    check("anterior/siguiente tambien lo arrastran",
+          emb2.count("embed=1") >= 20 and "<!--nav-->" not in emb2,
+          emb2.count("embed=1"))
+    check("fuera del modal NO se cuela embed=1", "embed=1" not in portada)
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

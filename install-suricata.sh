@@ -1924,8 +1924,10 @@ def top_origenes_section(n_src=5, n_sub=8):
             cuar = ("<span class='qsent' title='Este CPE ya esta en la lista de cuarentena del MikroTik'>"
                     "&#10003; En cuarentena</span>")
         else:
+            # se manda la IDENTIDAD entera (router|IP): el panel la guarda tal cual y asi
+            # el bloqueo sale hacia SU MikroTik y la marca "En cuarentena" vuelve a casar
             cuar = (f"<button class='qsend' title='Enviar este CPE a la address-list de cuarentena del MikroTik' "
-                    f"onclick=\"qcuar(this,'{esc(ip_de(src))}','{rsc}','{esc(rid_de(src))}')\">&#9888; Cuarentena</button>")
+                    f"onclick=\"qcuar(this,'{esc(src)}','{rsc}')\">&#9888; Cuarentena</button>")
         cards.append(
             f"<div class='tcard'>"
             f"<div class='thd'><span class='rank'>#{i}</span>"
@@ -3506,6 +3508,11 @@ def mk_configurado():
     d = cargar_mk()
     return bool(d.get("HOST") and d.get("USER") and d.get("PASS"))
 
+def mk_listo(d):
+    """Si ESE router (no el de por defecto) esta configurado y habilitado para enviar.
+    Con varios nodos, uno puede estar en dry-run y otro enviando."""
+    return bool(d.get("HOST") and d.get("USER") and d.get("PASS") and d.get("ENABLED") == "1")
+
 # --- cliente minimo de la API de RouterOS (v6.43+ y v7), stdlib pura ---
 def _mk_len(n):
     if n < 0x80: return bytes([n])
@@ -3786,20 +3793,25 @@ def reconciliar_cuarentena():
         return
     for cand_key, sent_path, list_key in (("candidatos", MK_SENT, "LIST"),
                                           ("dns_candidatos", MK_SENT_DNS, "LIST_DNS")):
-        ips_activas = {c.get("ip") for c in data.get(cand_key, [])}
-        env = cargar_enviados(sent_path)
-        lst = m.get(list_key, ""); cambiado = False
-        for ip in list(env.keys()):
-            if env[ip].get("manual") or env[ip].get("pol"):
+        # El registro va por identidad (router, IP); los candidatos traen la IP y su nodo
+        # por separado. Comparar IP contra identidad daba "ya no ataca" a TODOS los CPEs
+        # de un sensor con varios routers.
+        activas = {clave_cpe(c.get("ip", ""), c.get("router", "")) for c in data.get(cand_key, [])}
+        env = cargar_enviados(sent_path); cambiado = False
+        for k in list(env.keys()):
+            if env[k].get("manual") or env[k].get("pol"):
                 continue                       # manual o por politica -> los gestiona otro, no el auto
-            if ip in ips_activas:
+            if k in activas:
                 continue                       # sigue atacando -> se queda (entrada permanente)
+            r = router_de_clave(k); lst = cargar_mk_de(r).get(list_key, "")
+            if not lst:
+                continue
             try:
-                mk_remove(ip, lista=lst)       # dejo de atacar -> liberar
+                mk_remove(ip_de(k), lista=lst, router=r)   # dejo de atacar -> liberar
             except Exception:
                 continue                       # si el router no responde, reintenta el proximo ciclo
-            env.pop(ip, None); cambiado = True
-            mk_log("AUTO-LIBERADO", ip, "auto", f"lista={lst} (dejo de atacar)")
+            env.pop(k, None); cambiado = True
+            mk_log("AUTO-LIBERADO", ip_de(k), "auto", f"lista={lst} (dejo de atacar)" + _suf_nodo(k))
         if cambiado:
             guardar_enviados(env, sent_path)
 
@@ -4165,28 +4177,30 @@ def excluir_destino(d):
         return 0, "IP de destino invalida"
     cur = _dest_ok_set(); cur.add(d)
     guardar_dest_ok_set(cur)                       # 1) destino a la lista de confiables
-    m = cargar_mk(); liberados = 0
+    liberados = 0
     try:                                           # destinos por CPE del reporte actual (respaldo)
         cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
         cand_dst = {}
         for key in ("candidatos", "dns_candidatos"):
             for c in cq.get(key, []):
-                cand_dst[c.get("ip")] = c.get("destinos_ip", [])
+                cand_dst[clave_cpe(c.get("ip", ""), c.get("router", ""))] = c.get("destinos_ip", [])
     except Exception:
         cand_dst = {}
     for list_key, sent_path in (("LIST", MK_SENT), ("LIST_DNS", MK_SENT_DNS)):
-        lst = m.get(list_key, "")
         env = cargar_enviados(sent_path); cambiado = False
-        for ip in list(env.keys()):
-            dips = (env[ip].get("motivo") or {}).get("destinos_ip") or cand_dst.get(ip) or []
+        for k in list(env.keys()):
+            dips = (env[k].get("motivo") or {}).get("destinos_ip") or cand_dst.get(k) or []
             if d in dips:                          # 2) atribuible a ese destino -> liberar
+                # cada CPE se libera en SU router y en la lista que ese router tenga
+                r = router_de_clave(k); dr = cargar_mk_de(r); lst = dr.get(list_key, "")
                 try:
-                    if m.get("ENABLED") == "1":
-                        mk_remove(ip, lista=lst)
+                    if lst and dr.get("ENABLED") == "1":
+                        mk_remove(ip_de(k), lista=lst, router=r)
                 except Exception:
                     pass
-                env.pop(ip, None); cambiado = True; liberados += 1
-                mk_log("LIBERADO-FALSO-POSITIVO", ip, getattr(CTX, "user", "?"), f"destino={d} lista={lst}")
+                env.pop(k, None); cambiado = True; liberados += 1
+                mk_log("LIBERADO-FALSO-POSITIVO", ip_de(k), getattr(CTX, "user", "?"),
+                       f"destino={d} lista={lst}" + _suf_nodo(k))
         if cambiado:
             guardar_enviados(env, sent_path)
     globals()["FORCE_REGEN"] = True                # 3) recalcular candidatos sin ese destino
@@ -4194,9 +4208,11 @@ def excluir_destino(d):
     return liberados, f"Destino {d} marcado confiable; {liberados} CPE liberado(s) por falso positivo."
 
 # --- cuarentena explicable: por que se bloqueo y cuando se reviso por ultima vez ---
-def _motivo_bloqueo(ip):
+def _motivo_bloqueo(clave):
     """Busca por que un CPE es candidato (firma, banda, score, conteos) en cuarentena.json,
-    para guardarlo AL bloquear y poder explicar el bloqueo aunque despues deje de atacar."""
+    para guardarlo AL bloquear y poder explicar el bloqueo aunque despues deje de atacar.
+    Recibe la IDENTIDAD (router, IP): con varios nodos dos CPEs distintos pueden tener la
+    misma IP y se guardaria el motivo del vecino."""
     try:
         cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
     except Exception:
@@ -4205,7 +4221,7 @@ def _motivo_bloqueo(ip):
             ("candidatos", "infeccion", "alertas_cnc", "alertas CnC", "firmas_cnc"),
             ("dns_candidatos", "dns", "alertas_dns", "alertas DNS", "firmas_dns")):
         for c in cq.get(key, []):
-            if c.get("ip") == ip:
+            if clave_cpe(c.get("ip", ""), c.get("router", "")) == clave:
                 return {"tipo": tipo, "banda": c.get("banda", ""), "score": c.get("riesgo", 0),
                         "firma": (c.get("firma", "") or "")[:120],
                         "conteo": f"{c.get(cnt, 0)} {cntlbl}, {c.get(fir, 0)} firma(s)",
@@ -4214,7 +4230,7 @@ def _motivo_bloqueo(ip):
     # CPE no es candidato confirmado, el motivo se arma con lo que uso la politica para
     # decidir (banda, puntaje y su desglose). Sin esto el bloqueo se quedaba sin motivo.
     for c in cq.get("top_riesgo", []):
-        if c.get("ip") == ip:
+        if clave_cpe(c.get("ip", ""), c.get("router", "")) == clave:
             return {"tipo": "politica", "banda": c.get("banda", ""), "score": c.get("riesgo", 0),
                     "firma": "", "desglose": c.get("desglose", ""),
                     "conteo": (f"{c.get('alertas', 0)} alertas, {c.get('destinos', 0)} destino(s) "
@@ -4229,16 +4245,16 @@ def evaluar_bloqueos():
         cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
     except Exception:
         return
-    activos = ({c.get("ip") for c in cq.get("candidatos", [])}
-               | {c.get("ip") for c in cq.get("dns_candidatos", [])})
+    activos = ({clave_cpe(c.get("ip", ""), c.get("router", "")) for c in cq.get("candidatos", [])}
+               | {clave_cpe(c.get("ip", ""), c.get("router", "")) for c in cq.get("dns_candidatos", [])})
     now = int(time.time())
     for path in (MK_SENT, MK_SENT_DNS):
         env = cargar_enviados(path)
         if not env:
             continue
-        for ip, e in env.items():
+        for k, e in env.items():
             e["last_eval"] = now
-            e["sigue"] = ip in activos
+            e["sigue"] = k in activos
         guardar_enviados(env, path)
 
 # --- salud del sensor: distinguir "sin amenazas" de "sin trafico / perdidas / reporte viejo" ---
@@ -4491,7 +4507,7 @@ def aplicar_politicas():
                 ok = False
             if ok:
                 env[k] = {"cuando": int(time.time()), "score": sc, "por": "politica", "manual": False, "pol": True,
-                          "router": r.get("id", ""), "motivo": _motivo_bloqueo(ip_de(k))}
+                          "router": r.get("id", ""), "motivo": _motivo_bloqueo(k)}
                 notificar_cuarentena(ip_de(k), "politica de riesgo", lst, quien="politica")
                 mk_log("POLITICA-ENVIADO", ip_de(k), "politica",
                        f"lista={lst} riesgo={sc}" + _suf_nodo(k)); cambiado = True
@@ -4585,7 +4601,7 @@ def barrido_alto_rapido(maxbytes=4_000_000):
             ok = False
         if ok:
             env[src] = {"cuando": int(ahora), "score": "", "por": "politica-rapida", "manual": False,
-                        "pol": True, "router": _r.get("id", ""), "motivo": _motivo_bloqueo(ip_de(src))}
+                        "pol": True, "router": _r.get("id", ""), "motivo": _motivo_bloqueo(src)}
             try: notificar_cuarentena(ip_de(src), "ALTO (envio inmediato)", lst, quien="politica-rapida")
             except Exception: pass
             mk_log("POLITICA-RAPIDA", ip_de(src), "politica",
@@ -6885,6 +6901,23 @@ inflado y el <b>abonado equivocado</b> en la ficha. Con el nodo, la identidad es
 el nombre de lista que ese router tenga configurado (pueden llamarse distinto en cada uno).</li>
 </ul>
 
+<h3>Como se ve en el panel</h3>
+<p>Con <b>un solo</b> MikroTik no cambia nada: los CPEs se siguen viendo por su IP. En cuanto hay
+<b>mas de uno</b>, junto a cada IP aparece una <b>etiqueta azul con el nombre del nodo</b>, tanto
+en el Top como en la pestana Cuarentena. Esa etiqueta no es decorativa: dos abonados distintos
+pueden tener la misma IP en routers distintos, y el panel los trata como lo que son, dos CPEs
+separados.</p>
+<ul>
+<li>El boton <b>&#9888; Cuarentena</b> del Top envia al MikroTik <b>de ese nodo</b>, a la
+address-list que ese router tenga configurada.</li>
+<li>La marca <b>&#10003; En cuarentena</b> aparece cuando ese CPE concreto (nodo + IP) esta en una
+de las dos listas, la de infectados o la de DNS sospechoso.</li>
+<li><b>Quitar</b> libera solo a ese, no al homonimo del otro nodo.</li>
+<li>Cada linea de la bitacora termina en <code>nodo=&lt;nombre&gt;</code>, para saber despues en
+que router se actuo.</li>
+<li>Un nodo que este <b>sin habilitar</b> no recibe envios: se avisa en pantalla y no se toca.</li>
+</ul>
+
 <h3>Como se monta</h3>
 <ol>
 <li><b>Instalar/re-ejecutar el instalador</b> con todas las IPs de los routers en <code>-m</code>:
@@ -7661,25 +7694,30 @@ def cuarentena_page(msg="", es_admin=False):
 
     def _seccion(titulo, sub, candidatos, env_map, pref, lista_name, cnt_key, cnt_lbl, fir_key, vacio):
         """Arma una seccion (titulo + tabla + boton 'enviar todos') para una categoria."""
-        pend = [c for c in candidatos if c.get("ip") not in env_map]
+        # La identidad de un CPE es (router, IP), que es como esta guardado el registro de
+        # enviados. Buscar por la IP pelada dejaba "sin enviar" a CPEs ya bloqueados en
+        # cuanto el sensor vigila mas de un MikroTik.
+        _k = lambda c: clave_cpe(c.get("ip", ""), c.get("router", ""))
+        pend = [c for c in candidatos if _k(c) not in env_map]
         def _acc(c):
-            ip = c.get("ip", "")
-            if ip in env_map:
-                cuando = time.strftime("%d/%m %H:%M", time.localtime(env_map[ip].get("cuando", 0)))
+            ip = c.get("ip", ""); k = _k(c)
+            if k in env_map:
+                cuando = time.strftime("%d/%m %H:%M", time.localtime(env_map[k].get("cuando", 0)))
                 quitar = (f"<form method=post action='/{pref}/quitar' style='display:inline'>"
-                          f"<input type=hidden name=ip value='{esc(ip)}'>"
+                          f"<input type=hidden name=ip value='{esc(k)}'>"
                           f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de la lista {esc(lista_name)}?')\">Quitar</button></form>"
                           ) if es_admin else ""
-                meta = _rev(env_map[ip])
+                meta = _rev(env_map[k])
                 meta_html = f"<div class='rowmeta'>desde {cuando}{(' · ' + meta) if meta else ''}</div>"
                 return f"<span class='enq' title='En {esc(lista_name)} desde {cuando}'>En lista</span> {quitar}{meta_html}"
             if es_admin and activo:
                 return (f"<form method=post action='/{pref}/enviar' style='display:inline'>"
-                        f"<input type=hidden name=ip value='{esc(ip)}'><input type=hidden name=score value='{c.get('riesgo',0)}'>"
+                        f"<input type=hidden name=ip value='{esc(k)}'><input type=hidden name=score value='{c.get('riesgo',0)}'>"
                         f"<button class='qbtn send' onclick=\"return confirm('Enviar {esc(ip)} a la lista {esc(lista_name)} del MikroTik?')\">Enviar</button></form>")
             return "<span class='dry' title='Configura y habilita el MikroTik en Ajustes para activar el envio'>solo sugerencia</span>"
         filas = "".join(
-            f"<tr><td data-label='CPE' class='mono ipx'>{esc(c.get('ip',''))}{_cli(c.get('ip',''))}</td>"
+            f"<tr><td data-label='CPE' class='mono ipx'>{esc(c.get('ip',''))}"
+            f"{_chip_nodo_panel(_k(c))}{_cli(c.get('ip',''))}</td>"
             f"<td data-label='Riesgo'><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {esc(c.get('banda',''))}</span>"
             f"<div style='margin-top:4px'>{_conf_badge(c)}</div></td>"
             f"<td data-label='Motivo' class='mot'>{c.get(cnt_key,0)} {cnt_lbl} · {c.get(fir_key,0)} firma(s)<br>"
@@ -8571,7 +8609,12 @@ class H(BaseHTTPRequestHandler):
                     self.end_headers(); self.wfile.write(b)
                     return
                 return self._redirect("/cuarentena?msg=" + _up.quote(texto))
-            ip = (q.get("ip", [""])[0]).strip()
+            # Llega la IDENTIDAD del CPE ("IP" con un solo nodo, "router|IP" con varios).
+            # Guardarla pelada era el fallo: el registro y los candidatos van por identidad,
+            # asi que el Top y la pestana seguian mostrando "sin enviar" algo ya bloqueado,
+            # y el bloqueo salia siempre hacia el router por defecto.
+            clave = (q.get("ip", [""])[0]).strip()
+            ip = ip_de(clave)
             score = (q.get("score", [""])[0]).strip()[:8]
             try:
                 ipaddress.ip_address(ip)
@@ -8583,23 +8626,28 @@ class H(BaseHTTPRequestHandler):
                                    f"se corta en el firewall de borde, no en la cuarentena de CPEs")
             if nunca_bloquear(ip):
                 return _fin(False, f"{ip} esta en la lista 'Nunca bloquear' (no se envia)")
-            m = cargar_mk()
-            if not (mk_configurado() and m.get("ENABLED") == "1"):
-                return _fin(False, "Configura y HABILITA el MikroTik en Ajustes primero")
+            r = router_de_clave(clave); m = cargar_mk_de(r)
+            if not mk_listo(m):
+                return _fin(False, f"Configura y HABILITA el MikroTik "
+                                   f"{m.get('ROUTER_NOMBRE') or ''} en Ajustes primero".replace("  ", " "))
             try:   # si la IP no es candidato actual, es un envio MANUAL (no lo libera el auto)
-                cand_ips = {c.get("ip") for c in json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8")).get("candidatos", [])}
+                cand_ips = {clave_cpe(c.get("ip", ""), c.get("router", ""))
+                            for c in json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8")).get("candidatos", [])}
             except Exception:
                 cand_ips = set()
             try:
-                ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}", ttl=_ttl_efectivo(m, "TTL"))
+                ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}",
+                                 lista=m.get("LIST", ""), ttl=_ttl_efectivo(m, "TTL"), router=r)
             except Exception as ex:
                 ok, err = False, str(ex)
             if ok:
                 env = cargar_enviados()
-                env[ip] = {"cuando": int(time.time()), "score": score, "por": getattr(CTX, "user", "?"),
-                           "manual": ip not in cand_ips, "motivo": _motivo_bloqueo(ip)}
+                env[clave] = {"cuando": int(time.time()), "score": score, "por": getattr(CTX, "user", "?"),
+                              "router": r.get("id", ""),
+                              "manual": clave not in cand_ips, "motivo": _motivo_bloqueo(clave)}
                 guardar_enviados(env)
-                mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} ttl={m.get('TTL')}" + (" (manual)" if ip not in cand_ips else ""))
+                mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} ttl={m.get('TTL')}"
+                       + (" (manual)" if clave not in cand_ips else "") + _suf_nodo(clave))
                 notificar_cuarentena(ip, "Infeccion CnC", m.get("LIST", ""), quien=getattr(CTX, "user", "?"))
                 globals()["FORCE_REGEN"] = True   # regenerar pronto para que el Top muestre 'En cuarentena'
                 nota = " (ya estaba en la lista)" if err else ""
@@ -8618,22 +8666,28 @@ class H(BaseHTTPRequestHandler):
                 cq = []
             env = cargar_enviados()
             # masivo: solo ALTA CONFIANZA (evidencia independiente); los sospechosos van a mano
-            pend = [c for c in cq if c.get("ip") not in env and c.get("confianza") == "alta"][:50]
+            pend = [c for c in cq
+                    if clave_cpe(c.get("ip", ""), c.get("router", "")) not in env
+                    and c.get("confianza") == "alta"][:50]
             ok_n = err_n = 0; ult_err = ""
             for c in pend:
-                ip = c.get("ip", "")
+                clave = clave_cpe(c.get("ip", ""), c.get("router", "")); ip = ip_de(clave)
                 try:
                     ipaddress.ip_address(ip)
                 except Exception:
                     continue
+                r = router_de_clave(clave); dr = cargar_mk_de(r)
+                if not mk_listo(dr):
+                    continue            # ese nodo esta en dry-run: no se le manda nada
                 try:
-                    ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {c.get('riesgo',0)} {time.strftime('%Y-%m-%d %H:%M')}", ttl=_ttl_efectivo(m, "TTL"))
+                    ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {c.get('riesgo',0)} {time.strftime('%Y-%m-%d %H:%M')}",
+                                     lista=dr.get("LIST", ""), ttl=_ttl_efectivo(dr, "TTL"), router=r)
                 except Exception as ex:
                     ok, err = False, str(ex)
                 if ok:
-                    env[ip] = {"cuando": int(time.time()), "score": c.get("riesgo", 0), "por": getattr(CTX, "user", "?"),
-                               "motivo": _motivo_bloqueo(ip)}
-                    mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} (masivo)")
+                    env[clave] = {"cuando": int(time.time()), "score": c.get("riesgo", 0), "por": getattr(CTX, "user", "?"),
+                                  "router": r.get("id", ""), "motivo": _motivo_bloqueo(clave)}
+                    mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={dr.get('LIST')} (masivo)" + _suf_nodo(clave))
                     ok_n += 1
                 else:
                     mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), err); err_n += 1; ult_err = err
@@ -8648,14 +8702,16 @@ class H(BaseHTTPRequestHandler):
         if ruta == "/cuarentena/quitar":
             if not self._operador():
                 return self._deny()
-            ip = (q.get("ip", [""])[0]).strip()
+            # primero se separa la identidad y luego se valida la IP: al reves, un
+            # "router|IP" se rechazaba como "IP invalida" y el CPE no se podia liberar
+            clave = (q.get("ip", [""])[0]).strip()
+            ip = ip_de(clave); rt = router_de_clave(clave)
             try:
                 ipaddress.ip_address(ip)
             except Exception:
                 return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
-            clave = ip; ip = ip_de(clave); rt = router_de_clave(clave)
             try:
-                ok, err = mk_remove(ip, router=rt)
+                ok, err = mk_remove(ip, lista=cargar_mk_de(rt).get("LIST", ""), router=rt)
             except Exception as ex:
                 ok, err = False, str(ex)
             # solo se saca del registro si el router confirmo: si falla y se borraba
@@ -8776,10 +8832,10 @@ class H(BaseHTTPRequestHandler):
                 return self._deny()
             m = cargar_mk(); lst = m.get("LIST_DNS", "suricata-dns-sospechoso"); ttl = _ttl_efectivo(m, "TTL_DNS")
             if ruta == "/cuarentena/dns/quitar":
-                ip = (q.get("ip", [""])[0]).strip()
+                clave = (q.get("ip", [""])[0]).strip()
+                ip = ip_de(clave); rt = router_de_clave(clave)
                 try: ipaddress.ip_address(ip)
                 except Exception: return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
-                clave = ip; ip = ip_de(clave); rt = router_de_clave(clave)
                 lst = cargar_mk_de(rt).get("LIST_DNS", lst)
                 try: ok, err = mk_remove(ip, lista=lst, router=rt)
                 except Exception as ex: ok, err = False, str(ex)
@@ -8790,7 +8846,8 @@ class H(BaseHTTPRequestHandler):
             if not (mk_configurado() and m.get("ENABLED") == "1"):
                 return self._redirect("/cuarentena?msg=" + _up.quote("Configura y HABILITA el MikroTik en Ajustes primero"))
             if ruta == "/cuarentena/dns/enviar":
-                ip = (q.get("ip", [""])[0]).strip(); score = (q.get("score", [""])[0]).strip()[:8]
+                clave = (q.get("ip", [""])[0]).strip()
+                ip = ip_de(clave); score = (q.get("score", [""])[0]).strip()[:8]
                 try: ipaddress.ip_address(ip)
                 except Exception: return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
                 if not es_mi_cpe(ip):
@@ -8798,14 +8855,18 @@ class H(BaseHTTPRequestHandler):
                         f"{ip} no es de tus redes: se corta en el borde, no en la cuarentena de CPEs"))
                 if nunca_bloquear(ip):
                     return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} esta en la lista 'Nunca bloquear'"))
-                try: ok, err = mk_add(ip, comment=f"suricata DNS-sospechoso riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl=ttl)
+                rt = router_de_clave(clave); dr = cargar_mk_de(rt)
+                if not mk_listo(dr):
+                    return self._redirect("/cuarentena?msg=" + _up.quote("Ese MikroTik no esta habilitado para enviar"))
+                lst = dr.get("LIST_DNS", lst); ttl = _ttl_efectivo(dr, "TTL_DNS")
+                try: ok, err = mk_add(ip, comment=f"suricata DNS-sospechoso riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl=ttl, router=rt)
                 except Exception as ex: ok, err = False, str(ex)
                 if ok:
                     env = cargar_enviados(MK_SENT_DNS)
-                    env[ip] = {"cuando": int(time.time()), "score": score, "por": getattr(CTX, "user", "?"),
-                               "motivo": _motivo_bloqueo(ip)}
+                    env[clave] = {"cuando": int(time.time()), "score": score, "por": getattr(CTX, "user", "?"),
+                                  "router": rt.get("id", ""), "motivo": _motivo_bloqueo(clave)}
                     guardar_enviados(env, MK_SENT_DNS)
-                    mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={lst} (dns)")
+                    mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={lst} (dns)" + _suf_nodo(clave))
                     notificar_cuarentena(ip, "DNS sospechoso", lst, quien=getattr(CTX, "user", "?"))
                     return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} enviado a la lista {lst}"))
                 mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), f"lista={lst} {err}")
@@ -8816,18 +8877,24 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 cq = []
             env = cargar_enviados(MK_SENT_DNS)
-            pend = [c for c in cq if c.get("ip") not in env and c.get("confianza") == "alta"][:50]
+            pend = [c for c in cq
+                    if clave_cpe(c.get("ip", ""), c.get("router", "")) not in env
+                    and c.get("confianza") == "alta"][:50]
             ok_n = err_n = 0; ult_err = ""
             for c in pend:
-                ip = c.get("ip", "")
+                clave = clave_cpe(c.get("ip", ""), c.get("router", "")); ip = ip_de(clave)
                 try: ipaddress.ip_address(ip)
                 except Exception: continue
-                try: ok, err = mk_add(ip, comment=f"suricata DNS-sospechoso riesgo {c.get('riesgo',0)} {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl=ttl)
+                rt = router_de_clave(clave); dr = cargar_mk_de(rt)
+                if not mk_listo(dr):
+                    continue            # ese nodo esta en dry-run: no se le manda nada
+                _ld = dr.get("LIST_DNS", lst)
+                try: ok, err = mk_add(ip, comment=f"suricata DNS-sospechoso riesgo {c.get('riesgo',0)} {time.strftime('%Y-%m-%d %H:%M')}", lista=_ld, ttl=_ttl_efectivo(dr, "TTL_DNS"), router=rt)
                 except Exception as ex: ok, err = False, str(ex)
                 if ok:
-                    env[ip] = {"cuando": int(time.time()), "score": c.get("riesgo", 0), "por": getattr(CTX, "user", "?"),
-                               "motivo": _motivo_bloqueo(ip)}
-                    mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={lst} (dns masivo)"); ok_n += 1
+                    env[clave] = {"cuando": int(time.time()), "score": c.get("riesgo", 0), "por": getattr(CTX, "user", "?"),
+                                  "router": rt.get("id", ""), "motivo": _motivo_bloqueo(clave)}
+                    mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={_ld} (dns masivo)" + _suf_nodo(clave)); ok_n += 1
                 else:
                     mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), f"lista={lst} {err}"); err_n += 1; ult_err = err
                     if "conexion" in (err or "").lower() or "login" in (err or "").lower():

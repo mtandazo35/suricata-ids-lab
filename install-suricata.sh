@@ -1036,6 +1036,21 @@ def clave_cpe(ip, rid):
     a nadie cuando dos routers usan el mismo rango privado."""
     return (rid + "|" + ip) if rid else ip
 
+def _chip_nodo(clave):
+    """Etiqueta del nodo. Con un solo MikroTik no se muestra nada (seria ruido)."""
+    r = rid_de(clave)
+    if not r:
+        return ""
+    return f"<span class='nodochip' title='Espejo de este MikroTik'>{esc(nombre_router(r))}</span>"
+
+def ip_de(clave):
+    """La IP pelada de una identidad de CPE (para mostrar, geolocalizar o bloquear)."""
+    return clave.split("|", 1)[1] if "|" in clave else clave
+
+def rid_de(clave):
+    """El router de una identidad de CPE ("" si la instalacion tiene un solo nodo)."""
+    return clave.split("|", 1)[0] if "|" in clave else ""
+
 # IPs ya enviadas a la cuarentena del MikroTik (lo escribe el panel): para que el boton
 # del Top muestre "En cuarentena" en vez de "Cuarentena" cuando ya se envio.
 # Son DOS listas (infectados y DNS sospechoso): si solo se mira la primera, un CPE
@@ -1351,7 +1366,11 @@ for p in files:
             ts = parse_ts(g("ts"))
             if ts and ts < cutoff:
                 continue
-            src = g("src_ip") or "?"; dst = g("dest_ip") or "?"
+            # La identidad del CPE se compone AQUI, una sola vez: a partir de este punto
+            # todos los acumuladores quedan indexados por (router, IP) cuando hay varios
+            # nodos, y por la IP a secas cuando hay uno solo (igual que siempre).
+            src = clave_cpe(g("src_ip") or "?", router_de(g("iface")))
+            dst = g("dest_ip") or "?"
             sport = g("src_port"); dport = g("dest_port")
             proto = g("proto")
             if excluido(src, dst, int(dport) if dport else None, g("sid")):   # exclusiones configuradas
@@ -1594,7 +1613,7 @@ for (src, sport, dst, dport, proto, sig), (cnt, first, last) in top_flujos:
     dursec = int((last - first)) if (first and last) else 0
     sig_es = traducir(sig)
     filas.append(
-        f"<tr><td class='mono' data-s='{ipnum(src)}'>{esc(src)}</td>"
+        f"<tr><td class='mono' data-s='{ipnum(ip_de(src))}'>{esc(ip_de(src))}</td>"
         f"<td class='mono num' data-s='{int(sport) if str(sport).isdigit() else -1}'>{esc(sport)}</td>"
         f"<td class='mono dst' data-s='{ipnum(dst)}'>{esc(dst)}</td>"
         f"<td class='mono num' data-s='{int(dport) if str(dport).isdigit() else -1}'>{esc(dport)}</td>"
@@ -1906,11 +1925,11 @@ def top_origenes_section(n_src=5, n_sub=8):
                     "&#10003; En cuarentena</span>")
         else:
             cuar = (f"<button class='qsend' title='Enviar este CPE a la address-list de cuarentena del MikroTik' "
-                    f"onclick=\"qcuar(this,'{esc(src)}','{rsc}')\">&#9888; Cuarentena</button>")
+                    f"onclick=\"qcuar(this,'{esc(ip_de(src))}','{rsc}','{esc(rid_de(src))}')\">&#9888; Cuarentena</button>")
         cards.append(
             f"<div class='tcard'>"
             f"<div class='thd'><span class='rank'>#{i}</span>"
-            f"<span class='ipx mono'>{esc(src)}</span>"
+            f"<span class='ipx mono'>{esc(ip_de(src))}</span>{_chip_nodo(src)}"
             f"<span class='risk' style='background:{rcol}' title='Puntaje de riesgo del CPE (0-100): {rdes}'>"
             f"Riesgo {rsc} &middot; {rband}</span>"
             f"<span class='tot'>{tot:,} alertas</span>{cuar}"
@@ -1943,6 +1962,9 @@ def top_origenes_section(n_src=5, n_sub=8):
         ".topwrap .obadge{display:inline-block;font-size:12.5px;font-weight:700;padding:3px 10px;border-radius:12px;max-width:100%;white-space:normal;word-break:break-word;overflow-wrap:anywhere;line-height:1.35;vertical-align:middle}"
         ".topwrap .obadge.ok{background:#e6f4ea;color:#1a7f37;border:1px solid #b7e0c2}"
         ".topwrap .obadge.unk{background:#fdf0e6;color:#a15c12;border:1px solid #f2d3ad}"
+        # etiqueta del nodo (solo aparece si hay varios MikroTik)
+        ".nodochip{display:inline-block;background:#eef4fd;color:#2a5fa0;border:1px solid #cfe0f6;"
+        "border-radius:20px;padding:1px 9px;font-size:11px;font-weight:700;white-space:nowrap;margin-left:6px}"
         ".topwrap .obadge.none{background:#f1f1ef;color:#6b6a66;border:1px solid #e0dfda}"
         ".topwrap .obadge.bad{background:#fdecec;color:#b52a2a;border:1px solid #f3c4c4}"
         "</style>"
@@ -2339,12 +2361,12 @@ def entrantes_section(n_src=8, n_sub=6, max_src=5000, max_det=60):
             f"<td class='mono'>{esc((pr or '-').upper())}</td>"
             f"<td class='fw'>{esc((sig or '-')[:70])}</td>"
             f"<td class='num'>{c:,}</td></tr>" for (d, dp, pr, sig), c in sub)
-        _pa = pais(src)
+        _pa = pais(ip_de(src))
         _chip = f"<span class='obadge unk'>{esc(_pa)}</span>" if _pa else ""
         cards.append(
             f"<div class='tcard'>"
             f"<div class='thd'><span class='rank'>#{i}</span>"
-            f"<span class='ipx mono'>{esc(src)}</span>{_chip}{_dst_badge(src)}"
+            f"<span class='ipx mono'>{esc(ip_de(src))}</span>{_chip}{_dst_badge(ip_de(src))}{_chip_nodo(src)}"
             f"<span class='tot'>{e['n']:,} alertas</span>"
             f"<span class='meta'>&rarr; golpea {len(e['dst']):,} IP(s) de tu red</span></div>"
             f"<div class='tablewrap'><table><thead><tr>"
@@ -2408,9 +2430,9 @@ try:
 
     cand = []
     for src in inf_hits:
-        if not es_mi_cpe(src):
+        if not es_mi_cpe(ip_de(src)):
             continue            # atacante de internet, no un abonado: va al apartado de entrantes
-        if nunca_bloquear(src):
+        if nunca_bloquear(ip_de(src)):
             continue                                    # allowlist: nunca a cuarentena
         # gatillo minimo para siquiera considerarlo (repeticion o >=2 firmas)
         if not (inf_hits[src] >= UMBRAL_INFECTADO or len(inf_sids[src]) >= 2):
@@ -2422,7 +2444,7 @@ try:
         confianza = "alta" if n_ev >= 2 else "sospechoso"
         sc, band, _c, _d = riesgo(src)
         cand.append({
-            "ip": src,
+            "ip": ip_de(src), "router": rid_de(src),
             "riesgo": sc,
             "banda": band,
             "confianza": confianza,
@@ -2456,16 +2478,16 @@ try:
         return len(ev), ev
     cand_dns = []
     for src in dns_hits:
-        if not es_mi_cpe(src):
+        if not es_mi_cpe(ip_de(src)):
             continue            # solo tus abonados consultan "tu" DNS; lo de fuera no se cuarentena
-        if nunca_bloquear(src):
+        if nunca_bloquear(ip_de(src)):
             continue                                    # allowlist: nunca a cuarentena
         if dns_hits[src] >= UMBRAL_DNS or len(dns_sids[src]) >= 2:
             n_ev, evid = _evidencias_dns(src)
             confianza = "alta" if n_ev >= 2 else "sospechoso"
             sc, band, _c, _d = riesgo(src)
             cand_dns.append({
-                "ip": src,
+                "ip": ip_de(src), "router": rid_de(src),
                 "riesgo": sc,
                 "banda": band,
                 "confianza": confianza,
@@ -2485,15 +2507,16 @@ try:
     # top con su banda de riesgo, para el motor de politicas del panel (tope 50 CPEs)
     top_r = []
     for _s, _t in by_src.most_common(80):
-        if not es_mi_cpe(_s):
+        if not es_mi_cpe(ip_de(_s)):
             continue            # el ranking de riesgo es de TUS CPEs; lo de fuera no se cuarentena
-        if nunca_bloquear(_s):
+        if nunca_bloquear(ip_de(_s)):
             continue                                    # allowlist: fuera del motor de politicas
         _sc, _bd, _c2, _d2 = riesgo(_s)
         # Se guarda tambien POR QUE puntua asi: las politicas envian a cuarentena desde
         # esta lista (no desde 'candidatos'), y sin estos datos el bloqueo quedaba sin
         # motivo que mostrar y el panel lo rotulaba como "manual / sin motivo".
-        top_r.append({"ip": _s, "riesgo": _sc, "banda": _bd, "desglose": _d2, "alertas": _t,
+        top_r.append({"ip": ip_de(_s), "router": rid_de(_s),
+                      "riesgo": _sc, "banda": _bd, "desglose": _d2, "alertas": _t,
                       "destinos": len(dst_by_src.get(_s, ())), "puertos": len(dpt_by_src.get(_s, ()))})
     _cq = {"generado": int(time.time()), "ventana_min": VENTANA_MIN,
            "umbral": UMBRAL_INFECTADO, "umbral_dns": UMBRAL_DNS,

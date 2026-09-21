@@ -62,6 +62,7 @@ correr "solo tus redes entran a la cuarentena de CPEs" "$PY" tests/test_mis_rede
 correr "registro de routers y migracion del nodo unico" "$PY" tests/test_routers.py
 correr "receptor TZSP: cada MikroTik a su interfaz" "$PY" tests/test_tzsp_multi.py
 correr "instalador: una interfaz por router" bash tests/test_instalador_multi.sh
+correr "identidad (router, IP): dos nodos no se confunden" "$PY" tests/test_identidad_nodo.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

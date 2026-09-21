@@ -22,14 +22,16 @@ simple) o recibir un **espejo TZSP** del MikroTik (el caso ISP, linea gruesa).
 flowchart LR
     subgraph red["Red del ISP"]
         cpe["CPEs / clientes<br/>redes privadas"]
-        mt["MikroTik<br/>bridge + firewall"]
+        mt["MikroTik nodo A<br/>bridge + firewall"]
+        mt2["MikroTik nodo B"]
         cpe <--> mt
     end
 
     mt == "espejo TZSP<br/>UDP 37008" ==> rx
+    mt2 -. "espejo del nodo B" .-> rx
 
     subgraph srv["Servidor sensor — Debian 13/12"]
-        rx["tzsp-decap<br/>receptor TZSP"] --> tap["TAP ids-mon"]
+        rx["tzsp-decap<br/>una interfaz por router"] --> tap["TAP ids-mon / ids-mon2"]
         nic["interfaz local<br/>modo af-packet"] --> sur
         tap --> sur["Suricata<br/>motor IDS"]
         sur --> eve["eve.json<br/>fast.log"]
@@ -42,11 +44,23 @@ flowchart LR
     reglas["ET Open<br/>suricata-rules-update"] -.-> sur
     listas["Listas de reputacion<br/>suricata-feeds-update"] -.-> rep
     panel == "API RouterOS: address-list<br/>cuarentena / DNS" ==> mt
+    panel -. "cada CPE a SU router" .-> mt2
 ```
 
 La flecha de vuelta del panel al MikroTik es la parte que **actua**: el panel manda
 los CPE confirmados como infectados a una *address-list*, y es el MikroTik quien
 decide que hacer con ellos con tus reglas. Todo es reversible desde el panel.
+
+**Varios routers en un sensor.** Cada uno espeja por **su propia interfaz**, y de ahi sale de
+que nodo es cada CPE. Eso importa porque lo normal es que cada nodo use `10.0.0.x`: sin saber el
+router, `10.0.0.5` serian varios clientes mezclados en uno y el bloqueo podria acabar en el
+MikroTik equivocado. Con el nodo, la identidad es el par **(router, IP)** y cada bloqueo sale
+hacia donde corresponde. Se monta pasando todas las IPs en `-m`
+(`-m 10.0.0.1,10.9.9.1,192.0.2.1`) y dando de alta cada nodo en **Ajustes → MikroTik**.
+
+> Los routers deben estar **en la misma red que el sensor**: el espejo va por UDP sin
+> retransmision, asi que a traves de un enlace con perdida el IDS ve trafico incompleto **sin
+> avisar**. Para un nodo remoto es preferible un sensor propio.
 
 ### Por que no hay `docker-compose.yml`
 
@@ -79,7 +93,7 @@ Opciones (se pasan tras `bash -s --`):
 | `-p PUERTO` | puerto de la web | `5636` |
 | `-P CLAVE` | clave del usuario web `admin` | aleatoria (se muestra al final) |
 | `-t` | **receptor TZSP** (UDP 37008) para espejo MikroTik. Requiere `-m` | apagado |
-| `-m IP[,IP]` | con `-t`: **IP/CIDR del MikroTik** que envia el espejo. Restringe UFW y el receptor solo a ese origen. **Obligatorio con `-t`**: sin origen conocido cualquier host de la red podria inyectar tramas forjadas en el IDS, y el receptor no arranca | - |
+| `-m IP[,IP]` | con `-t`: **IP/CIDR de cada MikroTik** que envia espejo (varios = multi-nodo: una interfaz por router). Restringe UFW y el receptor solo a ese origen. **Obligatorio con `-t`**: sin origen conocido cualquier host de la red podria inyectar tramas forjadas en el IDS, y el receptor no arranca | - |
 | `-W` | **sin web**, solo Suricata + logs | web activada |
 
 ### One-liner segun tu caso
@@ -102,6 +116,13 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/in
 #         En un ISP lo normal es cubrir TODAS las redes privadas (RFC1918), porque los
 #         CPE suelen estar repartidos en varios /16 (10.6.x, 10.69.x, 172.16.x...).
 curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -m 10.87.87.1 -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+
+# 3b) VARIOS MIKROTIK en un solo sensor (multi-nodo).
+#     Cada IP de -m es un router: el receptor le da SU interfaz (ids-mon, ids-mon2, ...)
+#     para saber de que nodo es cada CPE. Sin eso, tres nodos con 10.0.0.x se
+#     confundirian entre si y el bloqueo podria ir al router equivocado.
+#     Despues, dar de alta cada nodo en Ajustes -> MikroTik (IP, usuario y clave de API).
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -m 10.0.0.1,10.9.9.1,192.0.2.1 -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 
 # 4) WEB a tu medida — otro puerto y clave propia de EveBox.
 #    -p = puerto de la web   -P = clave del usuario admin
@@ -191,6 +212,18 @@ Varias nacieron de fallos reales ya corregidos, asi que fallan si el fallo vuelv
 
 [MIT](LICENSE). Los archivos bajo `vendor/` son de terceros y mantienen su propia licencia;
 ver [`vendor/mapa/ATTRIBUTION.md`](vendor/mapa/ATTRIBUTION.md).
+
+### Comprobar que llegan todos los espejos
+
+Con varios routers, si uno deja de espejar ese nodo se queda ciego y **no hay ningun otro
+aviso**. El receptor escribe cada minuto el desglose por origen:
+
+```bash
+journalctl -u tzsp-decap -n 5
+# tzsp-decap: rx=... tx=... por_origen=10.0.0.1:812,10.9.9.1:655,192.0.2.1:430
+```
+
+Si falta un origen: revisa el sniffer de ese MikroTik y que su IP este en el `-m`.
 
 ## Puertos y por donde se expone cada web
 

@@ -6871,6 +6871,58 @@ con su SID/firma/fecha/flow_id, las <b>coincidencias de reputacion</b> con su fu
 (PPPoE/DHCP). Si la IP cambio de dueño entre el ataque y ahora, la ficha lo avisa &mdash; asi no se
 culpa al cliente que hoy tiene esa IP por lo que hizo otro antes.</p>
 
+<h2>Varios MikroTik en un mismo sensor (multi-nodo)</h2>
+<p>Un sensor puede vigilar <b>varios routers</b>. Cada uno manda su espejo y el sensor lo
+recibe por <b>una interfaz distinta</b> (<code>ids-mon</code>, <code>ids-mon2</code>,
+<code>ids-mon3</code>&hellip;). De ahi sale <b>de que nodo es cada CPE</b>, y eso resuelve los
+dos problemas que hacen inviable compartir sensor sin mas:</p>
+<ul>
+<li><b>Rangos repetidos.</b> Es normal que cada nodo use <code>10.0.0.x</code>. Sin saber el
+router, <code>10.0.0.5</code> serian tres clientes mezclados en uno: alertas sumadas, riesgo
+inflado y el <b>abonado equivocado</b> en la ficha. Con el nodo, la identidad es el par
+<b>(router, IP)</b> y cada uno va por su lado.</li>
+<li><b>A que router bloquear.</b> Cada CPE se envia a la address-list de <b>su</b> MikroTik, con
+el nombre de lista que ese router tenga configurado (pueden llamarse distinto en cada uno).</li>
+</ul>
+
+<h3>Como se monta</h3>
+<ol>
+<li><b>Instalar/re-ejecutar el instalador</b> con todas las IPs de los routers en <code>-m</code>:
+<pre><code>curl -fsSL .../install-suricata.sh | sudo bash -s -- \
+  -t -m 10.0.0.1,10.9.9.1,192.0.2.1 \
+  -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16</code></pre>
+Eso crea una interfaz por router y hace que Suricata capture todas. <b>Este paso es el que
+habilita la captura</b>; sin el, un nodo dado de alta en el panel no se vigila.</li>
+<li><b>En cada MikroTik</b>, apuntar el espejo al sensor (igual que con uno solo):
+<pre><code>/tool sniffer set filter-interface=bridge1 streaming-enabled=yes \
+    streaming-server=IP_DEL_SENSOR:37008
+/tool sniffer start</code></pre></li>
+<li><b>En Ajustes &rarr; MikroTik</b>, dar de alta cada nodo con su IP, usuario y clave de API,
+y marcar <b>Permitir enviar</b> en los que deban bloquear.</li>
+</ol>
+
+<h3>Como comprobar que llegan todos</h3>
+<p>El receptor escribe un resumen cada minuto con el <b>desglose por origen</b>. Si un router
+deja de espejar, ese nodo se queda ciego y <b>no hay ningun otro aviso</b>, asi que conviene
+mirarlo:</p>
+<pre><code>journalctl -u tzsp-decap -n 5
+# ... rx=... tx=... por_origen=10.0.0.1:812,10.9.9.1:655,192.0.2.1:430</code></pre>
+<p>Si falta un origen, revisa el sniffer de ese MikroTik y que su IP este en el
+<code>-m</code> del instalador.</p>
+
+<h3>Limites que conviene tener claros</h3>
+<ul>
+<li><b>Todos los routers deben estar en la misma red que el sensor.</b> El espejo va por UDP
+sin retransmision: si cruza un enlace con perdida o saturado, el IDS ve trafico incompleto y
+<b>no te avisa</b>. Para un nodo remoto es preferible un sensor propio.</li>
+<li><b>Un sensor, un punto de fallo.</b> Si la caja cae, quedas ciego en todos los nodos a la
+vez; con un sensor por router solo pierdes ese.</li>
+<li><b>La capacidad se suma.</b> El trafico espejado de los tres nodos entra en la misma
+maquina: revisa la tabla de RAM y vigila <code>memcap_drop</code>.</li>
+<li><b>Quitar un nodo del panel no libera sus CPEs</b>: siguen bloqueados en ese MikroTik y hay
+que soltarlos desde el propio router.</li>
+</ul>
+
 <h2>Ataques entrantes desde internet (y por que van aparte)</h2>
 <p>Suricata ve las <b>dos direcciones</b>: tus CPEs atacando hacia afuera y hosts de internet
 atacando hacia adentro. Este panel existe para lo primero, asi que <b>solo los origenes de tus

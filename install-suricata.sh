@@ -2979,7 +2979,20 @@ _RE = {k: re.compile(p) for k, p in {
     "dest_ip": r'"dest_ip":"([^"]+)"', "src_port": r'"src_port":(\d+)',
     "dest_port": r'"dest_port":(\d+)', "proto": r'"proto":"([^"]+)"',
     "sig": r'"signature":"((?:[^"\\]|\\.)*)"', "sid": r'"signature_id":(\d+)',
+    # de que MikroTik vino la alerta (cada nodo espeja por su interfaz)
+    "iface": r'"in_iface":"([^"]+)"',
 }.items()}
+
+def rid_por_iface(iface):
+    """Id del router de esa interfaz. Con un solo nodo devuelve "" y todo queda
+    indexado por IP, como siempre."""
+    lst = cargar_routers()
+    if len(lst) < 2:
+        return ""
+    for r in lst:
+        if r.get("iface") == iface:
+            return r.get("id", "")
+    return ""
 
 SEV = [  # (claves en la firma, color, etiqueta). Se evalua en orden; gana la primera.
     # ROJO = comunicacion real con el atacante (infeccion confirmada), no una simple
@@ -3642,8 +3655,9 @@ def mk_probar():
     except Exception as e:
         return (False, f"No conecto: {e}")
 
-def mk_add(ip, comment="", lista=None, ttl=None):
-    d = cargar_mk()
+def mk_add(ip, comment="", lista=None, ttl=None, router=None):
+    # router=None -> el de por defecto, para todo el codigo que aun no distingue nodo
+    d = cargar_mk_de(router) if router else cargar_mk()
     lst = lista or d.get("LIST", "suricata-cuarentena")
     tt = ttl if ttl is not None else d.get("TTL")
     s = mk_conectar(d)
@@ -3662,9 +3676,10 @@ def mk_add(ip, comment="", lista=None, ttl=None):
         try: s.close()
         except Exception: pass
 
-def mk_remove(ip, lista=None):
+def mk_remove(ip, lista=None, router=None):
     """Quita TODAS las entradas de esa IP en la lista (busca .id y las borra)."""
-    d = cargar_mk(); lst = lista or d.get("LIST", "suricata-cuarentena")
+    d = cargar_mk_de(router) if router else cargar_mk()
+    lst = lista or d.get("LIST", "suricata-cuarentena")
     s = mk_conectar(d)
     try:
         _mk_send(s, ["/ip/firewall/address-list/print", "=.proplist=.id",
@@ -3788,9 +3803,9 @@ def reconciliar_cuarentena():
         if cambiado:
             guardar_enviados(env, sent_path)
 
-def mk_list_ips(lista):
+def mk_list_ips(lista, router=None):
     """Devuelve el conjunto de direcciones que estan AHORA en esa address-list del MikroTik."""
-    d = cargar_mk()
+    d = cargar_mk_de(router) if router else cargar_mk()
     s = mk_conectar(d)
     try:
         _mk_send(s, ["/ip/firewall/address-list/print", "=.proplist=address", f"?list={lista}"])
@@ -3822,9 +3837,9 @@ def _mk_re_dicts(frases):
             out.append(r)
     return out
 
-def mk_abonados():
+def mk_abonados(router=None):
     """Consulta PPPoE activos + leases DHCP y arma {ip: {nombre, tipo, mac, extra}}."""
-    d = cargar_mk()
+    d = cargar_mk_de(router) if router else cargar_mk()
     s = mk_conectar(d)
     mapa = {}
     try:
@@ -3850,12 +3865,24 @@ def mk_abonados():
 
 def refrescar_abonados():
     """Refresca el mapa IP->abonado desde el MikroTik (solo si esta configurado). En 2do plano."""
-    if not mk_configurado():
+    routers = [r for r in cargar_routers() if r.get("ENABLED") == "1" and (r.get("HOST") or "")]
+    if not routers:
         return
-    try:
-        mapa = mk_abonados()
-    except Exception:
-        return
+    multi = len(cargar_routers()) > 1
+    # Cada router conoce SOLO a sus abonados. Con varios nodos hay que preguntarle a
+    # todos y guardar la asignacion con su nodo: si no, los CPEs de los demas saldrian
+    # sin nombre, o peor, se les pondria el del cliente que tiene esa misma IP en otro.
+    mapa = {}
+    for r in routers:
+        try:
+            parcial = mk_abonados(router=r)
+        except Exception:
+            continue                       # ese router no responde: se conserva lo demas
+        for ip, datos in (parcial or {}).items():
+            datos = dict(datos)
+            datos["router"] = r["id"]
+            datos["router_nombre"] = r.get("nombre") or r.get("HOST", "")
+            mapa[clave_cpe(ip, r["id"] if multi else "")] = datos
     if not mapa:
         return
     try:
@@ -3928,33 +3955,65 @@ def cargar_abonados():
     except Exception:
         return {}
 
-def abonado_de(ip):
-    return (cargar_abonados().get("mapa") or {}).get(ip, {})
+def abonado_de(ip, rid=""):
+    """Abonado de una IP. Con varios nodos hay que decir en CUAL, porque la misma IP
+    puede ser de dos clientes distintos; si no se dice, se busca por la IP sola (que es
+    lo correcto con un solo router)."""
+    mapa = cargar_abonados().get("mapa") or {}
+    if rid:
+        v = mapa.get(clave_cpe(ip, rid))
+        if v is not None:
+            return v
+    v = mapa.get(ip)
+    if v is not None:
+        return v
+    # registro antiguo (guardado cuando aun no se distinguian nodos)
+    for k, datos in mapa.items():
+        if ip_de(k) == ip and not rid:
+            return datos
+    return {}
 
 def mk_sync_enviados():
     """Sincroniza el registro del panel con lo que REALMENTE hay en el MikroTik, para que el
     indicador 'En cuarentena' sea fiable y no se reintente enviar algo que ya esta. Agrega los
     que estan en el router y faltan (marcados manual), y quita los que ya no estan."""
-    m = cargar_mk()
-    if not (mk_configurado() and m.get("ENABLED") == "1"):
+    routers = [r for r in cargar_routers() if r.get("ENABLED") == "1" and (r.get("HOST") or "")]
+    if not routers:
         return
+    multi = len(cargar_routers()) > 1
     for list_key, sent_path in (("LIST", MK_SENT), ("LIST_DNS", MK_SENT_DNS)):
-        lst = m.get(list_key, "")
-        if not lst:
+        # Se consulta CADA router y se compara solo contra SUS entradas. Mirar un solo
+        # router borraria del registro los CPEs de los demas, que seguirian bloqueados y
+        # ya invisibles para el panel (no habria forma de liberarlos).
+        reales = {}          # id de router -> ips en esa lista
+        fallo = set()
+        for r in routers:
+            d = cargar_mk_de(r)
+            lst = d.get(list_key, "")
+            if not lst:
+                continue
+            try:
+                reales[r["id"]] = set(mk_list_ips(lst, router=r))
+            except Exception:
+                fallo.add(r["id"])         # ese router no responde -> no tocar lo suyo
+        if not reales:
             continue
-        try:
-            reales = mk_list_ips(lst)
-        except Exception:
-            continue                       # router no responde -> no tocar el registro
         env = cargar_enviados(sent_path); cambiado = False; nowt = int(time.time())
-        for ip in reales:
-            if ip not in env:              # esta en el router pero no en el panel -> registrarlo
-                env[ip] = {"cuando": nowt, "score": "", "por": "mikrotik", "manual": True}
-            env[ip]["en_router"] = True; env[ip]["sync_ts"] = nowt   # confirmado en el router
-            cambiado = True
-        for ip in list(env.keys()):
-            if ip not in reales:           # ya no esta en el router (lo quitaron o expiro) -> soltar
-                env.pop(ip, None); cambiado = True
+        for rid, ips in reales.items():
+            for ip in ips:
+                k = clave_cpe(ip, rid if multi else "")
+                if k not in env:           # esta en el router pero no en el panel -> registrarlo
+                    env[k] = {"cuando": nowt, "score": "", "por": "mikrotik", "manual": True,
+                              "router": rid}
+                env[k]["en_router"] = True; env[k]["sync_ts"] = nowt
+                env[k].setdefault("router", rid)
+                cambiado = True
+        for k in list(env.keys()):
+            rid = rid_de(k) or (env[k].get("router") or (routers[0]["id"] if routers else ""))
+            if rid in fallo or rid not in reales:
+                continue                   # de ese router no sabemos nada ahora mismo
+            if ip_de(k) not in reales[rid]:   # ya no esta en SU router -> soltar
+                env.pop(k, None); cambiado = True
         if cambiado:
             guardar_enviados(env, sent_path)
 
@@ -3987,6 +4046,40 @@ def guardar_nunca(texto):
         os.replace(tmp, NUNCA_FILE)
     except OSError:
         pass
+
+def _chip_nodo_panel(clave):
+    """Etiqueta con el nodo. Vacia si la instalacion tiene un solo MikroTik."""
+    r = rid_de(clave)
+    if not r:
+        return ""
+    nom = (router_por_id(r) or {}).get("nombre") or r
+    return ("<span class='nodochip' title='Este CPE cuelga de este MikroTik'>"
+            + html.escape(nom) + "</span>")
+
+def _suf_nodo(clave):
+    """Sufijo para la bitacora: deja constancia de en que nodo se actuo."""
+    r = rid_de(clave)
+    if not r:
+        return ""
+    return " nodo=" + ((router_por_id(r) or {}).get("nombre") or r)
+
+def clave_cpe(ip, rid):
+    """Identidad de un CPE: con varios nodos es (router, IP). Tiene que coincidir con la
+    que usa el generador, porque el panel lee sus candidatos."""
+    return (rid + "|" + ip) if rid else ip
+
+def ip_de(clave):
+    """La IP pelada, que es lo que se manda al router."""
+    return clave.split("|", 1)[1] if "|" in clave else clave
+
+def rid_de(clave):
+    """A que router pertenece ("" si la instalacion tiene un solo nodo)."""
+    return clave.split("|", 1)[0] if "|" in clave else ""
+
+def router_de_clave(clave):
+    """El router al que hay que hablarle para bloquear o liberar este CPE."""
+    r = rid_de(clave)
+    return (router_por_id(r) or router_defecto()) if r else router_defecto()
 
 def mis_redes():
     """Redes que son TUYAS (abonados). MIS_REDES=CIDR,CIDR en el .conf; por defecto las
@@ -4353,12 +4446,13 @@ def aplicar_politicas():
         ip = c.get("ip"); sc = c.get("riesgo", "")
         if not ip:
             continue
+        k = clave_cpe(ip, c.get("router", ""))   # a que nodo pertenece este CPE
         if act == "cuarentena":
-            deseado_lst[ip] = sc
+            deseado_lst[k] = sc
         elif act == "dns":
-            deseado_dns[ip] = sc
+            deseado_dns[k] = sc
         elif act == "notificar":
-            a_notificar[ip] = (sc, c.get("banda", ""))
+            a_notificar[k] = (sc, c.get("banda", ""))
     # --- accion notificar (dedupe: 1 aviso cada 6h por IP) ---
     if a_notificar:
         try:
@@ -4366,10 +4460,11 @@ def aplicar_politicas():
         except Exception:
             nv = {}
         ahora = time.time(); cambio_n = False
-        for ip, (sc, band) in a_notificar.items():
-            if ahora - nv.get(ip, 0) > 6 * 3600:
-                mk_log("POLITICA-NOTIFICAR", ip, "politica", f"riesgo={sc} banda={band}")
-                nv[ip] = ahora; cambio_n = True
+        for k, (sc, band) in a_notificar.items():
+            if ahora - nv.get(k, 0) > 6 * 3600:
+                mk_log("POLITICA-NOTIFICAR", ip_de(k), "politica",
+                       f"riesgo={sc} banda={band}" + _suf_nodo(k))
+                nv[k] = ahora; cambio_n = True
         nv = {k: v for k, v in nv.items() if ahora - v < 7 * 86400}   # limpiar viejos
         if cambio_n:
             try:
@@ -4379,30 +4474,39 @@ def aplicar_politicas():
             except OSError:
                 pass
     # --- acciones que tocan el router (cuarentena / dns) ---
-    for lst, deseado, sent_path in ((m.get("LIST", ""), deseado_lst, MK_SENT),
-                                    (m.get("LIST_DNS", ""), deseado_dns, MK_SENT_DNS)):
-        if not lst:
-            continue
+    for list_key, deseado, sent_path in (("LIST", deseado_lst, MK_SENT),
+                                         ("LIST_DNS", deseado_dns, MK_SENT_DNS)):
         env = cargar_enviados(sent_path); cambiado = False
-        for ip, sc in deseado.items():
-            if ip in env:
+        for k, sc in deseado.items():
+            if k in env:
+                continue
+            # cada CPE se bloquea en SU router y en la lista que ese router tenga
+            r = router_de_clave(k); dr = cargar_mk_de(r); lst = dr.get(list_key, "")
+            if not lst or dr.get("ENABLED") != "1":
                 continue
             try:
-                ok, err = mk_add(ip, comment=f"suricata politica riesgo {sc} {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl="")
+                ok, err = mk_add(ip_de(k), comment=f"suricata politica riesgo {sc} {time.strftime('%Y-%m-%d %H:%M')}",
+                                 lista=lst, ttl="", router=r)
             except Exception:
                 ok = False
             if ok:
-                env[ip] = {"cuando": int(time.time()), "score": sc, "por": "politica", "manual": False, "pol": True,
-                           "motivo": _motivo_bloqueo(ip)}
-                notificar_cuarentena(ip, "politica de riesgo", lst, quien="politica")
-                mk_log("POLITICA-ENVIADO", ip, "politica", f"lista={lst} riesgo={sc}"); cambiado = True
-        for ip in list(env.keys()):        # sacar los que entraron por politica y ya no califican
-            if env[ip].get("pol") and ip not in deseado:
+                env[k] = {"cuando": int(time.time()), "score": sc, "por": "politica", "manual": False, "pol": True,
+                          "router": r.get("id", ""), "motivo": _motivo_bloqueo(ip_de(k))}
+                notificar_cuarentena(ip_de(k), "politica de riesgo", lst, quien="politica")
+                mk_log("POLITICA-ENVIADO", ip_de(k), "politica",
+                       f"lista={lst} riesgo={sc}" + _suf_nodo(k)); cambiado = True
+        for k in list(env.keys()):        # sacar los que entraron por politica y ya no califican
+            if env[k].get("pol") and k not in deseado:
+                r = router_de_clave(k); dr = cargar_mk_de(r); lst = dr.get(list_key, "")
+                if not lst:
+                    continue
                 try:
-                    mk_remove(ip, lista=lst)
+                    mk_remove(ip_de(k), lista=lst, router=r)
                 except Exception:
                     continue
-                env.pop(ip, None); mk_log("POLITICA-LIBERADO", ip, "politica", f"lista={lst}"); cambiado = True
+                env.pop(k, None)
+                mk_log("POLITICA-LIBERADO", ip_de(k), "politica", f"lista={lst}" + _suf_nodo(k))
+                cambiado = True
         if cambiado:
             guardar_enviados(env, sent_path)
 
@@ -4453,11 +4557,14 @@ def barrido_alto_rapido(maxbytes=4_000_000):
         low = get("sig").lower()
         if not any(k in low for k in _FAST_CNC):
             continue                             # solo infeccion confirmada (CnC/botnet/troyano)
-        src = get("src_ip"); dst = get("dest_ip"); dp = get("dest_port"); sid = get("sid")
-        if not src or nunca_bloquear(src) or dst in dest_ok:
+        src_ip = get("src_ip"); dst = get("dest_ip"); dp = get("dest_port"); sid = get("sid")
+        if not src_ip or nunca_bloquear(src_ip) or dst in dest_ok:
             continue
-        if _excluido(reglas, src, dst, int(dp) if dp else None, sid):
+        if not es_mi_cpe(src_ip):
+            continue                             # atacante de internet: no va a la cuarentena de CPEs
+        if _excluido(reglas, src_ip, dst, int(dp) if dp else None, sid):
             continue
+        src = clave_cpe(src_ip, rid_por_iface(get("iface")))   # identidad (router, IP)
         hits[src] = hits.get(src, 0) + 1
         sids.setdefault(src, set()).add(sid or low)
     ahora = time.time()
@@ -4469,15 +4576,20 @@ def barrido_alto_rapido(maxbytes=4_000_000):
             continue                             # ya en la lista, o anti-rebote 60s
         _FAST_LAST[src] = ahora
         try:
-            ok, _err = mk_add(src, comment=f"suricata ALTO inmediato {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl="")
+            _r = router_de_clave(src)
+            _dr = cargar_mk_de(_r)
+            lst = _dr.get("LIST", lst)          # la lista puede llamarse distinto en cada nodo
+            ok, _err = mk_add(ip_de(src), comment=f"suricata ALTO inmediato {time.strftime('%Y-%m-%d %H:%M')}",
+                              lista=lst, ttl="", router=_r)
         except Exception:
             ok = False
         if ok:
             env[src] = {"cuando": int(ahora), "score": "", "por": "politica-rapida", "manual": False,
-                        "pol": True, "motivo": _motivo_bloqueo(src)}
-            try: notificar_cuarentena(src, "ALTO (envio inmediato)", lst, quien="politica-rapida")
+                        "pol": True, "router": _r.get("id", ""), "motivo": _motivo_bloqueo(ip_de(src))}
+            try: notificar_cuarentena(ip_de(src), "ALTO (envio inmediato)", lst, quien="politica-rapida")
             except Exception: pass
-            mk_log("POLITICA-RAPIDA", src, "politica", f"lista={lst} cnc_hits={hits[src]} firmas={len(sids[src])}")
+            mk_log("POLITICA-RAPIDA", ip_de(src), "politica",
+                   f"lista={lst} cnc_hits={hits[src]} firmas={len(sids[src])}" + _suf_nodo(src))
             cambiado = True
     if cambiado:
         guardar_enviados(env, MK_SENT)
@@ -7272,8 +7384,9 @@ def cuarentena_page(msg="", es_admin=False):
     def _col(b):
         return {"ALTO": "#e34948", "MEDIO": "#e58a00"}.get(b, "#3a9d5d")
 
-    def _cli(ip):
-        a = abonado_de(ip)
+    def _cli(ip, rid=""):
+        # con varios nodos hace falta decir en CUAL: la misma IP puede ser de dos clientes
+        a = abonado_de(ip, rid)
         if a and a.get("nombre"):
             return f"<div class='rowmeta'>{esc(a['nombre'])} · {esc(a.get('tipo', ''))}</div>"
         return ""
@@ -7374,12 +7487,15 @@ def cuarentena_page(msg="", es_admin=False):
                        dns_cand, enviados_dns, "cuarentena/dns", m.get("LIST_DNS", ""), "alertas_dns", "alertas DNS", "firmas_dns",
                        "Sin CPEs consultando dominios maliciosos en la ventana.")
     # --- Enviados manualmente (desde Top origenes): IPs en la lista que NO son candidatos ---
-    def _fila_manual(ip, mm, pref, lista):
+    def _fila_manual(clave, mm, pref, lista):
+        # 'clave' es la identidad del CPE: con varios nodos "router|IP". Se muestra la IP
+        # y se manda la clave entera, para liberar en el router que corresponde.
+        ip = ip_de(clave)
         _cuando_ts = mm.get("cuando", 0)
         cuando = time.strftime("%d/%m %H:%M", time.localtime(_cuando_ts))
         _rev_ts = mm.get("last_eval", 0)
         quitar = (f"<form method=post action='/{pref}/quitar' style='display:inline'>"
-                  f"<input type=hidden name=ip value='{esc(ip)}'>"
+                  f"<input type=hidden name=ip value='{esc(clave)}'>"
                   f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de {esc(lista)}?')\">Quitar</button></form>"
                   ) if es_admin else ""
         # sin motivo guardado: decir de donde vino en vez de afirmar "manual", que era
@@ -7391,11 +7507,13 @@ def cuarentena_page(msg="", es_admin=False):
                 "manual / sin motivo registrado" if _por not in ("", "?") else
                 "sin motivo registrado")
         mot = _mot_txt(mm) or f"<span class='muted'>{esc(_sin)}</span>"
-        # token lista|ip: el quitado masivo necesita saber de CUAL address-list sacarla
-        _tok = ("dns|" if pref.endswith("/dns") else "cuar|") + ip
+        # token "lista|identidad": el quitado masivo necesita saber de CUAL address-list
+        # sacarla y, con varios nodos, de que router
+        _tok = ("dns|" if pref.endswith("/dns") else "cuar|") + clave
         marca = (f"<td data-label='Seleccionar' class='selc'><input type=checkbox class=selm "
                  f"value='{esc(_tok)}' aria-label='Seleccionar {esc(ip)}'></td>") if es_admin else ""
-        return (f"<tr>{marca}<td data-label='CPE' class='mono ipx'>{esc(ip)}{_cli(ip)}</td>"
+        return (f"<tr>{marca}<td data-label='CPE' class='mono ipx'>{esc(ip)}"
+                f"{_chip_nodo_panel(clave)}{_cli(ip, rid_de(clave))}</td>"
                 f"<td data-label='Lista' class='mono'>{esc(lista)}</td>"
                 f"<td data-label='Motivo' class='mot'>{mot}</td><td data-label='Por'>{esc(mm.get('por','?'))}</td>"
                 f"<td data-label='Enviado' class='mono' data-sort='{int(_cuando_ts)}'>{cuando}</td>"
@@ -8235,15 +8353,16 @@ class H(BaseHTTPRequestHandler):
                 ipaddress.ip_address(ip)
             except Exception:
                 return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+            clave = ip; ip = ip_de(clave); rt = router_de_clave(clave)
             try:
-                ok, err = mk_remove(ip)
+                ok, err = mk_remove(ip, router=rt)
             except Exception as ex:
                 ok, err = False, str(ex)
             # solo se saca del registro si el router confirmo: si falla y se borraba
             # igual, el CPE quedaba bloqueado en el router pero invisible en el panel,
             # sin forma de reintentarlo ni de liberarlo
             if ok:
-                quitar_enviados([ip])
+                quitar_enviados([clave])
             mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), err)
             return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
         if ruta == "/cuarentena/quitar-uno":
@@ -8252,29 +8371,34 @@ class H(BaseHTTPRequestHandler):
             # tardar bastante; asi se ve cual va saliendo en vez de una pantalla colgada.
             if not self._operador():
                 return self._json({"ok": False, "err": "sin permiso"}, 403)
-            tipo, _, ip = (q.get("sel", [""])[0] or "").partition("|")
-            ip = ip.strip()
+            # la seleccion llega como "cuar|IP" o, con varios nodos, "cuar|router|IP":
+            # primero se separa el tipo de lista, y lo que queda ES la identidad del CPE
+            tipo, _, clave = (q.get("sel", [""])[0] or "").partition("|")
+            clave = clave.strip()
+            ip = ip_de(clave)
             try:
                 ipaddress.ip_address(ip)
             except Exception:
                 return self._json({"ok": False, "ip": ip, "err": "IP invalida"})
             es_dns = (tipo == "dns")
             reg = MK_SENT_DNS if es_dns else MK_SENT
+            rt = router_de_clave(clave)
             # La IP debe estar en ESE registro. Si no, mk_remove consultaria la otra
             # address-list, no encontraria nada y devolveria "0 entradas quitadas" como
             # exito: saldria un visto bueno sin haber quitado nada del router.
-            if ip not in cargar_enviados(reg):
+            if clave not in cargar_enviados(reg):
                 return self._json({"ok": False, "ip": ip,
                                    "err": "no esta en esa lista del panel"})
-            lst = cargar_mk().get("LIST_DNS", "suricata-dns-sospechoso") if es_dns else ""
+            lst = cargar_mk_de(rt).get("LIST_DNS", "suricata-dns-sospechoso") if es_dns else ""
             try:
-                ok, err = mk_remove(ip, lista=lst) if es_dns else mk_remove(ip)
+                ok, err = (mk_remove(ip, lista=lst, router=rt) if es_dns
+                           else mk_remove(ip, router=rt))
             except Exception as ex:
                 ok, err = False, str(ex)
             if ok:
-                quitar_enviados([ip], reg)
+                quitar_enviados([clave], reg)
             mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"),
-                   (f"lista={lst} " if es_dns else "") + f"masivo {err}")
+                   (f"lista={lst} " if es_dns else "") + f"masivo {err}" + _suf_nodo(clave))
             return self._json({"ok": bool(ok), "ip": ip, "err": "" if ok else (err or "fallo")})
         if ruta == "/cuarentena/quitar-varios":
             # quitado masivo desde la tabla "Enviados manualmente". Cada seleccion llega como
@@ -8292,21 +8416,24 @@ class H(BaseHTTPRequestHandler):
             quitadas = {MK_SENT: [], MK_SENT_DNS: []}
             errores = []; corte = ""
             for s in sels[:TOPE]:
-                tipo, _, ip = (s or "").partition("|")
-                ip = ip.strip()
+                tipo, _, clave = (s or "").partition("|")
+                clave = clave.strip(); ip = ip_de(clave)
                 try:
                     ipaddress.ip_address(ip)
                 except Exception:
                     errores.append(f"{ip or '?'} (IP invalida)"); continue
                 reg = MK_SENT_DNS if tipo == "dns" else MK_SENT
-                if ip not in en_reg[reg]:      # evita el falso exito de "0 entradas quitadas"
+                rt = router_de_clave(clave)
+                if clave not in en_reg[reg]:   # evita el falso exito de "0 entradas quitadas"
                     errores.append(f"{ip} (no esta en esa lista)"); continue
+                _ld = cargar_mk_de(rt).get("LIST_DNS", lst_dns)
                 try:
-                    ok, err = mk_remove(ip, lista=lst_dns) if reg == MK_SENT_DNS else mk_remove(ip)
+                    ok, err = (mk_remove(ip, lista=_ld, router=rt) if reg == MK_SENT_DNS
+                               else mk_remove(ip, router=rt))
                 except Exception as ex:
                     ok, err = False, str(ex)
                 if ok:
-                    quitadas[reg].append(ip)
+                    quitadas[reg].append(clave)
                 else:
                     errores.append(f"{ip} ({err})")
                 mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, quien,
@@ -8352,10 +8479,12 @@ class H(BaseHTTPRequestHandler):
                 ip = (q.get("ip", [""])[0]).strip()
                 try: ipaddress.ip_address(ip)
                 except Exception: return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
-                try: ok, err = mk_remove(ip, lista=lst)
+                clave = ip; ip = ip_de(clave); rt = router_de_clave(clave)
+                lst = cargar_mk_de(rt).get("LIST_DNS", lst)
+                try: ok, err = mk_remove(ip, lista=lst, router=rt)
                 except Exception as ex: ok, err = False, str(ex)
                 if ok:                      # igual que la de infectados: solo si el router confirmo
-                    quitar_enviados([ip], MK_SENT_DNS)
+                    quitar_enviados([clave], MK_SENT_DNS)
                 mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), f"lista={lst} {err}")
                 return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
             if not (mk_configurado() and m.get("ENABLED") == "1"):

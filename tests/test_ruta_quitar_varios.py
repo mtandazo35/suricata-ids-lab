@@ -13,7 +13,7 @@ def correr(sels, operador=True, fallan=(), caido=False, estado=None, intentos=No
         def _operador(self): return operador
         def _deny(self): return ("DENY", 403)
         def _redirect(self, url): return ("REDIR", url)
-    def remove(ip, lista=None):
+    def remove(ip, lista=None, router=None):
         if intentos is not None: intentos.append(ip)
         if caido: return (False, "no hay conexion con el router")
         return (False, "el router rechazo") if ip in fallan else (True, "")
@@ -27,6 +27,11 @@ def correr(sels, operador=True, fallan=(), caido=False, estado=None, intentos=No
           "cargar_enviados": lambda path="cuar": estado[path],
           "quitar_enviados": quitar,
           "mk_remove": remove, "mk_log": lambda *a: None,
+          "ip_de": lambda k: k.split("|", 1)[1] if "|" in k else k,
+          "rid_de": lambda k: k.split("|", 1)[0] if "|" in k else "",
+          "router_de_clave": lambda k: {"id": (k.split("|", 1)[0] if "|" in k else "r1")},
+          "cargar_mk_de": lambda r: {"LIST_DNS": "lista-dns"},
+          "_suf_nodo": lambda k: "",
           "CTX": type("C", (), {"user": "ana"})()}
     exec(compile("def _f():\n" + textwrap.indent(CODIGO, "    "), "<r>", "exec"), ns)
     return ns["_f"](), estado

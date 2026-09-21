@@ -5614,6 +5614,77 @@ def _card_politicas(m):
             "<div class=hint>Activado: el panel envia/saca del MikroTik solo, segun la banda de cada CPE. "
             "Apagado: las politicas no hacen nada (usa los botones a mano).</div></div></div>")
 
+def _form_nodo(r, nuevo=False):
+    """Formulario compacto de un nodo. La clave nunca se devuelve al navegador: si se
+    deja vacia se conserva la que ya estaba."""
+    esc = html.escape
+    rid = r.get("id", "")
+    tit = ("Nuevo nodo" if nuevo else esc(r.get("nombre", "") or r.get("HOST", "") or rid))
+    return (
+        "<form method=post action='/routers/guardar' class=nodoform>"
+        f"<input type=hidden name=rid value='{esc(rid)}'>"
+        f"<div class=nodohd><b>{tit}</b>"
+        + ("" if nuevo else f"<span class=nodoif title='Interfaz por la que entra su espejo'>{esc(r.get('iface',''))}</span>")
+        + "</div>"
+        "<div class=grid2>"
+        f"<div class=field><label>Nombre del nodo</label>"
+        f"<input type=text name=nombre maxlength=40 value=\"{esc(r.get('nombre',''))}\" placeholder='Nodo Centro'></div>"
+        f"<div class=field><label>IP del MikroTik</label>"
+        f"<input type=text name=host value=\"{esc(r.get('HOST',''))}\" placeholder='192.168.88.1'></div>"
+        f"<div class=field><label>Puerto API</label>"
+        f"<input type=text name=port value=\"{esc(r.get('PORT','8728'))}\" placeholder='8728 (8729 si TLS)'></div>"
+        f"<div class=field><label>Usuario API</label>"
+        f"<input type=text name=user value=\"{esc(r.get('USER',''))}\" autocomplete=off></div>"
+        f"<div class=field><label>Clave API</label>"
+        f"<input type=password name=pass autocomplete=new-password placeholder=\""
+        + ("dejar vacio para no cambiarla" if r.get("PASS") else "clave del usuario API") + "\"></div>"
+        f"<div class=field><label>Address-list de infectados</label>"
+        f"<input type=text name=list value=\"{esc(r.get('LIST','suricata-cuarentena'))}\"></div>"
+        f"<div class=field><label>Address-list de DNS sospechoso</label>"
+        f"<input type=text name=list_dns value=\"{esc(r.get('LIST_DNS','suricata-dns-sospechoso'))}\"></div>"
+        f"<div class=field><label>Caducidad (infectados / DNS)</label>"
+        f"<input type=text name=ttl value=\"{esc(r.get('TTL','1h'))}\" style='width:48%' placeholder='1h'> "
+        f"<input type=text name=ttl_dns value=\"{esc(r.get('TTL_DNS','1d'))}\" style='width:48%' placeholder='1d'></div>"
+        "</div>"
+        "<label class=chk><input type=checkbox name=tls" + (" checked" if r.get("TLS") == "1" else "") + "> API-SSL (TLS)</label>"
+        "<label class=chk><input type=checkbox name=enabled" + (" checked" if r.get("ENABLED") == "1" else "") + "> Permitir enviar a este nodo</label>"
+        "<div class=nodoacts><button class=savebtn type=submit>Guardar nodo</button>"
+        + ("" if nuevo else
+           "<button class=cancelbtn type=submit formaction='/routers/quitar' "
+           "onclick=\"return confirm('Quitar este nodo del panel? Sus CPEs en cuarentena seguiran "
+           "bloqueados en ese MikroTik.')\">Quitar nodo</button>")
+        + "</div></form>")
+
+def _card_nodos():
+    """Tarjeta para gestionar VARIOS MikroTik. Solo aparece cuando tiene sentido: con un
+    unico nodo la tarjeta de arriba ya lo configura todo."""
+    esc = html.escape
+    rs = cargar_routers()
+    filas = "".join(
+        f"<tr><td class=mono>{esc(r.get('nombre','') or r.get('HOST',''))}</td>"
+        f"<td class=mono>{esc(r.get('HOST',''))}</td>"
+        f"<td class=mono>{esc(r.get('iface',''))}</td>"
+        f"<td>{'envia' if r.get('ENABLED') == '1' else 'solo observa'}</td></tr>" for r in rs)
+    otros = "".join(_form_nodo(r) for r in rs[1:])
+    return (
+        "<section class=card><h2>Varios MikroTik (multi-nodo)</h2>"
+        "<p class=sub2>Un sensor puede vigilar <b>varios routers</b>. Cada uno espeja por "
+        "<b>su propia interfaz</b>, y de ahi sale de que nodo es cada CPE: por eso dos nodos que "
+        "usan el mismo rango privado (10.0.0.x en los dos) no se confunden, y cada bloqueo sale "
+        "hacia el router que corresponde.</p>"
+        "<div class=twrap><table class=nodost><thead><tr><th>Nodo</th><th>MikroTik</th>"
+        "<th>Interfaz del espejo</th><th>Cuarentena</th></tr></thead>"
+        f"<tbody>{filas}</tbody></table></div>"
+        "<p class=sub2 style='margin-top:10px'><b>Importante:</b> dar de alta el nodo aqui solo "
+        "configura la conexion para bloquear. Para que su trafico se <b>capture</b> hay que "
+        "re-ejecutar el instalador incluyendo su IP en <code>-m</code> "
+        "(ej. <code>-m 10.0.0.1,10.9.9.1</code>), que es lo que crea su interfaz.</p>"
+        "<p class=sub2>El <b>primer nodo</b> se configura en la tarjeta de arriba.</p>"
+        + otros +
+        "<details class=nodonew><summary>Agregar otro MikroTik</summary>"
+        + _form_nodo(_router_vacio(len(rs) + 1), nuevo=True) +
+        "</details></section>")
+
 def perfil_page(msg="", ok=False, edit_user=None):
     esc = html.escape
     yo = getattr(CTX, "user", None)
@@ -5892,6 +5963,13 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "align-items:center;justify-content:center}"
             ".mkwait .mkbox{background:#fff;border-radius:14px;padding:24px 28px;display:flex;align-items:center;gap:16px;"
             "max-width:440px;box-shadow:0 10px 40px rgba(0,0,0,.3)}"
+            ".nodoform{border:1px solid #e7e6e2;border-radius:10px;padding:12px 14px;margin:12px 0;background:#fbfcfe}"
+            ".nodohd{display:flex;align-items:center;gap:10px;margin:0 0 8px;font-size:14px}"
+            ".nodoif{font:11px ui-monospace,Consolas,monospace;background:#eef2f7;color:#33322f;border-radius:5px;padding:2px 7px}"
+            ".nodoacts{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}"
+            ".nodost td,.nodost th{font-size:13px}"
+            ".nodonew{margin-top:10px}"
+            ".nodonew summary{cursor:pointer;font-weight:700;font-size:13.5px;color:#2a5fa0}"
             ".mkwait .mkspin{width:30px;height:30px;flex:0 0 auto;border:3px solid #e7e6e2;border-top-color:#2a78d6;"
             "border-radius:50%;animation:mkspin .8s linear infinite}"
             "@keyframes mkspin{to{transform:rotate(360deg)}}</style>"
@@ -6161,7 +6239,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
     def _mcard(sid, card):
         return _modal(sid, card) if card else ""
     modals = (_mcard("perfil", card_pw) + _mcard("empresa", card_empresa) + _mcard("usuarios", card_users)
-              + _mcard("acceso", card_acceso) + _mcard("mikrotik", card_mk) + _mcard("feeds", card_feeds)
+              + _mcard("acceso", card_acceso) + _mcard("mikrotik", card_mk + (_card_nodos() if card_mk else "")) + _mcard("feeds", card_feeds)
               + _mcard("update", card_update))
     if es_admin:
         modals += _modal("log", "<iframe class=aptframe data-src='/log?embed=1'></iframe>")
@@ -8192,6 +8270,14 @@ class H(BaseHTTPRequestHandler):
             m["ENABLED"] = "1" if q.get("enabled") else "0"
             try:
                 guardar_mk(m)
+                # la conexion vive en el registro de nodos; este formulario edita el primero
+                _rs = cargar_routers()
+                for _k in ("HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL",
+                           "LIST_DNS", "TTL_DNS", "ENABLED"):
+                    _rs[0][_k] = m.get(_k, "")
+                if not _rs[0].get("nombre"):
+                    _rs[0]["nombre"] = m.get("HOST", "") or "Nodo principal"
+                guardar_routers(_rs)
             except OSError as ex:
                 return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
             conf_dash_set("DOBLE_SENAL", "1" if q.get("doble") else "0")   # doble senal (lo lee el generador)
@@ -8199,6 +8285,68 @@ class H(BaseHTTPRequestHandler):
             bitacora("CONFIG-MIKROTIK", f"host={m.get('HOST','')} enviar={'si' if m.get('ENABLED')=='1' else 'no'} "
                                         f"doble_senal={'si' if q.get('doble') else 'no'}")
             return self._html(perfil_page("Conexion al MikroTik guardada.", ok=True))
+        if ruta == "/routers/guardar":
+            # Alta o edicion de un nodo. El primero se edita desde la tarjeta de MikroTik;
+            # aqui se gestionan los demas (y se puede renombrar cualquiera).
+            if not self._admin():
+                return self._deny()
+            rid = (q.get("rid", [""])[0]).strip()[:16]
+            rs = cargar_routers()
+            r = None
+            for x in rs:
+                if x.get("id") == rid:
+                    r = x
+                    break
+            if r is None:
+                if len(rs) >= 8:
+                    return self._html(perfil_page("Maximo 8 nodos por sensor.", ok=False))
+                r = _router_vacio(len(rs) + 1)
+                rs.append(r)
+            r["nombre"] = (q.get("nombre", [""])[0]).strip()[:40] or r.get("HOST", "") or r["id"]
+            r["HOST"] = (q.get("host", [""])[0]).strip()[:80]
+            r["PORT"] = (q.get("port", [""])[0]).strip()[:6] or "8728"
+            r["USER"] = (q.get("user", [""])[0]).strip()[:64]
+            _np = q.get("pass", [""])[0]
+            if _np:                                   # vacio = conservar la clave actual
+                r["PASS"] = _np
+            r["LIST"] = (q.get("list", [""])[0]).strip()[:64] or "suricata-cuarentena"
+            r["LIST_DNS"] = (q.get("list_dns", [""])[0]).strip()[:64] or "suricata-dns-sospechoso"
+            r["TTL"] = (q.get("ttl", [""])[0]).strip()[:16] or "1h"
+            r["TTL_DNS"] = (q.get("ttl_dns", [""])[0]).strip()[:16] or "1d"
+            r["TLS"] = "1" if q.get("tls") else "0"
+            r["ENABLED"] = "1" if q.get("enabled") else "0"
+            if not r.get("HOST"):
+                return self._html(perfil_page("Falta la IP del MikroTik del nodo.", ok=False))
+            try:
+                guardar_routers(rs)
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            bitacora("CONFIG-NODO", f"nodo={r['nombre']} host={r['HOST']} "
+                                    f"enviar={'si' if r['ENABLED'] == '1' else 'no'}")
+            return self._html(perfil_page(
+                f"Nodo '{r['nombre']}' guardado. Para que su espejo se capture, re-ejecuta "
+                f"el instalador con -m incluyendo {r['HOST']}.", ok=True))
+        if ruta == "/routers/quitar":
+            if not self._admin():
+                return self._deny()
+            rid = (q.get("rid", [""])[0]).strip()[:16]
+            rs = cargar_routers()
+            if len(rs) <= 1:
+                return self._html(perfil_page("No se puede quitar el unico nodo.", ok=False))
+            quedan = [x for x in rs if x.get("id") != rid]
+            if len(quedan) == len(rs):
+                return self._html(perfil_page("Ese nodo ya no existe.", ok=False))
+            # OJO: no se tocan sus entradas de cuarentena. Si el nodo se quita sin
+            # liberarlas antes, siguen bloqueadas en ese router y el panel ya no las
+            # gestiona. Se avisa en el mensaje.
+            try:
+                guardar_routers(quedan)
+            except OSError as ex:
+                return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
+            bitacora("QUITAR-NODO", f"nodo={rid}")
+            return self._html(perfil_page(
+                "Nodo quitado del panel. Si tenia CPEs en cuarentena, siguen bloqueados en "
+                "ese MikroTik: quitalos desde el propio router.", ok=True))
         if ruta == "/mikrotik/test":
             if not self._admin():
                 return self._deny()

@@ -63,6 +63,7 @@ correr "registro de routers y migracion del nodo unico" "$PY" tests/test_routers
 correr "receptor TZSP: cada MikroTik a su interfaz" "$PY" tests/test_tzsp_multi.py
 correr "instalador: una interfaz por router" bash tests/test_instalador_multi.sh
 correr "identidad (router, IP): dos nodos no se confunden" "$PY" tests/test_identidad_nodo.py
+correr "alta, edicion y baja de nodos" "$PY" tests/test_rutas_nodos.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

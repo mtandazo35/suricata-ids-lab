@@ -6543,11 +6543,11 @@ def update_box():
         'Con este boton la fuerzas ahora sin esperar; descarga ET Open y recarga en caliente.</p>'
         f'{boton}</div>')
 
-def documentacion_page(embed=False):
+def documentacion_page(embed=False, pagina=""):
     port = CFG.get("PORT", "5637")
     ubox = update_box()
     refresh_meta = "<meta http-equiv=refresh content='15;url=/documentacion#reglas'>" if UPDATE["running"] else ""
-    art = f"""<h2>Las pestañas del menu</h2>
+    art = f"""<!--CAT:Primeros pasos--><h2>Las pestañas del menu</h2>
 <table><tr><th>Pestaña</th><th>Que hace</th></tr>
 <tr><td><b>En vivo</b></td><td>Vista principal. Arriba, el <b>resumen de las ultimas 24h</b>:
 puertos de destino mas atacados, IPs origen (atacantes), IPs destino (objetivos) y la
@@ -6600,7 +6600,7 @@ nuevas). Se ajusta con <code>VENTANA_MIN</code> en <code>/etc/suricata-dashboard
 <li>Todas las horas del panel estan en <b>hora de Ecuador</b> (UTC-5).</li>
 </ul>
 
-<h2>De donde saca Suricata para confirmar (reglas) y como se actualiza</h2>
+<!--CAT:Deteccion--><h2>De donde saca Suricata para confirmar (reglas) y como se actualiza</h2>
 <p>Suricata no "adivina": compara cada paquete/flujo contra un conjunto de <b>reglas</b>
 (firmas). Una alerta existe solo si algo coincide con una regla. Aqui las reglas vienen de
 dos fuentes:</p>
@@ -6706,7 +6706,7 @@ antiguas <code>IGNORAR_DESTINOS=</code>/<code>IGNORAR_ORIGENES=</code> del
 consulto un dominio malicioso. Esa senal sigue disponible en EveBox filtrando por IP de
 origen, si quieres cazar clientes infectados por sus consultas.</p>
 
-<h2>Usuarios, roles y clave</h2>
+<!--CAT:Operacion diaria--><h2>Usuarios, roles y clave</h2>
 <p>El panel soporta <b>varios usuarios</b> con tres roles:</p>
 <ul>
 <li><b>Administrador</b>: acceso total (exclusiones, MikroTik y politicas, feeds, actualizar
@@ -6742,7 +6742,7 @@ en <code>/etc/suricata-report.conf</code>. Se envia cada dia a las 07:30.</li>
 <tr><td>Assets del mapa</td><td><code>/var/lib/suricata-mapa/</code> (TopoJSON + topojson-client)</td></tr>
 </table>
 
-<h2>Espejo MikroTik y HOME_NET (por que a veces no se ven datos)</h2>
+<!--CAT:Cuarentena y MikroTik--><h2>Espejo MikroTik y HOME_NET (por que a veces no se ven datos)</h2>
 <p>Con espejo TZSP desde el MikroTik, el flujo llega al receptor (<code>tzsp-decap</code>)
 y Suricata lo inspecciona. Pero el panel muestra <b>alertas</b>, no trafico normal, y las
 reglas de <b>ataque saliente</b> (escaneo de puertos, Telnet/Mirai, fuerza bruta SSH de un
@@ -6997,7 +6997,7 @@ y los envios masivos mandan un solo resumen. Usa el mismo <code>TELEGRAM_TOKEN</
 del informe diario. Para que el enlace de la ficha sea clicable, pon <code>PANEL_URL</code> en
 <code>/etc/suricata-dashboard.conf</code>.</p>
 
-<h2>Actualizar el panel (boton) y recuperacion</h2>
+<!--CAT:Mantenimiento--><h2>Actualizar el panel (boton) y recuperacion</h2>
 <p>En <b>Ajustes &rarr; Actualizaciones</b> el admin ve la version desplegada y, si hay una nueva en
 GitHub, un boton con la lista de mejoras. El actualizador (<code>suricata-panel-update</code>) baja el
 ultimo commit por SHA, valida el codigo (<code>ast</code>/<code>sh -n</code>), <b>respalda la version
@@ -7049,20 +7049,84 @@ re-ejecutando el instalador. Necesita salida a internet la primera vez.</li>
 <p>Todo esta en un instalador idempotente. Para actualizar a la ultima version
 (ejemplo ISP con espejo y todas las redes privadas):</p>
 <pre><code>curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -m &lt;IP_MikroTik&gt; -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16</code></pre>"""
-    # --- indice (tabla de contenidos estilo Wikipedia) generado desde los <h2> ---
-    secciones = []; usados = {}
+    # --- La documentacion se parte en PAGINAS (una por tema), agrupadas en categorias.
+    # Antes era un unico muro con indice lateral: con 23 temas costaba encontrar nada.
+    # Las categorias se marcan en el texto con <!--CAT:Nombre--> delante del <h2> que
+    # abre el grupo. Cada tema conserva su ancla de siempre, asi que los enlaces
+    # antiguos (#cuarentena, #reglas...) siguen llevando a su sitio.
+    usados = {}
     def _slug(t):
         s = re.sub(r"<[^>]+>", "", t)
         s = re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") or "sec"
         n = usados.get(s, 0) + 1; usados[s] = n
         return s if n == 1 else f"{s}-{n}"
-    def _h2(m):
-        txt = m.group(1); sl = _slug(txt)
-        secciones.append((sl, re.sub(r"<[^>]+>", "", txt)))
-        return (f'<h2 id="{sl}">{txt}'
-                f'<a class=anchor href="#{sl}" aria-label=enlace>&para;</a></h2>')
-    art = re.sub(r"<h2>(.*?)</h2>", _h2, art, flags=re.S)
-    toc = "".join(f'<li><a href="#{sl}">{html.escape(t)}</a></li>' for sl, t in secciones)
+
+    paginas = []        # [{slug, titulo, cat, html}]
+    cat_actual = "General"
+    for trozo in re.split(r"(?=<h2>)", art):
+        mcat = re.findall(r"<!--CAT:([^>]*?)-->", trozo)
+        if mcat:
+            cat_actual = mcat[-1].strip() or cat_actual
+            trozo = re.sub(r"<!--CAT:[^>]*?-->", "", trozo)
+        mt = re.match(r"\s*<h2>(.*?)</h2>", trozo, re.S)
+        if not mt:
+            continue                      # texto antes del primer tema (no deberia haber)
+        titulo = re.sub(r"<[^>]+>", "", mt.group(1))
+        sl = _slug(mt.group(1))
+        cuerpo = trozo[mt.end():]
+        paginas.append({"slug": sl, "titulo": titulo, "cat": cat_actual, "html": cuerpo})
+
+    pedida = (pagina or "").strip().lower()
+    todo = (pedida == "todo")
+    idx = 0
+    if pedida and not todo:
+        for i, pg in enumerate(paginas):
+            if pg["slug"] == pedida:
+                idx = i
+                break
+    actual = paginas[idx] if paginas else {"slug": "", "titulo": "", "cat": "", "html": ""}
+
+    # --- barra lateral: categorias -> temas, con buscador ---
+    # ojo con el nombre: nav() es la funcion que dibuja la barra del panel, no tocar
+    lateral = []
+    cat_prev = None
+    for pg in paginas:
+        if pg["cat"] != cat_prev:
+            if cat_prev is not None:
+                lateral.append("</ul>")
+            lateral.append(f"<div class=navcat>{html.escape(pg['cat'])}</div><ul class=navlist>")
+            cat_prev = pg["cat"]
+        act = " class=on" if (not todo and pg["slug"] == actual["slug"]) else ""
+        lateral.append(f'<li><a href="?p={pg["slug"]}"{act} data-t="{html.escape(pg["titulo"].lower())}">'
+                       f'{html.escape(pg["titulo"])}</a></li>')
+    if cat_prev is not None:
+        lateral.append("</ul>")
+    toc = ("<input id=docq class=docq type=search placeholder='Buscar en la documentacion'"
+           " autocomplete=off aria-label='Buscar'>"
+           + "".join(lateral)
+           + f'<div class=navcat>Todo</div><ul class=navlist><li>'
+             f'<a href="?p=todo"{" class=on" if todo else ""}>Ver la guia completa</a></li></ul>')
+
+    if todo:
+        art = "".join(
+            f'<h2 id="{pg["slug"]}">{html.escape(pg["titulo"])}'
+            f'<a class=anchor href="#{pg["slug"]}" aria-label=enlace>&para;</a></h2>{pg["html"]}'
+            for pg in paginas)
+        pag_tit = "Guia completa"
+        pies = ""
+    else:
+        art = (f'<div class=docbreadcrumb id="{actual["slug"]}">{html.escape(actual["cat"])}</div>'
+               + actual["html"])
+        pag_tit = actual["titulo"]
+        ant = paginas[idx - 1] if idx > 0 else None
+        sig = paginas[idx + 1] if idx + 1 < len(paginas) else None
+        pies = ("<nav class=docpn>"
+                + (f'<a class=pnprev href="?p={ant["slug"]}"><span>Anterior</span>'
+                   f'<b>{html.escape(ant["titulo"])}</b></a>' if ant else "<span></span>")
+                + (f'<a class=pnnext href="?p={sig["slug"]}"><span>Siguiente</span>'
+                   f'<b>{html.escape(sig["titulo"])}</b></a>' if sig else "<span></span>")
+                + "</nav>")
+        art += pies
     wcss = (
         "*{box-sizing:border-box}"
         "body{margin:0;background:#fff;color:#202122;font:16px/1.65 Georgia,'Times New Roman',serif}"
@@ -7070,11 +7134,31 @@ re-ejecutando el instalador. Necesita salida a internet la primera vez.</li>
         ".toc{position:sticky;top:58px;flex:0 0 240px;font:13px/1.5 -apple-system,system-ui,Segoe UI,sans-serif}"
         ".toc .toch{font-weight:700;color:#54595d;text-transform:uppercase;font-size:11px;letter-spacing:.5px;"
         "margin:0 0 8px;padding-bottom:7px;border-bottom:1px solid #eaecf0}"
-        ".toc ol{list-style:none;margin:0;padding:0;counter-reset:s}"
-        ".toc li{counter-increment:s;margin:1px 0}"
-        ".toc li a{color:#3366cc;text-decoration:none;display:block;padding:4px 9px;border-left:2px solid transparent}"
-        ".toc li a::before{content:counter(s) '. ';color:#72777d}"
-        ".toc li a:hover{background:#f4f8ff;border-left-color:#3366cc;text-decoration:underline}"
+        # --- barra lateral tipo documentacion: buscador + categorias + temas ---
+        ".docq{width:100%;padding:7px 10px;border:1px solid #c8ccd1;border-radius:6px;"
+        "font:13px system-ui;margin:0 0 12px;background:#fff}"
+        ".docq:focus{outline:none;border-color:#3366cc;box-shadow:0 0 0 3px rgba(51,102,204,.12)}"
+        ".navcat{font-weight:700;color:#54595d;text-transform:uppercase;font-size:10.5px;"
+        "letter-spacing:.6px;margin:14px 0 5px}"
+        ".navlist{list-style:none;margin:0 0 4px;padding:0}"
+        ".navlist li{margin:0}"
+        ".navlist a{color:#3366cc;text-decoration:none;display:block;padding:5px 9px;"
+        "border-left:2px solid transparent;border-radius:0 4px 4px 0}"
+        ".navlist a:hover{background:#f4f8ff;border-left-color:#a7c0ea}"
+        ".navlist a.on{background:#eaf1fd;border-left-color:#3366cc;color:#1c4587;font-weight:700}"
+        ".navlist li.oculto,.navcat.oculto{display:none}"
+        ".docvacio{color:#72777d;font-size:12.5px;padding:6px 9px}"
+        # miga de pan y navegacion entre temas
+        ".docbreadcrumb{font:600 11px/1 system-ui;text-transform:uppercase;letter-spacing:.6px;"
+        "color:#72777d;margin:0 0 4px}"
+        ".docpn{display:flex;gap:12px;justify-content:space-between;margin:34px 0 0;"
+        "padding-top:16px;border-top:1px solid #eaecf0;font-family:system-ui}"
+        ".docpn a{flex:1;max-width:48%;border:1px solid #eaecf0;border-radius:6px;padding:9px 12px;"
+        "text-decoration:none;color:#3366cc}"
+        ".docpn a:hover{border-color:#3366cc;background:#f8fbff}"
+        ".docpn a span{display:block;font-size:11px;color:#72777d;text-transform:uppercase;letter-spacing:.5px}"
+        ".docpn a b{font-size:14px}"
+        ".docpn .pnnext{text-align:right}"
         "article{flex:1;min-width:0;max-width:770px}"
         "article h1{font:400 28px/1.3 Georgia,serif;margin:0 0 3px;border-bottom:1px solid #a2a9b1;padding-bottom:7px}"
         ".lead{color:#54595d;font-size:15px;margin:0 0 8px}"
@@ -7098,11 +7182,25 @@ re-ejecutando el instalador. Necesita salida a internet la primera vez.</li>
             "<title>Suricata</title><style>" + wcss + "</style></head><body>"
             + ("" if embed else nav("/documentacion")) +
             "<div class=wiki>"
-            "<aside class=toc><div class=toch>Contenido</div><nav><ol>" + toc + "</ol></nav></aside>"
-            "<article><h1>Documentacion</h1>"
-            "<p class=lead>Guia del panel de estadisticas de Suricata: que hace cada apartado y como ajustarlo.</p>"
+            "<aside class=toc><div class=toch>Documentacion</div><nav>" + toc + "</nav></aside>"
+            f"<article><h1>{html.escape(pag_tit)}</h1>"
             + art +
-            "</article></div></body></html>")
+            "</article></div>"
+            "<script>(function(){var q=document.getElementById('docq');if(!q)return;"
+            # se filtra en el navegador: la doc va entera en la pagina, no hay que ir al servidor
+            "var items=[].slice.call(document.querySelectorAll('.navlist li'));"
+            "var cats=[].slice.call(document.querySelectorAll('.navcat'));"
+            "function filtrar(){var t=q.value.trim().toLowerCase();"
+            "items.forEach(function(li){var a=li.querySelector('a');"
+            "var txt=(a.getAttribute('data-t')||a.textContent||'').toLowerCase();"
+            "li.classList.toggle('oculto',!!t&&txt.indexOf(t)<0);});"
+            # una categoria sin temas visibles se esconde tambien
+            "cats.forEach(function(c){var ul=c.nextElementSibling,vis=0;"
+            "if(ul)[].slice.call(ul.children).forEach(function(li){if(!li.classList.contains('oculto'))vis++;});"
+            "c.classList.toggle('oculto',!!t&&vis===0);if(ul)ul.classList.toggle('oculto',!!t&&vis===0);});}"
+            "q.addEventListener('input',filtrar);"
+            "q.addEventListener('keydown',function(e){if(e.key==='Escape'){q.value='';filtrar();}});"
+            "})();</script></body></html>")
     return body
 
 def log_page(embed=False):
@@ -8135,7 +8233,9 @@ class H(BaseHTTPRequestHandler):
                     edit = None
             return self._html(exclusiones_page(edit_idx=edit))
         if path == "/documentacion":
-            return self._html(documentacion_page(embed=("embed=1" in (self.path.split("?", 1)[1] if "?" in self.path else ""))))
+            _qd = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            return self._html(documentacion_page(embed=("1" in _qd.get("embed", [])),
+                                                 pagina=(_qd.get("p", [""])[0])))
         m = re.match(r"^/r/(report-[0-9A-Za-z_-]+\.html)$", path)
         if m:
             f = os.path.join(LOGDIR, m.group(1))

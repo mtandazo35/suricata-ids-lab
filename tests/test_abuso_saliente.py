@@ -93,7 +93,8 @@ def main():
                       "contar_accion", "METRICAS_FILE", "cargar_metricas", "_serie",
                       "_media", "_grafico", "historico_page",
                       "GRUPOS_SALIDA", "_cpes_de_reporte", "analisis_salida",
-                      "regla_salida", "reglas_salida_texto"),
+                      "regla_salida", "reglas_salida_texto",
+                      "GRUPOS_CONDUCTA", "analisis_conducta", "reglas_conducta_texto"),
                extra={"BASE_CSS": "", "nav": lambda a="": "<!--nav-->",
                       "wrap": lambda b, refresh=True, active="": b, "LOGDIR": tmp,
                       "cargar_routers": lambda: [{"id": "", "nombre": "MikroTik"}],
@@ -204,6 +205,35 @@ def main():
     check("y con una lista de excepciones", "src-address-list=!suricata-salida-permitida" in txt)
     check("el correo se corta SOLO en el 25: cortar el 587 rompe a los clientes legitimos",
           "dst-port=25 " in txt and "587" not in txt, txt)
+
+    # --- reglas por CONDUCTA: un escaner no se corta con una regla por puerto ---
+    cond = d["analisis_conducta"](None)
+    check("sin categorias no se propone ninguna conducta", cond == [], cond)
+
+    json.dump({"top_riesgo": [
+        {"ip": "10.0.0.1", "router": "", "puertos_top": {"25/tcp": 4000},
+         "cats_top": {"Spam": 4000}},
+        {"ip": "10.0.0.4", "router": "", "puertos_top": {"22/tcp": 1500, "23/tcp": 500},
+         "cats_top": {"Escaneo SSH": 1200, "Escaneo de puertos": 600, "Fuerza bruta": 200}},
+        {"ip": "10.0.0.5", "router": "", "puertos_top": {"443/tcp": 9000},
+         "cats_top": {"Anomalia TLS/SSL": 9000}},
+    ], "candidatos": [], "dns_candidatos": []},
+        open(os.path.join(tmp, "cuarentena.json"), "w", encoding="utf-8"))
+    cond = {g["clave"]: g for g in d["analisis_conducta"](None)}
+    check("el escaneo se detecta como conducta", "escaneo" in cond, list(cond))
+    check("sumando sus categorias", cond["escaneo"]["alertas"] == 1800, cond["escaneo"]["alertas"])
+    check("la fuerza bruta va aparte", cond["fuerza"]["alertas"] == 200, cond.get("fuerza"))
+    check("el trafico normal no genera conducta",
+          all("Anomalia" not in c for g in cond.values() for c, _n in g["cats"]), cond)
+
+    esc_txt = d["reglas_conducta_texto"]("escaneo")
+    check("la regla de escaneo usa el detector psd de RouterOS", "psd=" in esc_txt, esc_txt[:120])
+    check("y tambien limita las conexiones nuevas (barrido horizontal)",
+          "connection-state=new" in esc_txt and "limit=" in esc_txt)
+    check("mete al que escanea en una address-list",
+          "add-src-to-address-list" in esc_txt and "suricata-escaneo" in esc_txt)
+    check("el DROP viene DESACTIVADO: el P2P daria falso positivo",
+          "action=drop disabled=yes" in esc_txt, esc_txt[-200:])
 
     pag_r = d["historico_page"](30)
     check("las reglas se ven en Abuso saliente", "Reglas de salida" in pag_r)

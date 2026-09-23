@@ -3612,6 +3612,102 @@ GRUPOS_SALIDA = [
      "Ataques contra bases de datos de terceros.", ""),
 ]
 
+# --- Reglas por CONDUCTA ----------------------------------------------------------
+# Un escaner NO se corta con una regla por puerto: prueba muchos, y el que hoy usa el 22
+# manana usa el 23. Hay que detectarlo por como se comporta -muchos puertos en poco
+# tiempo, o demasiadas conexiones nuevas- y meterlo en una address-list.
+#
+# Estas reglas se entregan con el DROP desactivado a proposito. El P2P, algunos juegos y
+# ciertas apps abren muchas conexiones y darian falso positivo: primero se mira quien cae
+# en la lista durante unos dias y despues se activa el corte. Entregarlas cortando de
+# entrada seria dejar sin internet a gente que no hizo nada.
+GRUPOS_CONDUCTA = [
+    ("escaneo", "Escaneo de puertos y barridos",
+     ["Escaneo de puertos", "Escaneo saliente", "Escaneo SSH", "Escaneo Telnet",
+      "Escaneo TR-069"],
+     "Es lo que mas denuncias genera y lo que mete tus publicas en las listas. No se "
+     "puede cortar por puerto porque el escaner los prueba todos: se detecta por "
+     "conducta (muchos puertos seguidos, o demasiadas conexiones nuevas) y se manda al "
+     "que lo hace a una address-list."),
+    ("fuerza", "Fuerza bruta de credenciales",
+     ["Fuerza bruta", "RDP/VNC"],
+     "Reintentos contra SSH, RDP, FTP o SIP ajenos. Se limita el ritmo de conexiones "
+     "nuevas hacia esos puertos en vez de cortarlos del todo."),
+]
+
+def reglas_conducta_texto(clave, redes=None, permitidos="suricata-salida-permitida"):
+    """Las reglas de MikroTik para una conducta. Texto listo para pegar."""
+    redes = redes or [str(r) for r in mis_redes()]
+    origen = " ".join(f"src-address={r}" for r in redes[:1]) or "src-address=0.0.0.0/0"
+    if clave == "escaneo":
+        return "\n".join([
+            "/ip firewall filter",
+            "# 1) el que prueba muchos puertos seguidos (psd = detector de escaneo de RouterOS)",
+            f'add chain=forward protocol=tcp psd=21,3s,3,1 {origen} '
+            f'src-address-list=!{permitidos} action=add-src-to-address-list '
+            'address-list=suricata-escaneo address-list-timeout=1d '
+            'comment="Suricata: escaneo de puertos saliente"',
+            "",
+            "# 2) el que abre demasiadas conexiones nuevas (barrido de muchas IPs)",
+            f'add chain=forward connection-state=new {origen} '
+            f'src-address-list=!{permitidos} action=jump jump-target=det-barrido '
+            'comment="Suricata: medir ritmo de conexiones nuevas"',
+            'add chain=det-barrido limit=50,100:packet action=return '
+            'comment="Suricata: ritmo normal, seguir"',
+            'add chain=det-barrido action=add-src-to-address-list '
+            'address-list=suricata-escaneo address-list-timeout=1h '
+            'comment="Suricata: barrido (demasiadas conexiones nuevas)"',
+            "",
+            "# 3) el corte. DESACTIVADO: mira unos dias quien cae en la lista",
+            "#    (/ip firewall address-list print where list=suricata-escaneo)",
+            "#    y cuando estes seguro, ponlo en disabled=no",
+            'add chain=forward src-address-list=suricata-escaneo action=drop disabled=yes '
+            'comment="Suricata: cortar a los que escanean"',
+        ])
+    return "\n".join([
+        "/ip firewall filter",
+        "# limitar el ritmo de intentos hacia puertos de acceso remoto y correo",
+        f'add chain=forward connection-state=new protocol=tcp '
+        f'dst-port=22,23,21,3389,5900,5060,25 {origen} '
+        f'src-address-list=!{permitidos} action=jump jump-target=det-fuerza '
+        'comment="Suricata: medir intentos de credenciales"',
+        'add chain=det-fuerza limit=10,20:packet action=return '
+        'comment="Suricata: ritmo normal, seguir"',
+        'add chain=det-fuerza action=add-src-to-address-list '
+        'address-list=suricata-fuerza-bruta address-list-timeout=1h '
+        'comment="Suricata: fuerza bruta saliente"',
+        "",
+        "# el corte, DESACTIVADO hasta que revises la lista",
+        'add chain=forward src-address-list=suricata-fuerza-bruta action=drop disabled=yes '
+        'comment="Suricata: cortar la fuerza bruta saliente"',
+    ])
+
+def analisis_conducta(rid=None):
+    """Cuanto abuso encaja con cada conducta, segun las categorias de firma reales."""
+    cpes = _cpes_de_reporte(rid)
+    total = 0
+    for c in cpes:
+        total += sum(int(v) for v in (c.get("cats_top") or {}).values())
+    grupos = []
+    for clave, titulo, cats, porque in GRUPOS_CONDUCTA:
+        n = 0; quienes = set(); vistas = {}
+        for c in cpes:
+            suyo = 0
+            for cat, v in (c.get("cats_top") or {}).items():
+                if cat in cats:
+                    suyo += int(v); vistas[cat] = vistas.get(cat, 0) + int(v)
+            if suyo:
+                n += suyo
+                quienes.add(clave_cpe(c.get("ip", ""), c.get("router", "")))
+        if not n:
+            continue
+        grupos.append({"clave": clave, "titulo": titulo, "alertas": n, "cpes": len(quienes),
+                       "pct": (n * 100.0 / total) if total else 0.0,
+                       "porque": porque,
+                       "cats": sorted(vistas.items(), key=lambda kv: kv[1], reverse=True)})
+    grupos.sort(key=lambda g: g["alertas"], reverse=True)
+    return grupos
+
 def _cpes_de_reporte(rid=None):
     """CPEs del reporte actual con su desglose de puertos, opcionalmente de un nodo."""
     try:
@@ -4219,6 +4315,62 @@ def mk_lista_en_uso(lista, router=None):
     finally:
         try: s_.close()
         except OSError: pass
+
+def _a_cidr(txt):
+    """Normaliza lo que devuelve el router a algo consultable.
+
+    Acepta "190.0.2.7/29" (se queda con la RED: una sola consulta cubre el pool),
+    "190.0.2.7" y rangos "190.0.2.10-190.0.2.20" (se resumen a los CIDR que los cubren).
+    Descarta lo privado, que es justo lo que NO hay que mandar a ningun sitio."""
+    txt = (txt or "").strip()
+    salida = []
+    try:
+        if "-" in txt:
+            a, b = txt.split("-", 1)
+            for red in ipaddress.summarize_address_range(
+                    ipaddress.ip_address(a.strip()), ipaddress.ip_address(b.strip())):
+                if red.is_global:
+                    salida.append(str(red))
+        elif "/" in txt:
+            red = ipaddress.ip_network(txt, strict=False)
+            if red.is_global:
+                salida.append(str(red) if red.prefixlen <= 30 else str(red.network_address))
+        else:
+            ip = ipaddress.ip_address(txt)
+            if ip.is_global:
+                salida.append(str(ip))
+    except ValueError:
+        return []
+    return salida
+
+def mk_publicas_detectadas(router=None):
+    """Las IPs publicas de salida segun el propio MikroTik.
+
+    Dos fuentes: las direcciones configuradas en sus interfaces (de ahi sale el
+    masquerade) y el to-addresses de las reglas de src-nat (de ahi salen los pools)."""
+    d = cargar_mk_de(router) if router else cargar_mk()
+    s_ = mk_conectar(d)
+    encontradas = []
+    try:
+        for cmd, campo in (("/ip/address/print", "=address="),
+                           ("/ip/firewall/nat/print", "=to-addresses=")):
+            try:
+                _mk_send(s_, [cmd, "=.proplist=" + campo.strip("=")])
+                _ok, frases, _err = _mk_reply(s_)
+            except Exception:
+                continue
+            for f in frases:
+                if not (f and f[0] == "!re"):
+                    continue
+                for a in f:
+                    if a.startswith(campo):
+                        for c in _a_cidr(a[len(campo):]):
+                            if c not in encontradas:
+                                encontradas.append(c)
+    finally:
+        try: s_.close()
+        except OSError: pass
+    return sorted(encontradas)
 
 def mk_list_ips(lista, router=None):
     """Devuelve el conjunto de direcciones que estan AHORA en esa address-list del MikroTik."""
@@ -9135,6 +9287,12 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 f"<input type=hidden name=rid value='{esc(rid)}'>"
                 "<input name=entrada size=20 placeholder='IP o red (CIDR)' autocomplete=off>"
                 "<button class=primary type=submit>Agregar</button></form>")
+        if es_admin:
+            acciones.append("<form method=post action='/publicas/detectar'>"
+                            f"<input type=hidden name=rid value='{esc(rid)}'>"
+                            "<button class=cancelbtn type=submit title='Pregunta al MikroTik "
+                            "por las direcciones de sus interfaces y el to-addresses de sus "
+                            "reglas de src-nat'>Detectar del MikroTik</button></form>")
         if entradas:
             acciones.append("<form method=post action='/publicas/revisar'>"
                             f"<input type=hidden name=rid value='{esc(rid)}'>"
@@ -9408,9 +9566,27 @@ def historico_page(dias_n=30):
         rid = r.get("id", "") if r else None
         nom = (r.get("nombre") or r.get("HOST") or rid) if r else ""
         tot, n_cpes, grupos = analisis_salida(rid)
-        if not grupos:
+        if not grupos and not analisis_conducta(rid):
             continue
+        conductas = analisis_conducta(rid)
         tarjetas_g = []
+        for g in conductas:
+            det = ", ".join("%s (%d)" % (c, n) for c, n in g["cats"][:3])
+            tarjetas_g.append(
+                "<div class=regla>"
+                f"<div class=rh><b>{esc(g['titulo'])}</b>"
+                "<span class=rp>por conducta</span>"
+                f"<span class=rpct>{g['pct']:.0f} %</span></div>"
+                f"<div class=rn><b>{g['alertas']:,}</b> alertas de <b>{g['cpes']:,}</b> CPE(s)"
+                + (f" &mdash; {esc(det)}" if det else "") + ". " + esc(g["porque"]) + "</div>"
+                "<details style='margin-top:6px'><summary style='cursor:pointer;font-size:12.5px'>"
+                "Reglas para pegar</summary>"
+                "<p class=hint style='margin:6px 0'>El <b>drop va desactivado</b>: mira unos dias "
+                "quien cae en la address-list y actívalo cuando estes seguro. El P2P y algunos "
+                "juegos abren muchas conexiones y darian falso positivo.</p>"
+                f"<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;"
+                f"padding:10px;overflow-x:auto;font-size:12px'>"
+                f"{esc(reglas_conducta_texto(g['clave']))}</pre></details></div>")
         for g in grupos:
             pts = ", ".join(g["puertos"])
             tarjetas_g.append(
@@ -10826,6 +11002,32 @@ class H(BaseHTTPRequestHandler):
             guardar_publicas_de(rid, "\n".join(quedan_e))
             bitacora("CONFIG-PUBLICAS", f"nodo={rid} -{fuera}")
             return self._redirect("/reputacion")
+        if ruta == "/publicas/detectar":
+            if not self._admin():
+                return self._deny()
+            rid = (q.get("rid", [""])[0]).strip()
+            r = router_por_id(rid)
+            if not r:
+                return self._redirect("/reputacion")
+            try:
+                halladas = mk_publicas_detectadas(r)
+            except Exception as ex:
+                return self._redirect("/reputacion?msg=" + _up.quote(
+                    f"No se pudo preguntar al MikroTik: {ex}"))
+            if not halladas:
+                return self._redirect("/reputacion?msg=" + _up.quote(
+                    "El MikroTik no devolvio ninguna direccion publica. "
+                    "Si el enlace lo termina otro equipo, agregalas a mano."))
+            actuales = cargar_publicas().get(rid, [])
+            nuevas = [x for x in halladas if x not in actuales]
+            guardar_publicas_de(rid, "\n".join(actuales + nuevas))
+            bitacora("CONFIG-PUBLICAS", f"nodo={rid} detectadas={len(halladas)} nuevas={len(nuevas)}")
+            if nuevas:
+                threading.Thread(target=vigilar_dnsbl, daemon=True).start()
+                threading.Thread(target=vigilar_publicas, daemon=True).start()
+            return self._redirect("/reputacion?msg=" + _up.quote(
+                f"{len(nuevas)} publica(s) nueva(s) del MikroTik" if nuevas
+                else "El MikroTik no tiene ninguna publica que no estuviera ya"))
         if ruta == "/publicas/revisar":
             if not self._operador():
                 return self._deny()

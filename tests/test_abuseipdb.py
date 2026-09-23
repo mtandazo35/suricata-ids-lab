@@ -49,7 +49,10 @@ PIEZAS = ("FEEDS_CONF", "AIDB_CACHE", "AIDB_ESTADO", "AIDB_TTL_LIMPIA", "AIDB_TT
           "PUBLICAS_CONF", "PUB_HIST", "PUB_HIST_DIAS", "PUB_UMBRAL_AVISO", "_PUB_LOCK",
           "AIDB_SENAL", "cargar_publicas", "guardar_publicas", "publicas_texto",
           "guardar_publicas_de", "_pub_hist", "_guardar_pub_hist", "_peor_de", "_cats_de",
-          "senal_de_categorias", "_cpes_del_nodo", "culpables_de")
+          "senal_de_categorias", "_cpes_del_nodo", "culpables_de",
+          "DNSBL", "DNSBL_HIST", "DNSBL_MAX_IPS", "DNSBL_HILOS", "DNSBL_DIAS",
+          "ZEN_COD", "_PBL", "_invertida", "dnsbl_una", "dnsbl_revisar",
+          "_dnsbl_hist", "vigilar_dnsbl")
 
 fallos = 0
 def check(d, c, e=""):
@@ -94,6 +97,8 @@ def http(code, cabeceras=None):
 def entorno(tmp, red):
     ns = {"json": json, "os": os, "re": re, "time": __import__("time"), "html": __import__("html"),
           "threading": __import__("threading"), "ipaddress": __import__("ipaddress"),
+          "socket": __import__("socket"),
+          "ThreadPoolExecutor": __import__("concurrent.futures", fromlist=["futures"]).ThreadPoolExecutor,
           "urllib": types.SimpleNamespace(request=red, error=urllib.error, parse=urllib.parse),
           "BASE_CSS": "", "nav": lambda a="": "<!--nav-->",
           "cargar_routers": lambda: [], "cargar_enviados": lambda *a, **k: {},
@@ -108,6 +113,7 @@ def entorno(tmp, red):
     ns["FEEDS_CONF"] = os.path.join(tmp, "feeds.conf")
     ns["PUBLICAS_CONF"] = os.path.join(tmp, "publicas.json")
     ns["PUB_HIST"] = os.path.join(tmp, "pub-hist.json")
+    ns["DNSBL_HIST"] = os.path.join(tmp, "dnsbl.json")
     ns["AIDB_CACHE"] = os.path.join(tmp, "aidb.json")
     ns["AIDB_ESTADO"] = os.path.join(tmp, "aidb-estado.json")
     return ns

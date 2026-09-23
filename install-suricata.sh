@@ -2981,7 +2981,8 @@ reportes diarios, con login basico. Solo biblioteca estandar. Corre como servici
 
 Config: /etc/suricata-dashboard.conf  (PORT, USER, PASS)
 """
-import base64, glob, hashlib, html, json, os, re, secrets, subprocess, sys, threading, time
+import base64, glob, hashlib, html, json, os, re, secrets, socket, subprocess, sys, threading, time
+from concurrent.futures import ThreadPoolExecutor
 import traceback
 import urllib.request, urllib.parse, urllib.error, ipaddress
 from datetime import datetime, timezone, timedelta
@@ -5824,6 +5825,161 @@ def culpables_de(rid, cats, tope=12):
     out.sort(key=lambda x: x[2], reverse=True)
     return out[:tope]
 
+# ---------------------------------------------------------------------------------
+# Listas negras (DNSBL): lo que REALMENTE hace que baneen a un ISP
+# ---------------------------------------------------------------------------------
+# AbuseIPDB es una base de denuncias: util para saber QUE hace una IP, pero casi nadie
+# bloquea correo o trafico mirandola. Lo que rebota los correos y corta servicios son las
+# DNSBL. Consultarlas es gratis y son solo consultas DNS, asi que aqui se revisan todas
+# las publicas declaradas.
+#
+# Detalle que evita dar sustos: que un rango RESIDENCIAL este en la PBL de Spamhaus es lo
+# NORMAL y lo correcto (dice "esta IP no deberia mandar correo directo"). Solo es problema
+# si por ahi sale tu servidor de correo. Por eso se cuenta aparte y no se pinta en rojo.
+DNSBL = [
+    ("zen.spamhaus.org", "Spamhaus ZEN"),
+    ("bl.spamcop.net", "SpamCop"),
+    ("dnsbl.sorbs.net", "SORBS"),
+    ("b.barracudacentral.org", "Barracuda"),
+    ("psbl.surriel.com", "PSBL"),
+    ("dnsbl-1.uceprotect.net", "UCEPROTECT-1"),
+]
+DNSBL_HIST = "/var/log/suricata-publicas-dnsbl.json"
+DNSBL_MAX_IPS = 256            # un /24 entero; por encima se revisa el principio y se dice
+DNSBL_HILOS = 8
+DNSBL_DIAS = 180
+# Que significa cada respuesta de Spamhaus ZEN
+ZEN_COD = {
+    "127.0.0.2": "SBL: origen de spam",
+    "127.0.0.3": "SBL CSS: origen de spam",
+    "127.0.0.4": "XBL: equipo infectado o proxy abierto",
+    "127.0.0.5": "XBL: equipo infectado o proxy abierto",
+    "127.0.0.6": "XBL: equipo infectado o proxy abierto",
+    "127.0.0.7": "XBL: equipo infectado o proxy abierto",
+    "127.0.0.9": "DROP: red secuestrada",
+    "127.0.0.10": "PBL: rango dinamico (normal en residencial)",
+    "127.0.0.11": "PBL: rango dinamico (normal en residencial)",
+}
+_PBL = ("127.0.0.10", "127.0.0.11")
+
+def _invertida(ip):
+    return ".".join(reversed(ip.split(".")))
+
+def dnsbl_una(ip, zona):
+    """Consulta una IP en una lista. Devuelve (estado, [codigos]).
+    estado: limpia | listada | rechazada | error.
+
+    'rechazada' importa: Spamhaus responde 127.255.255.x cuando no acepta la consulta
+    (resolutor publico tipo 8.8.8.8, o demasiadas consultas). Eso NO es "esta limpia", y
+    confundirlo daria una falsa tranquilidad."""
+    try:
+        res = socket.gethostbyname_ex(_invertida(ip) + "." + zona)[2]
+    except socket.gaierror:
+        return "limpia", []            # NXDOMAIN = no esta en la lista
+    except OSError:
+        return "error", []
+    if any(str(r).startswith("127.255.255.") for r in res):
+        return "rechazada", [str(r) for r in res]
+    return "listada", [str(r) for r in res]
+
+def dnsbl_revisar(entrada, tope=DNSBL_MAX_IPS):
+    """Revisa en todas las listas las direcciones de una entrada declarada."""
+    if "/" in entrada:
+        red, _porque = aidb_red_valida(entrada)
+        if red is None:
+            return None
+        ips = []
+        for h in red.hosts():
+            ips.append(str(h))
+            if len(ips) >= tope:
+                break
+        truncado = red.num_addresses - 2 > tope
+    else:
+        ok, _porque = aidb_ip_valida(entrada)
+        if not ok:
+            return None
+        ips, truncado = [entrada], False
+
+    tareas = [(ip, z, nom) for ip in ips for z, nom in DNSBL]
+    porip = {}
+    rechazadas = set()
+    def _uno(t):
+        ip, z, nom = t
+        est, cods = dnsbl_una(ip, z)
+        return ip, nom, est, cods
+    with ThreadPoolExecutor(max_workers=DNSBL_HILOS) as pool:
+        for ip, nom, est, cods in pool.map(_uno, tareas):
+            if est == "rechazada":
+                rechazadas.add(nom)
+                continue
+            if est != "listada":
+                continue
+            e = porip.setdefault(ip, {"listas": [], "solo_pbl": True})
+            if nom == "Spamhaus ZEN":
+                for c in cods:
+                    txt = ZEN_COD.get(c, "listada (%s)" % c)
+                    e["listas"].append("Spamhaus ZEN - " + txt)
+                    if c not in _PBL:
+                        e["solo_pbl"] = False
+            else:
+                e["listas"].append(nom)
+                e["solo_pbl"] = False
+    graves = {k: v for k, v in porip.items() if not v["solo_pbl"]}
+    return {"ts": int(time.time()), "n_ips": len(ips), "truncado": truncado,
+            "rechazadas": sorted(rechazadas), "ips": porip,
+            "n_listadas": len(graves), "n_pbl": len(porip) - len(graves)}
+
+def _dnsbl_hist():
+    try:
+        return json.load(open(DNSBL_HIST, encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+def vigilar_dnsbl():
+    """Revisa las listas negras de todo lo declarado. Solo son consultas DNS: no gasta
+    cuota de AbuseIPDB ni depende de tener clave."""
+    decl = cargar_publicas()
+    if not decl:
+        return 0
+    hist = _dnsbl_hist()
+    hoy = time.strftime("%Y-%m-%d")
+    n = 0
+    for rid, entradas in decl.items():
+        for ent in entradas:
+            r = dnsbl_revisar(ent)
+            if r is None:
+                continue
+            n += 1
+            h = hist.get(ent)
+            if not isinstance(h, dict):
+                h = {"dias": {}}
+            antes = int(h.get("n_listadas", 0))
+            h["router"] = rid
+            h["dias"] = h.get("dias") or {}
+            h["dias"][hoy] = r["n_listadas"]
+            lim = time.strftime("%Y-%m-%d", time.localtime(time.time() - DNSBL_DIAS * 86400))
+            h["dias"] = {k: v for k, v in h["dias"].items() if k >= lim}
+            h.update(r)
+            hist[ent] = h
+            if r["n_listadas"] and not antes:
+                nom = (router_por_id(rid) or {}).get("nombre") or rid
+                try:
+                    enviar_telegram(f"\u26d4 Lista negra [{_hostname()}]: {r['n_listadas']} "
+                                    f"direccion(es) de {ent} ({nom}) estan en listas de bloqueo. "
+                                    f"Panel -> Consultar IP.")
+                except Exception:
+                    pass
+                bitacora("PUBLICA-EN-LISTA-NEGRA", f"{ent} listadas={r['n_listadas']}", quien="auto")
+    with _PUB_LOCK:
+        try:
+            tmp = "%s.%d.tmp" % (DNSBL_HIST, os.getpid())
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(hist, f)
+            os.replace(tmp, DNSBL_HIST)
+        except OSError:
+            pass
+    return n
+
 def aidb_probar(key):
     """Valida una clave ANTES de guardarla. (True|False|None, mensaje)."""
     key = (key or "").strip()
@@ -6263,6 +6419,8 @@ def refrescador():
         if time.time() - ult_pub > 6 * 3600:   # cada ~6 h: reputacion de TUS IPs publicas
             try: vigilar_publicas()
             except Exception as _e: sys.stderr.write("vigilancia de publicas: %s\n" % _e)
+            try: vigilar_dnsbl()     # y las listas negras, que son las que de verdad banean
+            except Exception as _e: sys.stderr.write("vigilancia dnsbl: %s\n" % _e)
             ult_pub = time.time()
         nr = newest_report()
         # una regeneracion FORZADA se atiende como mucho cada REGEN_MIN_SECS; la marca no
@@ -8114,6 +8272,27 @@ condenar; el listado de una <b>red</b> no trae categorias, asi que para saber el
 consultar la direccion concreta; y si ningun CPE encaja, se dice, en vez de señalar a cualquiera.
 Los CPEs de <b>otros nodos</b> nunca se mezclan, aunque hagan lo mismo.</p>
 
+<h3>Listas negras (DNSBL): lo que de verdad te banea</h3>
+<p>Conviene no confundir dos cosas. <b>AbuseIPDB</b> es una base de <b>denuncias</b>: sirve para saber
+<b>que hace</b> una IP, pero casi nadie corta correo o trafico mirandola. Lo que rebota los correos y
+bloquea servicios son las <b>DNSBL</b>. Por eso el panel revisa cada publica declarada, cada 6 horas,
+en <b>Spamhaus ZEN, SpamCop, SORBS, Barracuda, PSBL y UCEPROTECT</b>. Son consultas DNS: <b>no gastan
+cuota de AbuseIPDB</b> y funcionan aunque no haya clave.</p>
+<p>Tres detalles que evitan sustos y falsas tranquilidades:</p>
+<ul>
+<li><b>La PBL de Spamhaus no es un problema.</b> Que un rango residencial este en la PBL es lo
+<b>correcto</b>: significa "por aqui no deberia salir correo directo". Se cuenta <b>aparte</b> y no se
+pinta en rojo. Solo importa si tu servidor de correo sale por esa IP.</li>
+<li><b>Una consulta rechazada no es "limpia".</b> Spamhaus responde <code>127.255.255.x</code> cuando
+no acepta la consulta, cosa que pasa si el servidor resuelve por un DNS publico (8.8.8.8 y
+similares). El panel lo dice en vez de darlo por bueno: para que el dato sea fiable, el sensor tiene
+que usar un <b>resolutor propio</b>.</li>
+<li>De una red se revisan hasta <b>256 direcciones</b>; si tiene mas, se avisa de cuantas se
+miraron.</li>
+</ul>
+<p>Cada publica guarda tambien la <b>serie por dia</b> de cuantas direcciones suyas estan listadas:
+es la prueba de que la limpieza funciona, y lo que se le enseña a quien pide el deslistado.</p>
+
 <h3>Cuota y privacidad</h3>
 <ul>
 <li>El plan gratuito da <b>1.000 consultas al dia</b> (se reinicia a medianoche <b>UTC</b>). El panel
@@ -8456,7 +8635,7 @@ def log_page(embed=False):
             "<input class=search id=lsearch placeholder='Buscar IP, usuario, accion...' oninput='lfiltrar()'></div>"
             + cuerpo + "</section></main>" + script + "</body></html>")
 
-def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False):
+def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver=""):
     """Consultar en AbuseIPDB que ataques se le denuncian a una IP publica.
 
     Dos usos, y el segundo es el que de verdad arregla cosas:
@@ -8485,6 +8664,14 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False):
         return (f"<span style='background:{c};color:#fff;font-weight:700;font-size:12px;"
                 f"padding:3px 10px;border-radius:20px'>{txt}</span>")
 
+    atras = ""
+    if res:
+        if volver:
+            atras = (f"<p style='margin:0 0 10px'><a href='?ips={esc(volver)}'>&larr; Volver a "
+                     f"{esc(volver)}</a></p>")
+        else:
+            atras = "<p style='margin:0 0 10px'><a href='/reputacion'>&larr; Volver</a></p>"
+
     tarjetas = []
     for ip, d, origen, err in (res or []):
         if d and d.get("tipo") == "red":
@@ -8506,7 +8693,8 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False):
                     f"<td class=num>{int(a[2]):,}</td>"
                     f"<td class=mono>{esc(str(a[3]))}</td>"
                     f"<td>{esc(str(a[4]))}</td>"
-                    f"<td><a href='?ips={esc(str(a[0]))}'>ver que hace</a></td></tr>"
+                    f"<td><a href='?ips={esc(str(a[0]))}&amp;volver={esc(d.get('red') or ip)}'>"
+                    "ver que hace</a></td></tr>"
                     for a in den[:120])
                 peor = sum(1 for a in den if int(a[1]) >= 75)
                 cuerpo = (
@@ -8583,6 +8771,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False):
     # --- Tus IPs publicas: el puente entre "me banean" y "quien lo causa" -----------
     decl = cargar_publicas()
     hist = _pub_hist()
+    dnsbl = _dnsbl_hist()
     rs = cargar_routers()
     multi = len(rs) > 1
     bloques = []
@@ -8632,16 +8821,60 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False):
                     det += ("<div class=hint style='margin-top:6px'>Consulta cada direccion "
                             "denunciada (abajo) para saber por que: el listado de una red no "
                             "trae las categorias.</div>")
+            # --- listas negras: esto es lo que de verdad hace que te bloqueen ---
+            bl = dnsbl.get(ent) or {}
+            bl_html = ""
+            if bl.get("ts"):
+                n_bl = int(bl.get("n_listadas", 0))
+                n_pbl = int(bl.get("n_pbl", 0))
+                if n_bl:
+                    peores = [(k, v) for k, v in (bl.get("ips") or {}).items()
+                              if not v.get("solo_pbl")][:8]
+                    det = "".join(
+                        f"<li><b class=mono>{esc(k)}</b> &mdash; {esc(', '.join(v.get('listas') or []))}</li>"
+                        for k, v in peores)
+                    bl_html = ("<div style='margin-top:8px;background:#fdecec;border:1px solid #f3c4c4;"
+                               "border-radius:8px;padding:10px 12px'>"
+                               f"<b style='color:#b52a2a'>En listas de bloqueo: {n_bl} direccion(es)</b>"
+                               " <span class=hint>esto si corta correo y servicios</span>"
+                               "<ul style='margin:6px 0 0;padding-left:18px;font-size:12.5px'>"
+                               + det + "</ul></div>")
+                else:
+                    bl_html = ("<div class=hint style='margin-top:8px;color:#1a7f37'>"
+                               "&#10003; Ninguna direccion en listas de bloqueo</div>")
+                if n_pbl:
+                    bl_html += ("<div class=hint style='margin-top:4px'>"
+                                f"{n_pbl} en la PBL de Spamhaus, que es <b>lo normal</b> en un rango "
+                                "residencial: dice que por ahi no deberia salir correo directo. "
+                                "Solo importa si tu servidor de correo sale por esa IP.</div>")
+                if bl.get("rechazadas"):
+                    bl_html += ("<div class=hint style='margin-top:4px;color:#a15c12'>"
+                                + esc(", ".join(bl["rechazadas"]))
+                                + " no acepta consultas desde el resolutor de este servidor "
+                                  "(pasa con los publicos tipo 8.8.8.8). Usa un resolutor propio "
+                                  "para que el dato sea fiable.</div>")
+                if bl.get("truncado"):
+                    bl_html += (f"<div class=hint style='margin-top:4px'>Se revisaron las primeras "
+                                f"{int(bl.get('n_ips', 0)):,} direcciones de la red.</div>")
+            else:
+                bl_html = ("<div class=hint style='margin-top:8px'>Listas de bloqueo: sin revisar "
+                           "todavia (se revisan solas cada 6 h).</div>")
+
             filas.append(
                 "<div style='padding:10px 0;border-top:1px solid #f0efec'>"
                 "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap'>"
                 f"<b class=mono>{esc(ent)}</b>{_scb(sc)}"
                 f"<a class=hint href='?ips={esc(ent)}'>revisar ahora</a>"
                 f"<span class=hint style='margin-left:auto'>revisada {esc(visto)}</span></div>"
-                + det + "</div>")
+                + bl_html + det + "</div>")
         if not entradas and not es_admin:
             continue
         editor = ""
+        if entradas:
+            editor += ("<form method=post action='/publicas/revisar' style='display:inline'>"
+                       f"<input type=hidden name=rid value='{esc(rid)}'>"
+                       "<button class=cancelbtn type=submit style='padding:5px 12px;font-size:13px'>"
+                       "Revisar ahora</button></form>")
         if es_admin:
             editor = ("<form method=post action='/publicas' style='margin-top:10px'>"
                       f"<input type=hidden name=rid value='{esc(rid)}'>"
@@ -8675,9 +8908,9 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False):
             "te esta atacando, y &mdash;sobre todo&mdash; pegar <b>tus propias IPs publicas de NAT</b> "
             "para ver por que te denuncian a vos: eso senala que hay un abonado infectado detras y que "
             "es lo que hay que corregir.</p>"
-            + banner + pub_html +
+            + banner + atras + pub_html +
             "<h2 style='font-size:17px;margin:18px 0 10px'>Consultar cualquier IP o red</h2>"
-            "<section class=card><form method=post action='/reputacion'>"
+            "<section class=card><form method=get action='/reputacion'>"
             "<div class=field><label>IPs o redes publicas (una por linea, o separadas por comas)</label>"
             f"<textarea name=ips placeholder='200.0.0.0/24&#10;una IP publica por linea'>{esc(texto)}</textarea>"
             f"<div class=hint>Acepta <b>redes en formato CIDR</b>: <code>200.0.0.0/24</code> revisa las "
@@ -9872,9 +10105,10 @@ class H(BaseHTTPRequestHandler):
             _qr = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             _t = (_qr.get("ips", [""])[0]).strip()
             if _t:
-                _res, _av = aidb_lote(_t)
+                _res, _av = aidb_lote(_t, refrescar=bool(_qr.get("refrescar")))
                 return self._html(reputacion_page(res=_res, texto=_t, msg=_av, ok=not _av,
-                                                  es_admin=self._admin()))
+                                                  es_admin=self._admin(),
+                                                  volver=(_qr.get("volver", [""])[0]).strip()))
             return self._html(reputacion_page(es_admin=self._admin()))
         if path == "/documentacion":
             _qd = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
@@ -10238,6 +10472,14 @@ class H(BaseHTTPRequestHandler):
             ok_l, mal = guardar_publicas_de(rid, q.get("entradas", [""])[0])
             bitacora("CONFIG-PUBLICAS", f"nodo={rid} {len(ok_l)} entrada(s)"
                                         + (f"; rechazadas: {', '.join(mal[:3])}" if mal else ""))
+            threading.Thread(target=vigilar_publicas, daemon=True).start()
+            return self._redirect("/reputacion")
+        if ruta == "/publicas/revisar":
+            if not self._operador():
+                return self._deny()
+            # en segundo plano: revisar un /24 en 6 listas son ~1.500 consultas DNS y la
+            # peticion se quedaria colgada
+            threading.Thread(target=vigilar_dnsbl, daemon=True).start()
             threading.Thread(target=vigilar_publicas, daemon=True).start()
             return self._redirect("/reputacion")
         if ruta == "/feeds/aidb":

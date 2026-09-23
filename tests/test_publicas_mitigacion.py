@@ -38,7 +38,10 @@ PIEZAS = ("PUBLICAS_CONF", "PUB_HIST", "PUB_HIST_DIAS", "PUB_UMBRAL_AVISO", "_PU
           "aidb_consultar", "_aidb_pedir_red", "_aidb_resumen_red", "aidb_consultar_red",
           "cargar_publicas", "guardar_publicas", "publicas_texto", "guardar_publicas_de",
           "_pub_hist", "_guardar_pub_hist", "_peor_de", "_cats_de", "vigilar_publicas",
-          "senal_de_categorias", "_cpes_del_nodo", "culpables_de")
+          "senal_de_categorias", "_cpes_del_nodo", "culpables_de",
+          "DNSBL", "DNSBL_HIST", "DNSBL_MAX_IPS", "DNSBL_HILOS", "DNSBL_DIAS",
+          "ZEN_COD", "_PBL", "_invertida", "dnsbl_una", "dnsbl_revisar",
+          "_dnsbl_hist", "vigilar_dnsbl")
 
 fallos = 0
 def check(d, c, e=""):
@@ -77,6 +80,8 @@ def entorno(tmp, red, enviados=()):
     avisos = []
     ns = {"json": json, "os": os, "re": re, "time": __import__("time"),
           "threading": __import__("threading"), "ipaddress": __import__("ipaddress"),
+          "socket": __import__("socket"),
+          "ThreadPoolExecutor": __import__("concurrent.futures", fromlist=["futures"]).ThreadPoolExecutor,
           "urllib": types.SimpleNamespace(request=red, error=urllib.error, parse=urllib.parse),
           "LOGDIR": tmp,
           "MK_SENT": "cuar", "MK_SENT_DNS": "dns",
@@ -95,6 +100,7 @@ def entorno(tmp, red, enviados=()):
     ns["FEEDS_CONF"] = os.path.join(tmp, "feeds.conf")
     ns["PUBLICAS_CONF"] = os.path.join(tmp, "publicas.json")
     ns["PUB_HIST"] = os.path.join(tmp, "pub-hist.json")
+    ns["DNSBL_HIST"] = os.path.join(tmp, "dnsbl.json")
     ns["AIDB_CACHE"] = os.path.join(tmp, "aidb.json")
     ns["AIDB_ESTADO"] = os.path.join(tmp, "estado.json")
     ns["_avisos"] = avisos
@@ -197,7 +203,60 @@ def main():
     ns["vigilar_publicas"]()
     check("no repite el aviso en cada vuelta", len(ns["_avisos"]) == antes, ns["_avisos"])
 
-    # --- 5) sin nada declarado no se gasta cuota ---
+    # --- 5) listas negras: lo que de verdad banea -------------------------------
+    # Se sustituye la resolucion DNS por una tabla, asi la prueba no depende de internet.
+    RESPUESTAS = {
+        # una IP con problema de verdad (equipo infectado) y ademas en SpamCop
+        "226.173.224.181.zen.spamhaus.org": ["127.0.0.4"],
+        "226.173.224.181.bl.spamcop.net": ["127.0.0.2"],
+        # otra SOLO en la PBL: en un rango residencial eso es lo NORMAL, no un problema
+        "229.173.224.181.zen.spamhaus.org": ["127.0.0.10"],
+        # y una lista que rechaza la consulta (resolutor publico): no es "limpia"
+        "226.173.224.181.dnsbl.sorbs.net": ["127.255.255.254"],
+        "229.173.224.181.dnsbl.sorbs.net": ["127.255.255.254"],
+    }
+
+    def _resolver(nombre):
+        if nombre in RESPUESTAS:
+            return (nombre, [], RESPUESTAS[nombre])
+        raise __import__("socket").gaierror(-2, "Name or service not known")
+
+    ns["socket"] = types.SimpleNamespace(gethostbyname_ex=_resolver,
+                                         gaierror=__import__("socket").gaierror)
+
+    est, cods = ns["dnsbl_una"]("181.224.173.226", "zen.spamhaus.org")
+    check("una IP listada se detecta", est == "listada" and cods == ["127.0.0.4"], (est, cods))
+    check("una IP limpia da NXDOMAIN y se lee como limpia",
+          ns["dnsbl_una"]("181.224.173.99", "zen.spamhaus.org")[0] == "limpia")
+    check("y una consulta RECHAZADA no se confunde con 'limpia'",
+          ns["dnsbl_una"]("181.224.173.226", "dnsbl.sorbs.net")[0] == "rechazada")
+
+    r = ns["dnsbl_revisar"]("181.224.173.224/29")
+    check("se revisa la red entera", r and r["n_ips"] >= 6, r and r["n_ips"])
+    check("cuenta como listada la que tiene problema real", r["n_listadas"] == 1, r["n_listadas"])
+    check("y la que solo esta en PBL se cuenta APARTE (es normal en residencial)",
+          r["n_pbl"] == 1, (r["n_pbl"], r["ips"]))
+    det = r["ips"].get("181.224.173.226", {})
+    check("se dice en que listas y por que",
+          any("equipo infectado" in x for x in det.get("listas") or [])
+          and "SpamCop" in (det.get("listas") or []), det)
+    check("la lista que rechazo se nombra, no se da por buena",
+          "SORBS" in (r.get("rechazadas") or []), r.get("rechazadas"))
+
+    # y el aviso solo la primera vez
+    ns["cargar_publicas"] and ns["guardar_publicas_de"]("r1", "181.224.173.224/29")
+    antes = len(ns["_avisos"])
+    ns["vigilar_dnsbl"]()
+    check("avisa cuando aparece en una lista negra",
+          len(ns["_avisos"]) > antes and any("Lista negra" in a for a in ns["_avisos"]), ns["_avisos"])
+    medio = len(ns["_avisos"])
+    ns["vigilar_dnsbl"]()
+    check("y no repite el aviso en cada vuelta", len(ns["_avisos"]) == medio, ns["_avisos"])
+    h = ns["_dnsbl_hist"]()
+    check("queda la serie por dia para ver si baja",
+          bool(h.get("181.224.173.224/29", {}).get("dias")), h)
+
+    # --- 6) sin nada declarado no se gasta cuota ---
     tmp3 = tempfile.mkdtemp(); red3 = Red(); ns3 = entorno(tmp3, red3)
     ns3["aidb_set"]("K")
     check("sin publicas declaradas no se llama a nadie",

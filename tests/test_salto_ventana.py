@@ -49,11 +49,17 @@ def piezas():
 
 
 def escribir_log(ruta, n, t0, paso=1.0, relleno=600):
-    """Un log tipo eve.json: n lineas ordenadas por tiempo, con relleno para que pese."""
+    """Un log tipo eve.json: n lineas ordenadas por tiempo, con relleno para que pese.
+
+    En UTC y diciendolo (+0000), no en hora local. Antes se formateaba con localtime y se
+    le pegaba "-0500" a mano: en una maquina en Ecuador coincidia, pero en el CI (UTC) las
+    marcas quedaban corridas 5 horas, todo parecia futuro y el salto no actuaba nunca.
+    Curiosamente la comprobacion de "no se pierde ningun evento" seguia pasando -leer de
+    mas nunca pierde nada-; la que lo delato fue la de eficiencia."""
     with open(ruta, "w", encoding="utf-8") as f:
         for i in range(n):
-            ts = time.strftime("%Y-%m-%dT%H:%M:%S.000000-0500",
-                               time.localtime(t0 + i * paso))
+            ts = time.strftime("%Y-%m-%dT%H:%M:%S.000000+0000",
+                               time.gmtime(t0 + i * paso))
             f.write('{"timestamp":"%s","n":%d,"x":"%s"}\n' % (ts, i, "z" * relleno))
     return ruta
 

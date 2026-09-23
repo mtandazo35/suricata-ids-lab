@@ -68,6 +68,7 @@ correr "enviar/quitar de cuarentena van por identidad (router, IP)" "$PY" tests/
 correr "AbuseIPDB: cuota, cache, privacidad y categorias" "$PY" tests/test_abuseipdb.py
 correr "denuncias a AbuseIPDB: apagadas por defecto y con frenos" "$PY" tests/test_abuseipdb_denuncia.py
 correr "documentacion: paginas, categorias, buscador y modal" "$PY" tests/test_documentacion.py
+correr "parse_ts con memoria: mismo resultado, mas barato" "$PY" tests/test_parse_ts.py
 correr "salto al inicio de la ventana sin perder eventos" "$PY" tests/test_salto_ventana.py
 correr "diagnostico del MikroTik: que le falta para cortar" "$PY" tests/test_diagnostico_mk.py
 correr "abuso saliente: contadores por dia y tendencia" "$PY" tests/test_abuso_saliente.py

@@ -24,7 +24,8 @@ _g = SRC.index("cat > /usr/local/bin/suricata-html-report <<'HREP'")
 GEN = SRC[_g:].split("\n", 1)[1].split("\nHREP\n", 1)[0]
 ARBOL = ast.parse(GEN)
 
-PIEZAS = ("opener", "_RE_TS_LINEA", "abrir_desde", "parse_ts", "TZ_EC")
+PIEZAS = ("opener", "_RE_TS_LINEA", "abrir_desde", "parse_ts", "_parse_ts_lento",
+          "_TS_CACHE", "_TS_CACHE_MAX", "TZ_EC")
 
 fallos = 0
 def check(d, c, e=""):

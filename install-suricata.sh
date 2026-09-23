@@ -1272,9 +1272,12 @@ def traducir(sig):
     limpio = re.sub(r"^(?:ET|GPL)\s+(?:[A-Z_]{3,}\s+)?", "", sig).strip() or sig
     return (limpio[:44] + "\u2026") if len(limpio) > 45 else limpio
 
-def parse_ts(s):
+_TS_CACHE = {}
+_TS_CACHE_MAX = 200000
+
+def _parse_ts_lento(s):
     # Parsea con el offset de la marca (eve.json trae -0500) para obtener el epoch absoluto.
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z"):
         try:
             return datetime.strptime(s, fmt).timestamp()
         except (ValueError, TypeError):
@@ -1283,6 +1286,28 @@ def parse_ts(s):
         return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=TZ_EC).timestamp()
     except Exception:
         return None
+
+def parse_ts(s):
+    """Epoch de una marca de eve.json, CON MEMORIA.
+
+    strptime es carisimo y en un espejo de ISP esto se llama millones de veces por
+    corrida: era el grueso de los 9 minutos de CPU que tardaba el generador. La clave del
+    cache es el SEGUNDO (fecha, hora y zona, sin los microsegundos), asi que miles de
+    lineas del mismo segundo colapsan en un unico strptime.
+
+    Se pierde la precision por debajo del segundo, y no la usa nadie: todo se compara
+    contra la ventana, se agrupa en barras de un minuto o mas, o se guarda como entero."""
+    if not s:
+        return None
+    # "2026-09-23T11:48:39.123456-0500" -> "2026-09-23T11:48:39" + "-0500"
+    clave = (s[:19] + s[26:]) if len(s) > 26 else s
+    v = _TS_CACHE.get(clave)
+    if v is not None:
+        return v
+    r = _parse_ts_lento(clave)
+    if r is not None and len(_TS_CACHE) < _TS_CACHE_MAX:
+        _TS_CACHE[clave] = r
+    return r
 
 by_dport = Counter()
 by_src = Counter()
@@ -7096,6 +7121,8 @@ def refrescador():
     ult_updchk = 0.0
     ult_sensor = 0.0
     ult_fast = 0.0
+    ult_dur = 0.0       # lo que tardo la ultima generacion (para el freno de abajo)
+    ult_fin = 0.0       # cuando termino
     ult_aidb = 0.0
     ult_pub = 0.0
     ult_forzado = 0.0   # ultima regeneracion pedida a mano/por cambios (ver REGEN_MIN_SECS)
@@ -7134,6 +7161,13 @@ def refrescador():
         # se pierde, solo se agrupa (un lote de cambios = una sola generacion)
         forzado = FORCE_REGEN and (time.time() - ult_forzado >= REGEN_MIN_SECS)
         stale = forzado or (nr is None) or (time.time() - os.path.getmtime(nr) >= REFRESH_SECS)
+        # FRENO: si una corrida tardo mas que el propio ciclo, esperar al menos lo que
+        # tardo antes de lanzar la siguiente. Sin esto, en una caja donde generar lleva
+        # 9 minutos y el ciclo son 5, se encadenan una tras otra y queda un nucleo al
+        # 100 % de forma permanente; el reporte no sale antes por eso, y la maquina que
+        # tiene que analizar el trafico se queda sin CPU. Como mucho, medio nucleo.
+        if stale and ult_dur > REFRESH_SECS and (time.time() - ult_fin) < ult_dur:
+            stale = False
         if stale:
             if forzado:
                 ult_forzado = time.time()
@@ -7151,10 +7185,18 @@ def refrescador():
             try:
                 # ventana del resumen en minutos (config VENTANA_MIN; por defecto 24h)
                 vmin = str(ventana_actual())
+                _t_gen = time.time()
                 subprocess.run(["nice", "-n", "15", GEN, vmin], timeout=600,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                ult_dur = time.time() - _t_gen
+                ult_fin = time.time()
+                if ult_dur > REFRESH_SECS:
+                    # que quede dicho: si tarda mas que el ciclo, el operador tiene que
+                    # saberlo (suele ser un eve.json/dns.json enorme)
+                    sys.stderr.write("generar el reporte tardo %d s (ciclo %d s): se espaciaran las corridas\n"
+                                     % (ult_dur, REFRESH_SECS))
             except Exception:
-                pass
+                ult_fin = time.time()
             try:
                 reconciliar_cuarentena()   # libera de la cuarentena a los que dejaron de atacar
             except Exception:

@@ -3546,7 +3546,121 @@ import socket as _socket, ssl as _ssl, hashlib as _hashlib
 MK_CONF = "/etc/suricata-mikrotik.conf"
 MK_SENT = "/var/log/suricata-cuarentena-enviados.json"       # IPs enviadas a la lista de cuarentena
 MK_SENT_DNS = "/var/log/suricata-dns-enviados.json"          # IPs enviadas a la lista de DNS sospechoso
+MK_SENT_GRAD = "/var/log/suricata-graduada-enviados.json"     # CPEs con corte PARCIAL
 MK_LOG  = "/var/log/suricata-cuarentena.log"                 # bitacora de acciones
+
+# Los puertos que se le cortan a un CPE en cuarentena graduada. Fuera queda todo lo que
+# el abonado usa de verdad (web, streaming, juegos, videollamadas): por eso no llama a
+# soporte, y por eso el corte aguanta en el tiempo en vez de revertirse en cuanto llama.
+GRAD_REGLAS = [
+    # a un CPE YA comprometido se le corta todo el correo, tambien el autenticado
+    ("tcp", "25,465,587", "correo saliente (spam)"),
+    ("tcp", "22,2222,23,2323", "SSH y Telnet (escaneo y fuerza bruta)"),
+    ("tcp", "445,139", "SMB (gusanos)"),
+    ("tcp", "3389,5900", "RDP y VNC (fuerza bruta)"),
+    ("tcp", "7547,37215", "TR-069 e IoT (botnets)"),
+]
+
+# --- Higiene de salida: reglas para TODOS los abonados -----------------------------
+# Distinto de la cuarentena graduada: esto no señala a un CPE, cambia la politica del nodo.
+# Por eso aqui el correo es SOLO el 25: cortar tambien el 587/465 romperia a los clientes
+# de correo legitimos, que usan envio autenticado.
+GRUPOS_SALIDA = [
+    ("correo", "Correo saliente sin autenticar", ["25"], "tcp",
+     "Es la causa numero uno de que un ISP acabe en Spamhaus. El estandar del sector es "
+     "cortar el 25 saliente y dejar el 587 y 465 (envio autenticado), que es lo que usan "
+     "los clientes de correo de verdad.",
+     "Tu servidor de correo tiene que quedar excluido."),
+    ("admin", "Administracion remota", ["22", "2222", "23", "2323", "3389", "5900"], "tcp",
+     "Escaneo y fuerza bruta contra SSH, Telnet y RDP de todo internet. Es lo que mas "
+     "denuncias genera despues del spam.",
+     "Si algun abonado administra servidores propios, excluilo antes."),
+    ("smb", "Compartir archivos de Windows", ["445", "139"], "tcp",
+     "No tiene ningun uso legitimo saliendo a internet: es como se propagan los gusanos.",
+     ""),
+    ("iot", "TR-069 e IoT", ["7547", "37215", "5555"], "tcp",
+     "Botnets tipo Mirai buscando routers y camaras ajenos.", ""),
+    ("bd", "Bases de datos ajenas", ["3306", "1433", "5432", "6379", "27017"], "tcp",
+     "Ataques contra bases de datos de terceros.", ""),
+]
+
+def _cpes_de_reporte(rid=None):
+    """CPEs del reporte actual con su desglose de puertos, opcionalmente de un nodo."""
+    try:
+        cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    vistos = {}
+    for k in ("top_riesgo", "candidatos", "dns_candidatos"):
+        for c in cq.get(k, []):
+            if rid is not None and (c.get("router") or "") != rid:
+                continue
+            clave = clave_cpe(c.get("ip", ""), c.get("router", ""))
+            if clave not in vistos or (c.get("puertos_top") and not vistos[clave].get("puertos_top")):
+                vistos[clave] = c
+    return list(vistos.values())
+
+def analisis_salida(rid=None):
+    """Cuanto abuso mataria cada regla de salida, con los datos REALES del sensor.
+
+    Devuelve (total_alertas, total_cpes, [grupos]). Cada grupo dice cuantas alertas y
+    cuantos CPEs cubre: sin esos dos numeros, proponer una regla es adivinar."""
+    cpes = _cpes_de_reporte(rid)
+    total = 0
+    for c in cpes:
+        total += sum(int(v) for v in (c.get("puertos_top") or {}).values())
+    grupos = []
+    for clave, titulo, puertos, proto, porque, cuidado in GRUPOS_SALIDA:
+        n = 0; quienes = set(); detalle = {}
+        for c in cpes:
+            suyo = 0
+            for pp, v in (c.get("puertos_top") or {}).items():
+                num = str(pp).split("/", 1)[0]
+                if num in puertos:
+                    suyo += int(v)
+                    detalle[num] = detalle.get(num, 0) + int(v)
+            if suyo:
+                n += suyo
+                quienes.add(clave_cpe(c.get("ip", ""), c.get("router", "")))
+        if not n:
+            continue
+        grupos.append({"clave": clave, "titulo": titulo, "proto": proto,
+                       "puertos": [p for p in puertos if p in detalle],
+                       "alertas": n, "cpes": len(quienes),
+                       "pct": (n * 100.0 / total) if total else 0.0,
+                       "porque": porque, "cuidado": cuidado, "detalle": detalle})
+    grupos.sort(key=lambda g: g["alertas"], reverse=True)
+    return total, len({clave_cpe(c.get("ip", ""), c.get("router", "")) for c in cpes}), grupos
+
+def regla_salida(grupo, redes=None, permitidos="suricata-salida-permitida"):
+    """La regla de MikroTik para un grupo, con TUS redes de abonado como origen."""
+    redes = redes or [str(r) for r in mis_redes()]
+    puertos = ",".join(grupo["puertos"])
+    out = []
+    for red in (redes or ["0.0.0.0/0"]):
+        out.append(f'add chain=forward src-address={red} src-address-list=!{permitidos} '
+                   f'protocol={grupo["proto"]} dst-port={puertos} action=drop '
+                   f'comment="Suricata salida: {grupo["titulo"]}"')
+    return "\n".join(out)
+
+def reglas_salida_texto(grupos, redes=None):
+    if not grupos:
+        return ""
+    cab = ["# Excepciones (servidor de correo propio, abonados con servidores, etc.):",
+           "/ip firewall address-list",
+           'add list=suricata-salida-permitida address=192.0.2.10 comment="ejemplo: cambialo"',
+           "",
+           "/ip firewall filter"]
+    return "\n".join(cab + [regla_salida(g, redes) for g in grupos])
+
+def grad_reglas_texto(lista):
+    """Las reglas que hay que pegar en el MikroTik. Sin ellas la address-list no corta
+    NADA: es el mismo fallo silencioso que tener la lista de cuarentena sin su drop."""
+    out = ["/ip firewall filter"]
+    for proto, puertos, por in GRAD_REGLAS:
+        out.append(f'add chain=forward src-address-list={lista} protocol={proto} '
+                   f'dst-port={puertos} action=drop comment="Suricata graduada: {por}"')
+    return "\n".join(out)
 
 def cargar_mk():
     # CERT_FP: huella SHA256 del certificado del router, fijada en la primera conexion
@@ -3562,11 +3676,12 @@ def cargar_mk_de(r):
     d = {"HOST": "", "PORT": "8728", "TLS": "0", "USER": "", "PASS": "",
          "LIST": "suricata-cuarentena", "TTL": "1h",
          "LIST_DNS": "suricata-dns-sospechoso", "TTL_DNS": "1d",
+         "LIST_GRAD": "suricata-graduada", "TTL_GRAD": "1d",
          "AUTO_MANTENER": "0", "ENABLED": "0", "CERT_FP": "",
          "POL_AUTO": "0", "POL_BAJO": "nada", "POL_MEDIO": "nada", "POL_ALTO": "nada"}
     d.update(_mk_globales())          # AUTO_MANTENER y POL_* son de toda la instalacion
     for k in ("HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL",
-              "LIST_DNS", "TTL_DNS", "CERT_FP", "ENABLED"):
+              "LIST_DNS", "TTL_DNS", "LIST_GRAD", "TTL_GRAD", "CERT_FP", "ENABLED"):
         if k in (r or {}):
             d[k] = (r or {})[k]
     d["ROUTER_ID"] = (r or {}).get("id", "")
@@ -3588,13 +3703,15 @@ def cargar_mk_de(r):
 ROUTERS_CONF = "/etc/suricata-routers.json"
 IFACE_BASE = "ids-mon"       # el primer router conserva el nombre de siempre
 CAMPOS_ROUTER = ("id", "nombre", "iface", "HOST", "PORT", "TLS", "USER", "PASS",
-                 "LIST", "TTL", "LIST_DNS", "TTL_DNS", "CERT_FP", "ENABLED")
+                 "LIST", "TTL", "LIST_DNS", "TTL_DNS", "LIST_GRAD", "TTL_GRAD",
+                 "CERT_FP", "ENABLED")
 
 def _router_vacio(idx=1):
     return {"id": "r%d" % idx, "nombre": "", "iface": IFACE_BASE if idx == 1 else "%s%d" % (IFACE_BASE, idx),
             "HOST": "", "PORT": "8728", "TLS": "0", "USER": "", "PASS": "",
             "LIST": "suricata-cuarentena", "TTL": "1h",
             "LIST_DNS": "suricata-dns-sospechoso", "TTL_DNS": "1d",
+            "LIST_GRAD": "suricata-graduada", "TTL_GRAD": "1d",
             "CERT_FP": "", "ENABLED": "0"}
 
 def _mk_globales():
@@ -3630,7 +3747,7 @@ def cargar_routers():
     g = _mk_globales()                      # migracion desde la configuracion de un solo router
     uno = _router_vacio(1)
     for k in ("HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL",
-              "LIST_DNS", "TTL_DNS", "CERT_FP", "ENABLED"):
+              "LIST_DNS", "TTL_DNS", "LIST_GRAD", "TTL_GRAD", "CERT_FP", "ENABLED"):
         if g.get(k, "") != "":
             uno[k] = g[k]
     uno["nombre"] = uno["HOST"] or "MikroTik"
@@ -4053,6 +4170,27 @@ def reconciliar_cuarentena():
             mk_log("AUTO-LIBERADO", ip_de(k), "auto", f"lista={lst} (dejo de atacar)" + _suf_nodo(k))
         if cambiado:
             guardar_enviados(env, sent_path)
+
+def mk_lista_en_uso(lista, router=None):
+    """True si alguna regla del firewall referencia esa address-list.
+
+    Una address-list sin regla que la use no bloquea NADA: el panel diria "enviado" y el
+    CPE seguiria atacando tan tranquilo. Es el fallo silencioso mas facil de cometer al
+    montar esto, asi que se comprueba y se avisa."""
+    d = cargar_mk_de(router) if router else cargar_mk()
+    s_ = mk_conectar(d)
+    try:
+        _mk_send(s_, ["/ip/firewall/filter/print", "=.proplist=src-address-list"])
+        ok, frases, err = _mk_reply(s_)
+        for f in frases:
+            if f and f[0] == "!re":
+                for a in f:
+                    if a.startswith("=src-address-list=") and a.split("=", 2)[2] == lista:
+                        return True
+        return False
+    finally:
+        try: s_.close()
+        except OSError: pass
 
 def mk_list_ips(lista, router=None):
     """Devuelve el conjunto de direcciones que estan AHORA en esa address-list del MikroTik."""
@@ -7968,6 +8106,42 @@ guarda 15 dias.</li>
 <li>La tendencia necesita <b>14 dias</b> de datos para poder comparar; antes de eso lo dice.</li>
 </ul>
 
+<h2>Reglas de salida: lo que baja los baneos</h2>
+<p>Al final de <b>Abuso saliente</b> el panel propone <b>reglas de firewall para el MikroTik</b>
+sacadas de lo que el sensor vio <b>de verdad</b>, no de una lista generica. Cada una dice
+<b>cuantas alertas corta</b>, <b>cuantos CPEs la provocan</b> y <b>que porcentaje</b> de tu abuso
+representa, ordenadas de mayor a menor.</p>
+<p>Esto es distinto de la cuarentena: no senala a un abonado, cambia la <b>politica del nodo</b> y
+actua sobre <b>todos</b> a la vez, sin esperar a detectar a nadie. Por eso es lo que mas rapido baja
+los baneos.</p>
+<ul>
+<li><b>Correo saliente.</b> Es la causa numero uno de acabar en Spamhaus. Ojo con un detalle que se
+equivoca a menudo: se corta el <b>25</b> y se <b>deja</b> el 587 y el 465, que son el envio
+<b>autenticado</b> que usan los clientes de correo legitimos. Cortar el 587 rompe a gente que no hizo
+nada. Tu servidor de correo va en la lista de excepciones.</li>
+<li><b>Administracion remota</b> (SSH, Telnet, RDP, VNC): un abonado domestico no necesita salir por
+ahi, y es lo que mas denuncias genera despues del spam.</li>
+<li><b>SMB</b> (445, 139), <b>TR-069 e IoT</b> y <b>bases de datos ajenas</b>: sin uso legitimo
+saliendo a internet.</li>
+</ul>
+<p>Solo aparecen los grupos con abuso <b>real</b> en tus datos, y dentro de cada uno solo los puertos
+que efectivamente se usaron. Las reglas salen con <b>tus</b> redes de abonado como origen y una
+address-list <code>suricata-salida-permitida</code> para las excepciones. <b>Revisa las excepciones
+antes de pegarlas</b>: afectan a todos.</p>
+
+<h2>Cuarentena graduada: cortar sin dejar sin internet</h2>
+<p>El corte total tiene un problema practico: el abonado llama a soporte, soporte lo desbloquea y el
+ataque vuelve. Ese ciclo es la razon habitual de que estos programas no bajen ningun numero.</p>
+<p>La <b>cuarentena graduada</b> mete al CPE en otra address-list
+(<code>suricata-graduada</code>) cuyas reglas cortan <b>solo los puertos de abuso</b>: correo,
+SSH/Telnet, SMB, RDP/VNC y TR-069. El abonado sigue navegando, viendo streaming y jugando, asi que
+<b>no llama</b>, y el corte aguanta en el tiempo. Aqui si se corta tambien el 587/465: ese equipo ya
+esta comprometido.</p>
+<p>Las reglas se pegan una vez y estan en <b>Ajustes &rarr; MikroTik</b>. Al enviar el primer CPE el
+panel <b>comprueba que exista alguna regla usando esa lista</b> y avisa si no: una address-list sin
+regla que la use no bloquea nada, y sin ese aviso el panel diria "enviado" mientras el CPE sigue
+atacando.</p>
+
 <h2>Reportes e informe diario</h2>
 <ul>
 <li>Reporte grafico a mano: <code>suricata-html-report</code> (queda en <code>/var/log/suricata/</code>).</li>
@@ -8907,30 +9081,41 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 + bl_html + det + "</div>")
         if not entradas and not es_admin:
             continue
-        editor = ""
-        if entradas:
-            editor += ("<form method=post action='/publicas/revisar' style='display:inline'>"
-                       f"<input type=hidden name=rid value='{esc(rid)}'>"
-                       "<button class=cancelbtn type=submit style='padding:5px 12px;font-size:13px'>"
-                       "Revisar ahora</button></form>")
+        # Las entradas, como fichas pequeñas con su x. Antes era un textarea enorme por
+        # nodo y encima otro para consultar: dos cajones iguales haciendo cosas distintas.
+        chips = ""
+        if es_admin and entradas:
+            chips = "".join(
+                "<span class=pchip><span class=mono>" + esc(e) + "</span>"
+                "<form method=post action='/publicas/quitar'>"
+                f"<input type=hidden name=rid value='{esc(rid)}'>"
+                f"<input type=hidden name=entrada value='{esc(e)}'>"
+                "<button title='Quitar de la lista'>&times;</button></form></span>"
+                for e in entradas)
+        acciones = []
         if es_admin:
-            editor = ("<form method=post action='/publicas' style='margin-top:10px'>"
-                      f"<input type=hidden name=rid value='{esc(rid)}'>"
-                      "<div class=field><label style='font-size:12.5px'>IPs y redes publicas de este nodo "
-                      "(una por linea; acepta CIDR)</label>"
-                      f"<textarea name=entradas rows=3>{esc(publicas_texto(rid))}</textarea></div>"
-                      "<button class=primary type=submit style='padding:6px 14px;font-size:13px'>"
-                      "Guardar</button></form>")
+            acciones.append(
+                "<form method=post action='/publicas/agregar' class=padd>"
+                f"<input type=hidden name=rid value='{esc(rid)}'>"
+                "<input name=entrada size=20 placeholder='IP o red (CIDR)' autocomplete=off>"
+                "<button class=primary type=submit>Agregar</button></form>")
+        if entradas:
+            acciones.append("<form method=post action='/publicas/revisar'>"
+                            f"<input type=hidden name=rid value='{esc(rid)}'>"
+                            "<button class=cancelbtn type=submit>Revisar ahora</button></form>")
+        editor = ("<div class=pedit>" + chips + "".join(acciones) + "</div>") if (chips or acciones) else ""
         bloques.append(
             "<section class=card style='margin:0 0 12px'>"
-            + (f"<h2 style='font-size:15px;margin:0'>Nodo {esc(nom)}</h2>" if multi
-               else "<h2 style='font-size:15px;margin:0'>Tus IPs publicas</h2>")
+            + (f"<h3 style='font-size:14px;margin:0 0 4px;color:#52514e'>Nodo {esc(nom)}</h3>"
+               if multi else "")
             + ("".join(filas) if filas else
                "<p class=hint style='margin:8px 0 0'>Todavia no declaraste ninguna. "
                "Ponlas aqui: el sensor no las ve (el espejo es pre-NAT) y sin ellas no se "
                "puede ligar un baneo con el abonado que lo provoca.</p>")
             + editor + "</section>")
-    pub_html = ("<h2 style='font-size:17px;margin:4px 0 10px'>Tus IPs publicas</h2>"
+    pub_html = ("<h2 style='font-size:17px;margin:18px 0 10px'>Tus IPs publicas</h2>"
+                "<p class=sub2 style='margin:-4px 0 10px'>El sensor no las ve (el espejo es "
+                "pre-NAT): declaralas aqui y el panel vigila su reputacion y sus listas negras.</p>"
                 + "".join(bloques)) if bloques else ""
 
     css = BASE_CSS + (
@@ -8941,33 +9126,43 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
         ".volver a{display:inline-flex;align-items:center;background:#eef4fd;color:#1c5cab;"
         "border:1px solid #cfe0f6;border-radius:9px;padding:7px 14px;text-decoration:none;"
         "font:600 13px system-ui}"
-        ".volver a:hover{background:#dceafb;border-color:#a7c0ea}")
+        ".volver a:hover{background:#dceafb;border-color:#a7c0ea}"
+        ".qbar input[name=ips]{padding:8px 11px;border:1px solid #d9d7d2;border-radius:9px;"
+        "font:13px ui-monospace,Consolas,monospace;min-width:230px}"
+        ".pedit{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}"
+        ".pchip{display:inline-flex;align-items:center;gap:6px;background:#f1f1ef;"
+        "border:1px solid #e0dfda;border-radius:20px;padding:3px 6px 3px 11px;font-size:12.5px}"
+        ".pchip form{display:inline;margin:0}"
+        ".pchip button{border:0;background:#e0dfda;color:#52514e;border-radius:50%;width:18px;"
+        "height:18px;line-height:1;cursor:pointer;font-size:13px;padding:0}"
+        ".pchip button:hover{background:#e34948;color:#fff}"
+        ".pedit form{display:inline;margin:0}"
+        ".pedit .padd input{padding:6px 10px;border:1px solid #d9d7d2;border-radius:8px;"
+        "font:12.5px ui-monospace,Consolas,monospace}"
+        ".pedit .padd{display:inline-flex;gap:6px;align-items:center}")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>"
             f"<style>{css}</style></head><body>" + nav("/reputacion") +
-            "<main><h1>Consultar IP o red</h1>"
-            "<p class=sub2>Pega una o varias <b>IPs o redes publicas</b> y AbuseIPDB te dice <b>que ataques se les "
-            "denuncian</b>, no solo si son malas. Sirve para dos cosas: mirar a que se dedica una IP que "
-            "te esta atacando, y &mdash;sobre todo&mdash; pegar <b>tus propias IPs publicas de NAT</b> "
-            "para ver por que te denuncian a vos: eso senala que hay un abonado infectado detras y que "
-            "es lo que hay que corregir.</p>"
+            "<main><h1>Reputacion de IPs</h1>"
+            "<p class=sub2>Que ataques se le denuncian a una IP publica, en que listas de bloqueo esta, "
+            "y &mdash;si es tuya&mdash; que abonado la esta ensuciando.</p>"
             + banner + atras
             + ("".join(tarjetas) if tarjetas else "")
             + ("" if res else pub_html)
             + "<h2 style='font-size:17px;margin:18px 0 10px'>Consultar cualquier IP o red</h2>"
             "<section class=card><form method=get action='/reputacion'>"
-            "<div class=field><label>IPs o redes publicas (una por linea, o separadas por comas)</label>"
-            f"<textarea name=ips placeholder='200.0.0.0/24&#10;una IP publica por linea'>{esc(texto)}</textarea>"
-            f"<div class=hint>Acepta <b>redes en formato CIDR</b>: <code>200.0.0.0/24</code> revisa las "
-            "256 direcciones con <b>una sola</b> peticion, que es lo que conviene para tu rango de NAT "
-            f"(el plan gratuito llega a /24). Hasta {AIDB_MAX_LOTE} entradas por consulta. Las privadas "
-            "(las de tus CPEs) no se envian nunca. Lo ya consultado sale de la cache y no gasta cuota.</div></div>"
-            "<div class=qbar><button class=primary type=submit>Consultar</button>"
+            "<div class=qbar>"
+            f"<input name=ips size=30 value='{esc(texto)}' autocomplete=off "
+            "placeholder='IP o red: 200.0.0.0/24'>"
+            "<button class=primary type=submit>Consultar</button>"
             "<label class=chk style='font-size:13px'><input type=checkbox name=refrescar> "
-            "Forzar consulta nueva (ignora la cache)</label>"
+            "Forzar consulta nueva</label>"
             f"<span class=hint style='margin-left:auto'>Hoy quedan <b>{quedan:,}</b> de {AIDB_CUOTA:,} "
-            f"consultas por IP y <b>{quedan_red:,}</b> de {AIDB_CUOTA_BLOQUE:,} por red</span>"
-            "</div></form></section>"
+            f"por IP y <b>{quedan_red:,}</b> de {AIDB_CUOTA_BLOQUE:,} por red</span></div>"
+            f"<div class=hint style='margin-top:8px'>Una red en CIDR revisa todas sus direcciones con "
+            "<b>una sola</b> peticion (el plan gratuito llega a /24). Se pueden separar varias por "
+            f"comas, hasta {AIDB_MAX_LOTE}. Las privadas nunca se envian.</div>"
+            "</form></section>"
             + (pub_html if res else "")
             + "</main></body></html>")
 
@@ -9169,6 +9364,46 @@ def historico_page(dias_n=30):
                 f"<table><thead><tr><th>{'Categoria' if campo == 'cats' else 'Puerto'}</th>"
                 f"<th class=num>Alertas</th><th class=num>%</th></tr></thead><tbody>{filas}</tbody></table></section>")
 
+    # --- Reglas de salida: de los eventos que ve el sensor a lo que hay que pegar ----
+    rs = cargar_routers()
+    multi = len(rs) > 1
+    secc_reglas = []
+    for r in (rs if multi else [None]):
+        rid = r.get("id", "") if r else None
+        nom = (r.get("nombre") or r.get("HOST") or rid) if r else ""
+        tot, n_cpes, grupos = analisis_salida(rid)
+        if not grupos:
+            continue
+        tarjetas_g = []
+        for g in grupos:
+            pts = ", ".join(g["puertos"])
+            tarjetas_g.append(
+                "<div class=regla>"
+                f"<div class=rh><b>{esc(g['titulo'])}</b>"
+                f"<span class=rp>{esc(pts)}/{esc(g['proto'])}</span>"
+                f"<span class=rpct>{g['pct']:.0f} %</span></div>"
+                f"<div class=rn><b>{g['alertas']:,}</b> alertas de <b>{g['cpes']:,}</b> CPE(s). "
+                + esc(g["porque"]) + "</div>"
+                + (f"<div class=rcuidado>&#9888; {esc(g['cuidado'])}</div>" if g["cuidado"] else "")
+                + "</div>")
+        secc_reglas.append(
+            "<section class=card>"
+            + (f"<h2 style='font-size:15px;margin:0 0 4px'>Reglas de salida &mdash; {esc(nom)}</h2>"
+               if multi else "<h2 style='font-size:15px;margin:0 0 4px'>Reglas de salida recomendadas</h2>")
+            + f"<p class=sub2 style='margin:0 0 10px'>Salidas de <b>{n_cpes:,}</b> CPEs con actividad. "
+              "Cada regla dice <b>cuanto de tu abuso corta</b>, medido con lo que el sensor vio de "
+              "verdad, no con una lista generica. Es lo que baja los baneos, porque actua sobre "
+              "<b>todos</b> los abonados a la vez y no espera a detectar a nadie.</p>"
+            + "".join(tarjetas_g)
+            + "<details style='margin-top:10px'><summary style='cursor:pointer;font-weight:600;"
+              "font-size:13px'>Reglas para pegar en el MikroTik</summary>"
+              "<p class=hint style='margin:6px 0'>Revisa las excepciones ANTES de pegarlas: "
+              "esto afecta a todos tus abonados, no a uno.</p>"
+              f"<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;"
+              f"padding:10px;overflow-x:auto;font-size:12px'>{esc(reglas_salida_texto(grupos))}</pre>"
+              "</details></section>")
+    reglas_html = "".join(secc_reglas)
+
     sel = "".join(
         f"<a href='?d={n}' class='{'on' if n == dias_n else ''}'>{n} dias</a>"
         for n in (7, 30, 90, 365))
@@ -9214,6 +9449,13 @@ def historico_page(dias_n=30):
             "text-decoration:none;color:#52514e;background:#fff}"
             ".rango a.on{background:#2a78d6;border-color:#2a78d6;color:#fff;font-weight:600}"
             ".doscol{display:flex;gap:14px;flex-wrap:wrap;margin:16px 0}"
+            ".regla{border-top:1px solid #f0efec;padding:10px 0}"
+            ".regla .rh{display:flex;align-items:center;gap:10px;flex-wrap:wrap}"
+            ".regla .rp{font:12px ui-monospace,Consolas,monospace;background:#f1f1ef;"
+            "border:1px solid #e0dfda;border-radius:5px;padding:1px 7px}"
+            ".regla .rpct{margin-left:auto;font-weight:800;color:#2a78d6;font-size:15px}"
+            ".regla .rn{font-size:13px;color:#52514e;margin-top:4px}"
+            ".regla .rcuidado{font-size:12.5px;color:#a15c12;margin-top:4px}"
             ".pager{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}"
             ".pager button{font:13px system-ui;padding:6px 12px;border:1px solid #d7d6d2;background:#fff;border-radius:8px;cursor:pointer}"
             ".pager button:hover:not(:disabled){background:#eef4fd;border-color:#2a78d6}"
@@ -9231,6 +9473,7 @@ def historico_page(dias_n=30):
               "Las barras grises son dias con datos incompletos (el sensor estuvo parado).</p>"
             + _grafico(serie, esc) + "</section>"
             + f"<div class=doscol>{_tabla('cats', 'Por que atacan')}{_tabla('puertos', 'Por que puerto salen')}</div>"
+            + reglas_html
             + "<h2 style='font-size:16px;margin:22px 0 4px'>Reportes guardados</h2>"
             "<p style='color:#8a8a86;font-size:13px;margin:0 0 8px'>Instantaneas de los ultimos 3 dias "
             "(una por hora, mas la mas reciente). La tendencia de arriba NO depende de ellas.</p>"
@@ -10519,6 +10762,30 @@ class H(BaseHTTPRequestHandler):
                                         + (f"; rechazadas: {', '.join(mal[:3])}" if mal else ""))
             threading.Thread(target=vigilar_publicas, daemon=True).start()
             return self._redirect("/reputacion")
+        if ruta == "/publicas/agregar":
+            if not self._admin():
+                return self._deny()
+            rid = (q.get("rid", [""])[0]).strip()
+            if not router_por_id(rid):
+                return self._redirect("/reputacion")
+            actuales = cargar_publicas().get(rid, [])
+            ok_l, mal = guardar_publicas_de(
+                rid, "\n".join(actuales + [q.get("entrada", [""])[0]]))
+            bitacora("CONFIG-PUBLICAS", f"nodo={rid} +1 ({len(ok_l)} en total)"
+                                        + (f"; rechazada: {mal[0]}" if mal else ""))
+            if not mal:
+                threading.Thread(target=vigilar_dnsbl, daemon=True).start()
+            return self._redirect("/reputacion" + ("?msg=" + _up.quote("No se agrego: " + mal[0])
+                                                   if mal else ""))
+        if ruta == "/publicas/quitar":
+            if not self._admin():
+                return self._deny()
+            rid = (q.get("rid", [""])[0]).strip()
+            fuera = (q.get("entrada", [""])[0]).strip()
+            quedan_e = [e for e in cargar_publicas().get(rid, []) if e != fuera]
+            guardar_publicas_de(rid, "\n".join(quedan_e))
+            bitacora("CONFIG-PUBLICAS", f"nodo={rid} -{fuera}")
+            return self._redirect("/reputacion")
         if ruta == "/publicas/revisar":
             if not self._operador():
                 return self._deny()
@@ -10609,6 +10876,78 @@ class H(BaseHTTPRequestHandler):
                 return _fin(True, f"{ip} en la lista {m.get('LIST')}{nota}")
             mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), err)
             return _fin(False, f"No se pudo enviar {ip}: {err}")
+        if ruta == "/cuarentena/graduada":
+            # Corte PARCIAL: se le cortan los puertos de abuso y se le deja el resto. El
+            # abonado sigue navegando, no llama a soporte, y por eso el corte aguanta.
+            if not self._operador():
+                return self._deny()
+            ajax_g = bool(q.get("ajax"))
+            def _fin_g(okr, texto):
+                if ajax_g:
+                    b = (("OK " if okr else "ERR: ") + texto).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", str(len(b)))
+                    self.end_headers(); self.wfile.write(b)
+                    return
+                return self._redirect("/cuarentena?msg=" + _up.quote(texto))
+            clave = (q.get("ip", [""])[0]).strip()
+            ip = ip_de(clave)
+            score = (q.get("score", [""])[0]).strip()[:8]
+            try:
+                ipaddress.ip_address(ip)
+            except Exception:
+                return _fin_g(False, "IP invalida")
+            if not es_mi_cpe(ip):
+                return _fin_g(False, f"{ip} no es de tus redes")
+            if nunca_bloquear(ip):
+                return _fin_g(False, f"{ip} esta en la lista 'Nunca bloquear'")
+            r = router_de_clave(clave); m = cargar_mk_de(r)
+            if not mk_listo(m):
+                return _fin_g(False, "Configura y HABILITA el MikroTik en Ajustes primero")
+            lst = m.get("LIST_GRAD", "suricata-graduada")
+            try:
+                ok, err = mk_add(ip, comment=f"suricata graduada riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}",
+                                 lista=lst, ttl=_ttl_efectivo(m, "TTL_GRAD"), router=r)
+            except Exception as ex:
+                ok, err = False, str(ex)
+            if not ok:
+                mk_log("ERROR-GRADUADA", ip, getattr(CTX, "user", "?"), err)
+                return _fin_g(False, f"No se pudo enviar {ip}: {err}")
+            env = cargar_enviados(MK_SENT_GRAD)
+            env[clave] = {"cuando": int(time.time()), "score": score,
+                          "por": getattr(CTX, "user", "?"), "router": r.get("id", ""),
+                          "grad": True, "motivo": _motivo_bloqueo(clave)}
+            guardar_enviados(env, MK_SENT_GRAD)
+            mk_log("GRADUADA", ip, getattr(CTX, "user", "?"), f"lista={lst}" + _suf_nodo(clave))
+            aviso = ""
+            try:
+                if not mk_lista_en_uso(lst, router=r):
+                    aviso = (f" ATENCION: ninguna regla del firewall usa '{lst}', asi que "
+                             f"ahora mismo no corta nada. Pegalas desde Ajustes -> MikroTik.")
+            except Exception:
+                pass
+            return _fin_g(True, f"{ip} con corte parcial en {lst}{aviso}")
+        if ruta == "/cuarentena/graduada/quitar":
+            if not self._operador():
+                return self._deny()
+            clave = (q.get("ip", [""])[0]).strip()
+            ip = ip_de(clave); rt = router_de_clave(clave)
+            try:
+                ipaddress.ip_address(ip)
+            except Exception:
+                return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+            lst = cargar_mk_de(rt).get("LIST_GRAD", "suricata-graduada")
+            try:
+                ok, err = mk_remove(ip, lista=lst, router=rt)
+            except Exception as ex:
+                ok, err = False, str(ex)
+            if ok:
+                quitar_enviados([clave], MK_SENT_GRAD)
+            mk_log("GRADUADA-QUITADA" if ok else "ERROR-QUITAR", ip,
+                   getattr(CTX, "user", "?"), f"lista={lst} {err}" + _suf_nodo(clave))
+            return self._redirect("/cuarentena?msg=" + _up.quote(
+                f"{ip}: corte parcial retirado" if ok else f"No se pudo quitar {ip}: {err}"))
         if ruta == "/cuarentena/enviar-todos":
             if not self._operador():
                 return self._deny()

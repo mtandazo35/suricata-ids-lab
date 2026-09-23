@@ -91,9 +91,14 @@ def main():
     tmp = tempfile.mkdtemp()
     d = piezas(DASH, ("ACCIONES_FILE", "ACCIONES_DIAS", "_ACC_LOCK", "cargar_acciones",
                       "contar_accion", "METRICAS_FILE", "cargar_metricas", "_serie",
-                      "_media", "_grafico", "historico_page"),
+                      "_media", "_grafico", "historico_page",
+                      "GRUPOS_SALIDA", "_cpes_de_reporte", "analisis_salida",
+                      "regla_salida", "reglas_salida_texto"),
                extra={"BASE_CSS": "", "nav": lambda a="": "<!--nav-->",
-                      "wrap": lambda b, refresh=True, active="": b, "LOGDIR": tmp})
+                      "wrap": lambda b, refresh=True, active="": b, "LOGDIR": tmp,
+                      "cargar_routers": lambda: [{"id": "", "nombre": "MikroTik"}],
+                      "mis_redes": lambda: ["10.0.0.0/8"],
+                      "clave_cpe": lambda ip, rid: (rid + "|" + ip) if rid else ip})
     d["ACCIONES_FILE"] = os.path.join(tmp, "acciones.json")
     d["METRICAS_FILE"] = os.path.join(tmp, "metricas.json")
 
@@ -134,6 +139,45 @@ def main():
     ph = d["historico_page"](7)
     check("un dia con datos incompletos no se pinta como bueno",
           "#c8ccd1" in ph and "sensor estuvo parado" in ph)
+
+    # ---------- reglas de salida a partir de los eventos reales ----------
+    # 3 CPEs mandando spam, 1 escaneando SSH y 1 haciendo solo web (que NO debe generar regla)
+    json.dump({"top_riesgo": [
+        {"ip": "10.0.0.1", "router": "", "puertos_top": {"25/tcp": 4000}},
+        {"ip": "10.0.0.2", "router": "", "puertos_top": {"25/tcp": 3000, "443/tcp": 50}},
+        {"ip": "10.0.0.3", "router": "", "puertos_top": {"25/tcp": 1000}},
+        {"ip": "10.0.0.4", "router": "", "puertos_top": {"22/tcp": 1500, "23/tcp": 500}},
+        {"ip": "10.0.0.5", "router": "", "puertos_top": {"443/tcp": 9000}},
+    ], "candidatos": [], "dns_candidatos": []},
+        open(os.path.join(tmp, "cuarentena.json"), "w", encoding="utf-8"))
+
+    tot, n_cpes, grupos = d["analisis_salida"](None)
+    check("se miran todos los CPEs con actividad", n_cpes == 5, n_cpes)
+    porclave = {g["clave"]: g for g in grupos}
+    check("se detecta el correo saliente", "correo" in porclave, list(porclave))
+    check("con sus alertas sumadas", porclave["correo"]["alertas"] == 8000, porclave.get("correo"))
+    check("y cuantos CPEs lo hacen", porclave["correo"]["cpes"] == 3, porclave.get("correo"))
+    check("dice que porcentaje del abuso corta",
+          40 < porclave["correo"]["pct"] < 45, porclave["correo"]["pct"])
+    check("la administracion remota sale aparte", porclave["admin"]["alertas"] == 2000, porclave.get("admin"))
+    check("lo primero que se propone es lo que mas corta", grupos[0]["clave"] == "correo",
+          [g["clave"] for g in grupos])
+    check("el trafico web normal NO genera ninguna regla",
+          all("443" not in g["puertos"] for g in grupos), [g["puertos"] for g in grupos])
+    check("y solo se nombran los puertos con abuso de VERDAD",
+          porclave["admin"]["puertos"] == ["22", "23"], porclave["admin"]["puertos"])
+
+    txt = d["reglas_salida_texto"](grupos)
+    check("la regla sale con TUS redes de abonado", "src-address=10.0.0.0/8" in txt, txt[:200])
+    check("y con una lista de excepciones", "src-address-list=!suricata-salida-permitida" in txt)
+    check("el correo se corta SOLO en el 25: cortar el 587 rompe a los clientes legitimos",
+          "dst-port=25 " in txt and "587" not in txt, txt)
+
+    pag_r = d["historico_page"](30)
+    check("las reglas se ven en Abuso saliente", "Reglas de salida" in pag_r)
+    check("con el porcentaje que corta cada una", "rpct" in pag_r)
+    check("y el aviso de excluir el servidor de correo",
+          "servidor de correo" in pag_r, "")
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

@@ -303,6 +303,20 @@ def main():
     check("y sin consulta no se pinta ninguna vuelta",
           "class=volver" not in ns["reputacion_page"]())
 
+    # --- interfaz: ni cajones enormes ni titulos repetidos ---
+    ns["cargar_routers"] = lambda: [{"id": "r1", "nombre": "MikroTik"}]
+    ns["guardar_publicas_de"]("r1", "200.0.0.0/24")
+    adm = ns["reputacion_page"](es_admin=True)
+    check("las IPs declaradas se ven como fichas, no en un textarea",
+          "pchip" in adm and "<textarea" not in adm, "textarea=%s" % ("<textarea" in adm))
+    check("se agregan de una en una, en un campo pequeño",
+          "action='/publicas/agregar'" in adm and "size=20" in adm)
+    check("y cada ficha se puede quitar", "action='/publicas/quitar'" in adm)
+    check("el titulo 'Tus IPs publicas' no sale dos veces",
+          adm.count("Tus IPs publicas") == 1, adm.count("Tus IPs publicas"))
+    check("la consulta tambien es un campo de una linea",
+          "name=ips size=30" in adm, "")
+
     # --- 12) una clave rechazada no se confunde con 'sin red' ---
     tmp2 = tempfile.mkdtemp(); red2 = Red(); ns2 = entorno(tmp2, red2)
     ns2["aidb_set"]("MALA")

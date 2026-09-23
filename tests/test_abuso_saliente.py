@@ -95,6 +95,7 @@ def main():
                       "GRUPOS_SALIDA", "_cpes_de_reporte", "analisis_salida",
                       "regla_salida", "reglas_salida_texto",
                       "GRUPOS_CONDUCTA", "analisis_conducta", "reglas_conducta_texto",
+                      "GRUPOS_CONTROL", "analisis_control", "reglas_p2p_texto",
                       "ENTRANTES_FILE", "BL_LISTA", "BL_MIN_ALERTAS", "BL_MIN_DESTINOS",
                       "BL_TOPE", "_REP_CACHE", "_REP_MAX", "rep_fuente", "cargar_entrantes",
                       "blocklist_borde", "blocklist_rsc", "blocklist_reglas"),
@@ -106,7 +107,8 @@ def main():
                       "nunca_bloquear": lambda ip: False,
                       "FEEDS_META": os.path.join(tmp, "reputation.meta"),
                       "mis_redes": lambda: ["10.0.0.0/8"],
-                      "clave_cpe": lambda ip, rid: (rid + "|" + ip) if rid else ip})
+                      "clave_cpe": lambda ip, rid: (rid + "|" + ip) if rid else ip,
+                      "ip_de": lambda k: k.split("|", 1)[1] if "|" in k else k})
     d["ACCIONES_FILE"] = os.path.join(tmp, "acciones.json")
     d["METRICAS_FILE"] = os.path.join(tmp, "metricas.json")
     d["ENTRANTES_FILE"] = os.path.join(tmp, "entrantes.json")
@@ -248,6 +250,46 @@ def main():
     check("con el porcentaje que corta cada una", "rpct" in pag_r)
     check("y el aviso de excluir el servidor de correo",
           "servidor de correo" in pag_r, "")
+
+    # ---------- P2P: se ve aparte, no cuenta como abuso ----------
+    json.dump({"top_riesgo": [
+        {"ip": "10.0.0.7", "router": "", "riesgo": 20,
+         "puertos_top": {"51413/tcp": 900}, "cats_top": {"BitTorrent / P2P": 900}},
+        {"ip": "10.0.0.8", "router": "", "riesgo": 15,
+         "puertos_top": {"6881/udp": 300}, "cats_top": {"BitTorrent / P2P": 300}},
+        {"ip": "10.0.0.9", "router": "", "riesgo": 70,
+         "puertos_top": {"22/tcp": 500}, "cats_top": {"Escaneo SSH": 500}},
+    ], "candidatos": [], "dns_candidatos": []},
+        open(os.path.join(tmp, "cuarentena.json"), "w", encoding="utf-8"))
+
+    ctl = d["analisis_control"](None)
+    check("el P2P se detecta y se lista aparte", len(ctl) == 1 and ctl[0]["clave"] == "p2p", ctl)
+    check("con el total de alertas", ctl[0]["alertas"] == 1200, ctl[0]["alertas"])
+    check("y QUIEN lo hace, que es lo que se pidio",
+          [ip for ip, _n, _r in ctl[0]["top"]] == ["10.0.0.7", "10.0.0.8"], ctl[0]["top"])
+    check("el que escanea NO aparece como P2P",
+          all(ip != "10.0.0.9" for ip, _n, _r in ctl[0]["top"]), ctl[0]["top"])
+
+    # y sigue sin contar como abuso: el escaneo si, el P2P no
+    cond = {g["clave"]: g for g in d["analisis_conducta"](None)}
+    check("el escaneo sigue contando como conducta abusiva", "escaneo" in cond, list(cond))
+
+    p2p = d["reglas_p2p_texto"](ctl[0]["puertos"])
+    check("las reglas cubren los puertos clasicos de BitTorrent",
+          "6881" in p2p and "51413" in p2p, p2p[:150])
+    check("TCP y UDP, porque el DHT va por UDP",
+          "protocol=tcp" in p2p and "protocol=udp" in p2p)
+    check("y el tope de conexiones, que es lo que de verdad le duele",
+          "connection-limit=" in p2p, p2p)
+    check("se dice que con cifrado y puerto aleatorio se escapa",
+          "cifrado" in p2p and "aleatorio" in p2p, "")
+    check("y que si el problema es la banda, mejor encolar que cortar",
+          "queue" in p2p, "")
+
+    pag_p2p = d["historico_page"](30)
+    check("el P2P se ve en la pagina con sus CPEs", "BitTorrent y P2P" in pag_p2p)
+    check("marcado como que no cuenta como abuso", "no cuenta como abuso" in pag_p2p)
+    check("y el total no abusivo sale en la cabecera", "no abusivo" in pag_p2p)
 
     # ---------- bloqueo en el borde: cortar a los que nos atacan ----------
     check("sin datos de entrantes no se propone bloquear a nadie",

@@ -3721,6 +3721,69 @@ def reglas_conducta_texto(clave, redes=None, permitidos="suricata-salida-permiti
         'comment="Suricata: cortar la fuerza bruta saliente"',
     ])
 
+# --- Trafico que NO es abuso pero igual se quiere controlar ------------------------
+# El P2P no hace que te baneen una IP: por eso no cuenta como abuso saliente. Pero se
+# come la banda y suele ser lo que mas alertas genera, asi que hay que poder VERLO y
+# decidir aparte.
+GRUPOS_CONTROL = [
+    ("p2p", "BitTorrent y P2P",
+     ["BitTorrent / P2P"],
+     ["6881", "6882", "6883", "6884", "6885", "6886", "6887", "6888", "6889",
+      "6969", "51413"],
+     "No ensucia tus IPs publicas, asi que no cuenta como abuso. Pero suele ser el "
+     "grueso del trafico y de las alertas."),
+]
+
+def analisis_control(rid=None, tope=12):
+    """Que CPEs hacen P2P y cuanto. Sale de las categorias de firma, que SI lo cuentan."""
+    cpes = _cpes_de_reporte(rid)
+    out = []
+    for clave, titulo, cats, puertos, porque in GRUPOS_CONTROL:
+        quienes = []
+        total = 0
+        for c in cpes:
+            suyo = sum(int(v) for cat, v in (c.get("cats_top") or {}).items() if cat in cats)
+            if suyo:
+                total += suyo
+                quienes.append((clave_cpe(c.get("ip", ""), c.get("router", "")), suyo,
+                                c.get("riesgo", 0)))
+        if not total:
+            continue
+        quienes.sort(key=lambda x: x[1], reverse=True)
+        out.append({"clave": clave, "titulo": titulo, "alertas": total,
+                    "cpes": len(quienes), "top": quienes[:tope],
+                    "puertos": puertos, "porque": porque})
+    return out
+
+def reglas_p2p_texto(puertos, redes=None, permitidos="suricata-salida-permitida"):
+    """Reglas para el P2P, con lo que de verdad funciona y lo que no.
+
+    Honestidad por delante: bloquear puertos conocidos caza al cliente perezoso, pero uno
+    con cifrado y puertos aleatorios se escapa. Lo que si le duele a cualquier cliente de
+    torrent es el tope de conexiones simultaneas, porque abre cientos."""
+    redes = redes or [str(r) for r in mis_redes()]
+    origen = f"src-address={redes[0]}" if redes else "src-address=0.0.0.0/0"
+    pts = ",".join(puertos)
+    return "\n".join([
+        "/ip firewall filter",
+        "# 1) puertos clasicos de BitTorrent. Caza al cliente por defecto; uno configurado",
+        "#    a mano con puerto aleatorio y cifrado NO cae aqui.",
+        f'add chain=forward protocol=tcp dst-port={pts} {origen} '
+        f'src-address-list=!{permitidos} action=drop comment="Suricata: P2P (TCP)"',
+        f'add chain=forward protocol=udp dst-port={pts} {origen} '
+        f'src-address-list=!{permitidos} action=drop comment="Suricata: P2P (UDP/DHT)"',
+        "",
+        "# 2) esto es lo que de verdad le duele: un cliente de torrent abre CIENTOS de",
+        "#    conexiones simultaneas. Un tope alto no molesta a quien navega.",
+        f'add chain=forward protocol=tcp connection-state=new {origen} '
+        f'src-address-list=!{permitidos} connection-limit=150,32 action=drop '
+        'comment="Suricata: tope de conexiones simultaneas por abonado"',
+        "",
+        "# NOTA: bloquear P2P del todo es una pelea perdida (cifrado, puertos aleatorios,",
+        "# DHT). Si lo que te molesta es la banda y no el trafico en si, sale mucho mejor",
+        "# encolarlo con /queue que intentar cortarlo.",
+    ])
+
 def analisis_conducta(rid=None):
     """Cuanto abuso encaja con cada conducta, segun las categorias de firma reales."""
     cpes = _cpes_de_reporte(rid)
@@ -8582,6 +8645,24 @@ trafico legitimo; se prueba antes con <code>loose</code>.</li>
 crear la conexion, para no llenar la tabla de conntrack.</li>
 </ul>
 
+<h2>P2P: verlo y controlarlo</h2>
+<p>El BitTorrent <b>no</b> hace que te baneen una IP publica, asi que no cuenta como abuso
+saliente &mdash;si contara, el numero que hay que poder enseñar no valdria nada&mdash;. Pero suele
+ser <b>el grueso de las alertas</b> y de la banda, asi que se ve <b>aparte</b>: en <b>Abuso
+saliente</b> sale su propia tarjeta con cuantas alertas son, cuantos CPEs lo hacen y <b>quienes
+son</b>, y el total no abusivo aparece tambien en la cabecera.</p>
+<h3>Que funciona y que no</h3>
+<ul>
+<li><b>Puertos clasicos</b> (6881-6889, 6969, 51413), en TCP <b>y</b> UDP porque el DHT va por UDP.
+Caza al cliente que quedo como venia de fabrica.</li>
+<li><b>Un cliente configurado a mano con puerto aleatorio y cifrado NO cae ahi.</b> Bloquear P2P del
+todo es una pelea perdida y conviene saberlo antes de prometerselo a nadie.</li>
+<li><b>El tope de conexiones simultaneas es lo que de verdad le duele</b>: un cliente de torrent
+abre cientos, y un limite alto no molesta a quien solo navega.</li>
+<li>Si lo que te molesta es <b>la banda</b> y no el trafico en si, sale mucho mejor
+<b>encolarlo</b> con <code>/queue</code> que intentar cortarlo.</li>
+</ul>
+
 <h2>Cortar a los que te atacan desde internet</h2>
 <p>Es la otra mitad del problema, y la cadena importa: <b>el atacante de fuera es el que infecta al
 CPE, y el CPE infectado es el que ensucia tus publicas</b>. Cortar la entrada no limpia lo que ya
@@ -9843,6 +9924,7 @@ def historico_page(dias_n=30):
         var_html = "<span style='color:#8a8a86'>&mdash;</span><div class=kh>hacen falta 14 dias de datos</div>"
 
     total = sum(int((d or {}).get("sal", 0)) for _f, d in serie)
+    ruido = sum(int((d or {}).get("ruido", 0)) for _f, d in serie)
     cpes_pico = max([int((d or {}).get("cpes_n", 0)) for _f, d in serie] or [0])
     enviados = sum(int((acc.get(f) or {}).get(a, 0)) for f, _d in serie
                    for a in ("ENVIADO", "POLITICA-ENVIADO", "POLITICA-RAPIDA"))
@@ -9858,6 +9940,7 @@ def historico_page(dias_n=30):
             + _kpi(f"{ult7:,.0f}", "media diaria (7 dias)")
             + f"<div class=kpi><div class=kv>{var_html}</div><div class=kt>tendencia</div></div>"
             + _kpi(f"{cpes_pico:,}", "CPEs distintos atacando", "maximo en el periodo")
+            + _kpi(f"{ruido:,}", "no abusivo", "P2P, chequeos de conectividad: no banean")
             + _kpi(f"{enviados:,}", "puestos en cuarentena", f"liberados: {liberados:,}")
             + "</div>")
 
@@ -9918,10 +10001,30 @@ def historico_page(dias_n=30):
         rid = r.get("id", "") if r else None
         nom = (r.get("nombre") or r.get("HOST") or rid) if r else ""
         tot, n_cpes, grupos = analisis_salida(rid)
-        if not grupos and not analisis_conducta(rid):
+        if not grupos and not analisis_conducta(rid) and not analisis_control(rid):
             continue
-        conductas = analisis_conducta(rid)
         tarjetas_g = []
+        # trafico que no es abuso pero el operador quiere ver y controlar
+        for ctl in analisis_control(rid):
+            filas_c = "".join(
+                f"<tr><td class=mono>{esc(ip_de(k))}</td>"
+                f"<td class=num>{n:,}</td><td class=num>{rg}</td></tr>"
+                for k, n, rg in ctl["top"])
+            tarjetas_g.append(
+                "<div class=regla>"
+                f"<div class=rh><b>{esc(ctl['titulo'])}</b>"
+                "<span class=rp>no cuenta como abuso</span></div>"
+                f"<div class=rn><b>{ctl['alertas']:,}</b> alertas de <b>{ctl['cpes']:,}</b> "
+                f"CPE(s). {esc(ctl['porque'])}</div>"
+                "<div class=tablewrap style='margin-top:6px'><table><thead><tr><th>CPE</th>"
+                "<th class=num>Alertas</th><th class=num>Riesgo</th></tr></thead>"
+                f"<tbody>{filas_c}</tbody></table></div>"
+                "<details style='margin-top:6px'><summary style='cursor:pointer;font-size:12.5px'>"
+                "Reglas para controlarlo</summary>"
+                f"<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;"
+                f"padding:10px;overflow-x:auto;font-size:12px'>"
+                f"{esc(reglas_p2p_texto(ctl['puertos']))}</pre></details></div>")
+        conductas = analisis_conducta(rid)
         for g in conductas:
             det = ", ".join("%s (%d)" % (c, n) for c, n in g["cats"][:3])
             tarjetas_g.append(

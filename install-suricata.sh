@@ -1190,9 +1190,11 @@ _TRAD = [
     (("port scan", "portscan", "sweep", "recon", "barrido"), "Escaneo de puertos"),
     (("scan",), "Escaneo saliente"),
     (("exploit", "cve-", "shellcode", "attempted-admin"), "Exploit"),
+    (("connectivity check", "connectivity-check"), "Chequeo de conectividad"),
+    (("403 forbidden",), "Acceso denegado (403)"),
     (("go http client",), "Cliente HTTP Go"),
     (("fake wget", "wget 3.0"), "User-Agent falso"),
-    (("user_agent", "user agent"), "User-Agent raro"),
+    (("user_agent", "user agent", "user-agent"), "User-Agent raro"),
     (("bittorrent", "p2p", "dht"), "BitTorrent / P2P"),
     (("stun ",), "STUN (video)"),
     (("snmp",), "Acceso SNMP"),
@@ -1210,7 +1212,11 @@ def traducir(sig):
     for claves, txt in _TRAD:
         if any(k in s for k in claves):
             return txt
-    return sig
+    # Sin traduccion salia la firma ENTERA, con su prefijo de ruleset, y la columna de
+    # categorias quedaba ilegible ("ET HUNTING Terse Unencrypted Request for Google...").
+    # Se le quita el prefijo y se acota.
+    limpio = re.sub(r"^(?:ET|GPL)\s+(?:[A-Z_]{3,}\s+)?", "", sig).strip() or sig
+    return (limpio[:44] + "\u2026") if len(limpio) > 45 else limpio
 
 def parse_ts(s):
     # Parsea con el offset de la marca (eve.json trae -0500) para obtener el epoch absoluto.
@@ -1243,10 +1249,20 @@ pais_dst = Counter()   # alertas por PAIS del destino (para el mapa "a donde ata
 # recontar la ventana: la ventana es configurable y si alguien la baja a 30 min, recontar
 # daria un "hoy" ridiculamente bajo sin avisar de nada. Con el incremental, el total del
 # dia es correcto sea cual sea la ventana.
+# Lo que NO es abuso hacia fuera. Molesta en el panel, pero no hace que a nadie le
+# baneen una IP: si BitTorrent o un chequeo de conectividad con Google cuentan como
+# "ataque saliente", el numero que hay que poder enseñar no significa nada. Se siguen
+# viendo, pero aparte.
+CATS_NO_ABUSO = {
+    "BitTorrent / P2P", "STUN (video)", "Chequeo de conectividad", "Anomalia QUIC",
+    "Anomalia TLS/SSL", "Anomalia HTTP", "Anomalia TCP", "Cliente HTTP Go",
+    "User-Agent raro", "User-Agent falso", "DNS dinamico", "Acceso denegado (403)",
+}
+
 METRICAS_FILE = "/var/log/suricata-metricas.json"
 METRICAS_DIAS = 400          # algo mas de un año de tendencia; el archivo sigue siendo pequeño
 METRICAS_MAX_CPES = 5000     # tope del conjunto de CPEs por dia (por encima, el conteo es un minimo)
-dias_m = defaultdict(lambda: {"sal": 0, "ent": 0, "cpes": set(),
+dias_m = defaultdict(lambda: {"sal": 0, "ent": 0, "ruido": 0, "cpes": set(),
                               "puertos": Counter(), "cats": Counter(), "nodos": Counter()})
 
 MAX_PAIS_CARD = 800
@@ -1441,17 +1457,21 @@ for p in files:
                 if ts > METR_DESDE:
                     _ipsrc = ip_de(src)
                     _mio_src = es_mi_cpe(_ipsrc); _mio_dst = es_mi_cpe(dst)
-                    if _mio_src and not _mio_dst:          # TU red atacando hacia fuera
+                    if _mio_src and not _mio_dst:          # TU red hacia fuera
                         _d = dias_m[time.strftime("%Y-%m-%d", time.localtime(ts))]
-                        _d["sal"] += 1
-                        if len(_d["cpes"]) < METRICAS_MAX_CPES:
-                            _d["cpes"].add(src)
-                        _d["cats"][traducir(sig)] += 1
-                        if dport:
-                            _d["puertos"][f"{dport}/{proto}"] += 1
-                        _rid = rid_de(src)
-                        if _rid:
-                            _d["nodos"][_rid] += 1
+                        _cat = traducir(sig)
+                        if _cat in CATS_NO_ABUSO:
+                            _d["ruido"] += 1       # se ve, pero no cuenta como abuso
+                        else:
+                            _d["sal"] += 1
+                            if len(_d["cpes"]) < METRICAS_MAX_CPES:
+                                _d["cpes"].add(src)
+                            _d["cats"][_cat] += 1
+                            if dport:
+                                _d["puertos"][f"{dport}/{proto}"] += 1
+                            _rid = rid_de(src)
+                            if _rid:
+                                _d["nodos"][_rid] += 1
                     elif _mio_dst and not _mio_src:        # internet golpeando tu red
                         dias_m[time.strftime("%Y-%m-%d", time.localtime(ts))]["ent"] += 1
             by_dst[dst] += 1
@@ -2910,9 +2930,11 @@ def fusionar_metricas(prev, nuevos, ts_max, hueco, ahora=None):
     for d, v in (nuevos or {}).items():
         e = dias.get(d)
         if not isinstance(e, dict):
-            e = {"sal": 0, "ent": 0, "cpes_n": 0, "cpes": [], "puertos": {}, "cats": {}, "nodos": {}}
+            e = {"sal": 0, "ent": 0, "ruido": 0, "cpes_n": 0, "cpes": [],
+                 "puertos": {}, "cats": {}, "nodos": {}}
         e["sal"] = int(e.get("sal", 0)) + int(v.get("sal", 0))
         e["ent"] = int(e.get("ent", 0)) + int(v.get("ent", 0))
+        e["ruido"] = int(e.get("ruido", 0)) + int(v.get("ruido", 0))
         # CPEs distintos del dia: se guarda el conjunto mientras el dia es reciente y
         # despues solo el numero (400 dias de listas no tendrian sentido).
         conj = set(e.get("cpes") or []) | set(v.get("cpes") or ())
@@ -2940,7 +2962,7 @@ try:
     # Si el generador estuvo parado mas que la ventana hay un agujero: se deja anotado en
     # vez de fingir que esos dias fueron tranquilos.
     _hueco = bool(METR_DESDE and ts_min and ts_min > METR_DESDE + 60)
-    _nuevos = {d: {"sal": v["sal"], "ent": v["ent"], "cpes": v["cpes"],
+    _nuevos = {d: {"sal": v["sal"], "ent": v["ent"], "ruido": v["ruido"], "cpes": v["cpes"],
                    "puertos": dict(v["puertos"]), "cats": dict(v["cats"]),
                    "nodos": dict(v["nodos"])}
                for d, v in dias_m.items()}
@@ -3247,9 +3269,11 @@ _TRAD = [
     (("port scan", "portscan", "sweep", "recon", "barrido"), "Escaneo de puertos"),
     (("scan",), "Escaneo saliente"),
     (("exploit", "cve-", "shellcode", "attempted-admin"), "Exploit"),
+    (("connectivity check", "connectivity-check"), "Chequeo de conectividad"),
+    (("403 forbidden",), "Acceso denegado (403)"),
     (("go http client",), "Cliente HTTP Go"),
     (("fake wget", "wget 3.0"), "User-Agent falso"),
-    (("user_agent", "user agent"), "User-Agent raro"),
+    (("user_agent", "user agent", "user-agent"), "User-Agent raro"),
     (("bittorrent", "p2p", "dht"), "BitTorrent / P2P"),
     (("stun ",), "STUN (video)"),
     (("snmp",), "Acceso SNMP"),
@@ -3267,7 +3291,11 @@ def traducir(sig):
     for claves, txt in _TRAD:
         if any(k in s for k in claves):
             return txt
-    return sig
+    # Sin traduccion salia la firma ENTERA, con su prefijo de ruleset, y la columna de
+    # categorias quedaba ilegible ("ET HUNTING Terse Unencrypted Request for Google...").
+    # Se le quita el prefijo y se acota.
+    limpio = re.sub(r"^(?:ET|GPL)\s+(?:[A-Z_]{3,}\s+)?", "", sig).strip() or sig
+    return (limpio[:44] + "\u2026") if len(limpio) > 45 else limpio
 
 def tail_grupos(path=EVE, want=200, maxbytes=6_000_000, top=25):
     """Cola del eve.json agrupada por (origen, destino, puerto, firma) con contador."""
@@ -9358,7 +9386,7 @@ def historico_page(dias_n=30):
         tot = sum(ac.values()) or 1
         filas = "".join(
             f"<tr><td>{esc(k)}</td><td class=num>{v:,}</td>"
-            f"<td class=num>{v * 100.0 / tot:.0f} %</td></tr>"
+            f"<td class=num>{v * 100.0 / tot:.0f}&#160;%</td></tr>"
             for k, v in sorted(ac.items(), key=lambda kv: kv[1], reverse=True)[:tope])
         return (f"<section class=card style='flex:1;min-width:280px'><h2 style='font-size:15px;margin:0 0 8px'>{esc(titulo)}</h2>"
                 f"<table><thead><tr><th>{'Categoria' if campo == 'cats' else 'Puerto'}</th>"
@@ -9448,7 +9476,11 @@ def historico_page(dias_n=30):
             ".rango a{font:13px system-ui;padding:5px 12px;border:1px solid #d7d6d2;border-radius:20px;"
             "text-decoration:none;color:#52514e;background:#fff}"
             ".rango a.on{background:#2a78d6;border-color:#2a78d6;color:#fff;font-weight:600}"
-            ".doscol{display:flex;gap:14px;flex-wrap:wrap;margin:16px 0}"
+            ".doscol{display:flex;gap:14px;flex-wrap:wrap;margin:16px 0;align-items:flex-start}"
+            ".doscol table{table-layout:fixed;width:100%}"
+            ".doscol td:first-child,.doscol th:first-child{word-break:break-word;line-height:1.35}"
+            ".doscol .num{text-align:right;white-space:nowrap;width:74px}"
+            ".doscol td,.doscol th{vertical-align:top;padding:6px 8px}"
             ".regla{border-top:1px solid #f0efec;padding:10px 0}"
             ".regla .rh{display:flex;align-items:center;gap:10px;flex-wrap:wrap}"
             ".regla .rp{font:12px ui-monospace,Consolas,monospace;background:#f1f1ef;"

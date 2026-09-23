@@ -140,6 +140,38 @@ def main():
     check("un dia con datos incompletos no se pinta como bueno",
           "#c8ccd1" in ph and "sensor estuvo parado" in ph)
 
+    # ---------- que cuenta como abuso, y como se nombra ----------
+    t = piezas(GEN, ("_TRAD", "traducir", "CATS_NO_ABUSO"), extra={"re": __import__("re")})
+    tr = t["traducir"]
+    casos = [
+        ("ET HUNTING Terse Unencrypted Request for Google - Likely Connectivity Check",
+         "Chequeo de conectividad"),
+        ("ET HUNTING Suspicious Empty User-Agent", "User-Agent raro"),
+        ("GPL WEB_SERVER 403 Forbidden", "Acceso denegado (403)"),
+        ("ET SCAN Potential SSH Scan", "Escaneo SSH"),
+        ("ET CNC Feodo checkin", "Botnet CnC"),
+    ]
+    for sig, esperado in casos:
+        check("se traduce %r" % sig[:40], tr(sig) == esperado, tr(sig))
+
+    largo = tr("ET FOOBAR Una firma larguisima que nadie tradujo y que no cabe en la columna ni de broma")
+    check("una firma sin traducir se acorta y pierde el prefijo del ruleset",
+          len(largo) <= 45 and not largo.startswith("ET "), largo)
+
+    check("BitTorrent NO cuenta como abuso saliente", "BitTorrent / P2P" in t["CATS_NO_ABUSO"])
+    check("ni un chequeo de conectividad", "Chequeo de conectividad" in t["CATS_NO_ABUSO"])
+    check("pero el escaneo SI", "Escaneo SSH" not in t["CATS_NO_ABUSO"])
+    check("y la botnet tambien", "Botnet CnC" not in t["CATS_NO_ABUSO"])
+
+    # el ruido se guarda aparte, no se tira ni se suma
+    r5 = fus({}, {hoy: {"sal": 10, "ent": 0, "ruido": 900, "cpes": set(),
+                        "puertos": {}, "cats": {}, "nodos": {}}}, 5000, False)
+    check("el ruido se guarda en su propio contador",
+          r5["dias"][hoy]["sal"] == 10 and r5["dias"][hoy]["ruido"] == 900, r5["dias"][hoy])
+    r6 = fus(r5, {hoy: {"sal": 5, "ent": 0, "ruido": 100, "cpes": set(),
+                        "puertos": {}, "cats": {}, "nodos": {}}}, 6000, False)
+    check("y tambien suma entre corridas", r6["dias"][hoy]["ruido"] == 1000, r6["dias"][hoy])
+
     # ---------- reglas de salida a partir de los eventos reales ----------
     # 3 CPEs mandando spam, 1 escaneando SSH y 1 haciendo solo web (que NO debe generar regla)
     json.dump({"top_riesgo": [

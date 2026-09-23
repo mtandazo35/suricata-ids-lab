@@ -5093,7 +5093,9 @@ AIDB_CACHE = "/var/lib/suricata-feeds/abuseipdb.json"
 AIDB_ESTADO = "/var/lib/suricata-feeds/abuseipdb-estado.json"
 AIDB_TTL_LIMPIA = 7 * 24 * 3600    # sin denuncias: cambia poco
 AIDB_TTL_SUCIA = 12 * 3600         # con denuncias: cambia rapido
-AIDB_CUOTA = 1000                  # plan gratuito ("Standard"), por dia UTC
+AIDB_CUOTA = 1000                  # consultas por IP al dia (plan gratuito "Standard")
+AIDB_CUOTA_BLOQUE = 100            # consultas por RED al dia: es una cuota APARTE
+AIDB_PREFIJO_MIN = 16              # /16 = 65.536 direcciones; por debajo no lo acepta nadie
 AIDB_RESERVA_MANUAL = 300          # consultas que SOLO puede gastar el operador a mano
 AIDB_MAX_LOTE = 25                 # IPs por consulta manual
 AIDB_MAX_CACHE = 20000
@@ -5142,7 +5144,8 @@ def _aidb_estado():
         d = {}
     hoy = time.strftime("%Y-%m-%d", time.gmtime())
     if d.get("dia") != hoy:
-        d = {"dia": hoy, "gastadas": 0, "auto": 0, "bloqueada_hasta": 0}
+        d = {"dia": hoy, "gastadas": 0, "auto": 0, "bloques": 0, "bloqueada_hasta": 0}
+    d.setdefault("bloques", 0)     # instalaciones que ya tenian el archivo sin este campo
     return d
 
 def _aidb_guardar_estado(d):
@@ -5157,6 +5160,10 @@ def _aidb_guardar_estado(d):
 def aidb_restantes():
     e = _aidb_estado()
     return max(0, AIDB_CUOTA - int(e.get("gastadas", 0)))
+
+def aidb_restantes_bloque():
+    e = _aidb_estado()
+    return max(0, AIDB_CUOTA_BLOQUE - int(e.get("bloques", 0)))
 
 def _aidb_cache():
     try:
@@ -5184,6 +5191,126 @@ def aidb_ip_valida(ip):
     if not o.is_global:
         return False, "no es una IP publica"
     return True, ""
+
+def aidb_red_valida(cidr):
+    """Una RED publica en notacion CIDR. Se rechazan las privadas por lo mismo que las
+    IPs sueltas, y las descomunales porque ningun plan las acepta (y la respuesta seria
+    enorme)."""
+    try:
+        red = ipaddress.ip_network(cidr.strip(), strict=False)
+    except ValueError:
+        return None, "no es una red valida (ej: 200.0.0.0/24)"
+    if red.version != 4:
+        return None, "solo redes IPv4"
+    if not red.is_global:
+        return None, "no es una red publica"
+    if red.prefixlen < AIDB_PREFIJO_MIN:
+        return None, f"demasiado grande: como mucho /{AIDB_PREFIJO_MIN}"
+    return red, ""
+
+def _aidb_pedir_red(cidr, dias=30):
+    """Una llamada a /check-block: devuelve QUE direcciones de esa red estan denunciadas.
+    Una peticion cubre las 256 de un /24, en vez de 256 consultas sueltas."""
+    key = aidb_key()
+    if not key:
+        return None, "sin clave", False
+    url = ("https://api.abuseipdb.com/api/v2/check-block?network=" + urllib.parse.quote(cidr)
+           + "&maxAgeInDays=%d" % dias)
+    req = urllib.request.Request(url, headers={"Key": key, "Accept": "application/json",
+                                               "User-Agent": "suricata-panel/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            d = json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            try:
+                espera = int(e.headers.get("Retry-After", "0") or 0)
+            except (TypeError, ValueError):
+                espera = 0
+            return None, "cuota:%d" % (espera or 3600), True
+        if e.code == 402:
+            # el plan no llega a ese tamaño: gratis es /24, y de pago /20 o /16
+            return None, ("tu plan de AbuseIPDB no permite una red tan grande "
+                          "(el gratuito llega a /24)"), True
+        if e.code in (401, 403):
+            return None, "AbuseIPDB rechazo la clave (HTTP %d)" % e.code, True
+        if e.code == 422:
+            return None, "AbuseIPDB no acepta esa red", True
+        return None, "HTTP %d" % e.code, True
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None, "sin respuesta de AbuseIPDB", False
+    except ValueError:
+        return None, "respuesta ilegible de AbuseIPDB", True
+    return (d or {}).get("data") or {}, "", True
+
+def _aidb_resumen_red(cidr, d):
+    den = []
+    for r in (d.get("reportedAddress") or []):
+        try:
+            den.append([r.get("ipAddress", ""), int(r.get("abuseConfidenceScore") or 0),
+                        int(r.get("numReports") or 0), (r.get("mostRecentReport") or "")[:10],
+                        (r.get("countryCode") or "")[:2]])
+        except (TypeError, ValueError):
+            continue
+    den.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    return {"red": cidr, "tipo": "red",
+            "hosts": int(d.get("numPossibleHosts") or 0),
+            "desc": (d.get("addressSpaceDesc") or "")[:60],
+            "denunciadas": den[:512], "n_den": len(den), "ts": int(time.time())}
+
+def aidb_consultar_red(cidr, refrescar=False):
+    """Ficha de una red. Devuelve (datos|None, origen, error). Nunca lanza."""
+    red, porque = aidb_red_valida(cidr)
+    if red is None:
+        return None, "", porque
+    clave = str(red)
+    ahora = time.time()
+    with _AIDB_LOCK:
+        ent = _aidb_cache().get(clave)
+        if ent and not refrescar and ahora - ent.get("ts", 0) < AIDB_TTL_SUCIA:
+            return ent, "cache", ""
+        est = _aidb_estado()
+        if est.get("bloqueada_hasta", 0) > ahora or int(est.get("bloques", 0)) >= AIDB_CUOTA_BLOQUE:
+            return (ent, "cache", "") if ent else (None, "", "cuota de redes agotada por hoy")
+    d, err, gastada = _aidb_pedir_red(clave)
+    with _AIDB_LOCK:
+        est = _aidb_estado()
+        if gastada:
+            est["bloques"] = int(est.get("bloques", 0)) + 1
+        if err.startswith("cuota:"):
+            est["bloqueada_hasta"] = ahora + int(err.split(":", 1)[1])
+            est["bloques"] = AIDB_CUOTA_BLOQUE
+            _aidb_guardar_estado(est)
+            return (ent, "cache", "") if ent else (None, "", "cuota de redes agotada por hoy")
+        _aidb_guardar_estado(est)
+        if err:
+            return (ent, "cache", err) if ent else (None, "", err)
+        res = _aidb_resumen_red(clave, d)
+        cache = _aidb_cache()
+        cache[clave] = res
+        _aidb_guardar_cache(cache)
+    return res, "api", ""
+
+def aidb_lote(texto, refrescar=False):
+    """Reparte lo que pego el usuario: lo que lleva '/' va al endpoint de REDES (una
+    peticion por red) y el resto a consultas por IP. Devuelve (resultados, aviso)."""
+    pedidas = [t.strip() for t in re.split(r"[\s,;]+", texto or "") if t.strip()]
+    vistas = []
+    for t in pedidas:
+        if t not in vistas:
+            vistas.append(t)        # repetir gasta cuota para nada
+    sobran = max(0, len(vistas) - AIDB_MAX_LOTE)
+    res = []
+    for t in vistas[:AIDB_MAX_LOTE]:
+        if "/" in t:
+            res.append((t,) + aidb_consultar_red(t, refrescar=refrescar))
+        else:
+            res.append((t,) + aidb_consultar(t, refrescar=refrescar))
+    if not vistas:
+        return res, "No pusiste ninguna IP ni red."
+    if sobran:
+        return res, f"Se consultaron {AIDB_MAX_LOTE}; quedan {sobran} sin consultar (repite la operacion)."
+    return res, ""
 
 def _aidb_pedir(ip, dias=90):
     """Una llamada a /check con detalle. Devuelve (datos, error, gastada).
@@ -7705,13 +7832,31 @@ se baja como mucho <b>cada 6 horas</b> (el plan gratuito permite 5 descargas al 
 10.000 IPs de <b>confianza 100&nbsp;%</b> &mdash; acotar ese umbral es de pago. Si un dia se agota la
 cuota, se conserva la lista anterior en vez de dar la fuente por rota.</p>
 
-<h2>Consultar IP: que ataques se le denuncian</h2>
+<h2>Consultar IP o red: que ataques se le denuncian</h2>
 <p>La pestana <b>Consultar IP</b> responde algo que los feeds no responden: no solo <i>si</i> una IP
 publica es mala, sino <b>a que se dedica</b>. Se pegan una o varias IPs (hasta 25) y para cada una sale
 el <b>porcentaje de confianza de abuso</b>, el operador, el pais, el tipo de uso, cuantas denuncias
 tiene y de cuantos denunciantes distintos, y sobre todo <b>las categorias</b> de esas denuncias
 (escaneo de puertos, fuerza bruta SSH, ataque a aplicacion web, host comprometido&hellip;) con un
 resumen de <b>que suele haber detras</b> de cada una.</p>
+
+<h3>Redes enteras (lo que conviene para tu rango de NAT)</h3>
+<p>Tambien acepta <b>redes en CIDR</b>: <code>200.0.0.0/24</code>. Eso no son 256 consultas sino
+<b>una sola</b>, porque usa un endpoint distinto pensado para bloques. Devuelve <b>que direcciones de
+esa red estan denunciadas</b>, con su porcentaje, cuantas denuncias tienen y cuando fue la ultima; y
+desde cada fila se puede pedir el detalle de esa IP concreta.</p>
+<ul>
+<li>Es la forma practica de revisar <b>todo tu rango publico de salida</b> de una vez y ver cuales de
+tus direcciones estan ensuciadas.</li>
+<li>Las redes tienen su <b>propia cuota</b>: <b>100 al dia</b> en el plan gratuito, independiente de
+las 1.000 consultas por IP. Ambas se muestran en la pestana.</li>
+<li>El plan gratuito llega hasta <b>/24</b>. Si pides algo mayor, AbuseIPDB responde 402 y el panel te
+lo dice tal cual en vez de soltar un error generico (de pago se llega a /20 y /16).</li>
+<li>Las redes <b>privadas</b> se rechazan igual que las IPs privadas, y tambien las descomunales
+(por debajo de /16 ni se intenta).</li>
+<li>Si la red no tiene <b>ninguna</b> direccion denunciada se dice claramente, con un apunte util: si
+aun asi te rebota el correo, el problema no esta en AbuseIPDB sino en las listas de spam.</li>
+</ul>
 <p>Tiene <b>dos</b> usos, y el segundo es el que arregla cosas:</p>
 <ul>
 <li>Una IP que <b>te ataca</b> (las de la pestana Entrantes): saber a que se dedica antes de decidir
@@ -8071,6 +8216,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False):
          pista de que hay un abonado infectado detras y de que hay que corregir."""
     esc = html.escape
     quedan = aidb_restantes()
+    quedan_red = aidb_restantes_bloque()
     hay_clave = aidb_configurada()
     banner = ""
     if msg:
@@ -8084,13 +8230,55 @@ def reputacion_page(res=None, texto="", msg="", ok=False):
                    "<a href='https://www.abuseipdb.com/account/api' target=_blank rel=noopener>"
                    "abuseipdb.com</a> y se pega en <b>Ajustes &rarr; Reputacion</b>.</div>")
 
-    def _scb(n):
+    def _scb(n, corto=False):
         c = "#3a9d5d" if n == 0 else ("#e58a00" if n < 25 else ("#e07b39" if n < 75 else "#e34948"))
+        txt = f"{n} %" if corto else f"Confianza de abuso {n}%"
         return (f"<span style='background:{c};color:#fff;font-weight:700;font-size:12px;"
-                f"padding:3px 10px;border-radius:20px'>Confianza de abuso {n}%</span>")
+                f"padding:3px 10px;border-radius:20px'>{txt}</span>")
 
     tarjetas = []
     for ip, d, origen, err in (res or []):
+        if d and d.get("tipo") == "red":
+            # --- una RED entera: una sola peticion cubrio todas sus direcciones ---
+            den = d.get("denunciadas") or []
+            hosts = int(d.get("hosts") or 0)
+            cuando = time.strftime("%d/%m %H:%M", time.localtime(d.get("ts", 0)))
+            proc = "consultada ahora" if origen == "api" else f"de cache ({cuando})"
+            if not den:
+                cuerpo = ("<div style='background:#e6f4ea;color:#1a7f37;border:1px solid #b7e0c2;"
+                          "border-radius:8px;padding:12px 14px;font-size:13px'>"
+                          "<b>Ninguna direccion de esta red esta denunciada.</b> Si aun asi te "
+                          "rebota el correo o te bloquean, el problema no es AbuseIPDB: mira las "
+                          "listas de spam (Spamhaus, SORBS, Barracuda).</div>")
+            else:
+                filas = "".join(
+                    "<tr><td class=mono>" + esc(str(a[0])) + "</td>"
+                    f"<td class=num>{_scb(int(a[1]), corto=True)}</td>"
+                    f"<td class=num>{int(a[2]):,}</td>"
+                    f"<td class=mono>{esc(str(a[3]))}</td>"
+                    f"<td>{esc(str(a[4]))}</td>"
+                    f"<td><a href='?ips={esc(str(a[0]))}'>ver que hace</a></td></tr>"
+                    for a in den[:120])
+                peor = sum(1 for a in den if int(a[1]) >= 75)
+                cuerpo = (
+                    f"<p style='font-size:13px;margin:0 0 10px'><b>{len(den):,}</b> de "
+                    f"<b>{hosts:,}</b> direcciones estan denunciadas"
+                    + (f", <b style='color:#b52a2a'>{peor:,}</b> de ellas con 75 % o mas" if peor else "")
+                    + ". Cada fila es una IP publica tuya por la que se esta atacando: "
+                      "pulsa <b>ver que hace</b> para el detalle con categorias.</p>"
+                    "<div class=tablewrap><table><thead><tr><th>Direccion</th>"
+                    "<th class=num>Abuso</th><th class=num>Denuncias</th><th>Ultima</th>"
+                    "<th>Pais</th><th></th></tr></thead><tbody>" + filas + "</tbody></table></div>"
+                    + (f"<p class=hint>Se muestran las 120 peores de {len(den):,}.</p>"
+                       if len(den) > 120 else ""))
+            tarjetas.append(
+                "<div class=card style='margin:0 0 12px'>"
+                "<div style='display:flex;align-items:center;gap:12px;flex-wrap:wrap'>"
+                f"<b class=mono style='font-size:15px'>{esc(d.get('red') or ip)}</b>"
+                f"<span class=hint>{esc(d.get('desc') or 'red publica')}</span>"
+                f"<span class=hint style='margin-left:auto'>{esc(proc)}</span></div>"
+                f"<div style='margin-top:10px'>{cuerpo}</div></div>")
+            continue
         if not d:
             tarjetas.append(
                 f"<div class=card style='margin:0 0 12px'><b class=mono>{esc(ip)}</b> "
@@ -8150,23 +8338,26 @@ def reputacion_page(res=None, texto="", msg="", ok=False):
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>"
             f"<style>{css}</style></head><body>" + nav("/reputacion") +
-            "<main><h1>Consultar IP</h1>"
-            "<p class=sub2>Pega una o varias <b>IPs publicas</b> y AbuseIPDB te dice <b>que ataques se les "
+            "<main><h1>Consultar IP o red</h1>"
+            "<p class=sub2>Pega una o varias <b>IPs o redes publicas</b> y AbuseIPDB te dice <b>que ataques se les "
             "denuncian</b>, no solo si son malas. Sirve para dos cosas: mirar a que se dedica una IP que "
             "te esta atacando, y &mdash;sobre todo&mdash; pegar <b>tus propias IPs publicas de NAT</b> "
             "para ver por que te denuncian a vos: eso senala que hay un abonado infectado detras y que "
             "es lo que hay que corregir.</p>"
             + banner +
             "<section class=card><form method=post action='/reputacion'>"
-            "<div class=field><label>IPs publicas (una por linea, o separadas por comas)</label>"
-            f"<textarea name=ips placeholder='una IP publica por linea'>{esc(texto)}</textarea>"
-            f"<div class=hint>Hasta {AIDB_MAX_LOTE} por consulta. Las privadas (las de tus CPEs) no se "
-            "envian nunca. Lo ya consultado sale de la cache y no gasta cuota.</div></div>"
+            "<div class=field><label>IPs o redes publicas (una por linea, o separadas por comas)</label>"
+            f"<textarea name=ips placeholder='200.0.0.0/24&#10;una IP publica por linea'>{esc(texto)}</textarea>"
+            f"<div class=hint>Acepta <b>redes en formato CIDR</b>: <code>200.0.0.0/24</code> revisa las "
+            "256 direcciones con <b>una sola</b> peticion, que es lo que conviene para tu rango de NAT "
+            f"(el plan gratuito llega a /24). Hasta {AIDB_MAX_LOTE} entradas por consulta. Las privadas "
+            "(las de tus CPEs) no se envian nunca. Lo ya consultado sale de la cache y no gasta cuota.</div></div>"
             "<div class=qbar><button class=primary type=submit>Consultar</button>"
             "<label class=chk style='font-size:13px'><input type=checkbox name=refrescar> "
             "Forzar consulta nueva (ignora la cache)</label>"
-            f"<span class=hint style='margin-left:auto'>Quedan <b>{quedan:,}</b> de {AIDB_CUOTA:,} "
-            "consultas hoy</span></div></form></section>"
+            f"<span class=hint style='margin-left:auto'>Hoy quedan <b>{quedan:,}</b> de {AIDB_CUOTA:,} "
+            f"consultas por IP y <b>{quedan_red:,}</b> de {AIDB_CUOTA_BLOQUE:,} por red</span>"
+            "</div></form></section>"
             + ("".join(tarjetas) if tarjetas else "") +
             "</main></body></html>")
 
@@ -9345,6 +9536,12 @@ class H(BaseHTTPRequestHandler):
         if path == "/reputacion":
             if not self._operador():
                 return self._deny()
+            # ?ips=... para poder enlazar una IP concreta desde la tabla de una red
+            _qr = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            _t = (_qr.get("ips", [""])[0]).strip()
+            if _t:
+                _res, _av = aidb_lote(_t)
+                return self._html(reputacion_page(res=_res, texto=_t, msg=_av, ok=not _av))
             return self._html(reputacion_page())
         if path == "/documentacion":
             _qd = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
@@ -9670,21 +9867,9 @@ class H(BaseHTTPRequestHandler):
             if not self._operador():
                 return self._deny()
             texto = q.get("ips", [""])[0]
-            refrescar = bool(q.get("refrescar"))
-            pedidas = [t.strip() for t in re.split(r"[\s,;]+", texto or "") if t.strip()]
-            vistas = []
-            for t in pedidas:                     # sin repetir: repetir gasta cuota para nada
-                if t not in vistas:
-                    vistas.append(t)
-            sobran = max(0, len(vistas) - AIDB_MAX_LOTE)
-            res = [(ip,) + aidb_consultar(ip, refrescar=refrescar) for ip in vistas[:AIDB_MAX_LOTE]]
-            aviso = ""
-            if not vistas:
-                aviso = "No pusiste ninguna IP."
-            elif sobran:
-                aviso = f"Se consultaron {AIDB_MAX_LOTE}; quedan {sobran} sin consultar (repite la operacion)."
+            res, aviso = aidb_lote(texto, refrescar=bool(q.get("refrescar")))
             if res:
-                bitacora("CONSULTA-ABUSEIPDB", f"{len(res)} IP(s)")
+                bitacora("CONSULTA-ABUSEIPDB", f"{len(res)} entrada(s)")
             return self._html(reputacion_page(res=res, texto=texto, msg=aviso, ok=not aviso))
         if ruta == "/reputacion/denunciar":
             if not self._operador():

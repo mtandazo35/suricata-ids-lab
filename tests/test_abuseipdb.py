@@ -21,6 +21,7 @@ RECHAZAN.
 import ast
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -40,7 +41,10 @@ PIEZAS = ("FEEDS_CONF", "AIDB_CACHE", "AIDB_ESTADO", "AIDB_TTL_LIMPIA", "AIDB_TT
           "_feeds_conf_get", "_feeds_conf_set", "aidb_key", "aidb_configurada", "aidb_set",
           "_aidb_estado", "_aidb_guardar_estado", "aidb_restantes", "_aidb_cache",
           "_aidb_guardar_cache", "aidb_ip_valida", "_aidb_pedir", "_aidb_resumen",
-          "aidb_consultar", "aidb_cats_txt", "reputacion_page")
+          "aidb_consultar", "aidb_cats_txt", "reputacion_page",
+          "AIDB_CUOTA_BLOQUE", "AIDB_PREFIJO_MIN", "aidb_restantes_bloque",
+          "aidb_red_valida", "_aidb_pedir_red", "_aidb_resumen_red", "aidb_consultar_red",
+          "aidb_lote")
 
 fallos = 0
 def check(d, c, e=""):
@@ -83,7 +87,7 @@ def http(code, cabeceras=None):
 
 
 def entorno(tmp, red):
-    ns = {"json": json, "os": os, "time": __import__("time"), "html": __import__("html"),
+    ns = {"json": json, "os": os, "re": re, "time": __import__("time"), "html": __import__("html"),
           "threading": __import__("threading"), "ipaddress": __import__("ipaddress"),
           "urllib": types.SimpleNamespace(request=red, error=urllib.error, parse=urllib.parse),
           "BASE_CSS": "", "nav": lambda a="": "<!--nav-->"}
@@ -192,13 +196,71 @@ def main():
 
     # --- 8) la clave no aparece nunca en la pagina ---
     ns["aidb_restantes"] = lambda: 900
+    ns["aidb_restantes_bloque"] = lambda: 100
     pag = ns["reputacion_page"](res=[("1.1.1.1", d, "cache", "")])
     check("la clave NO se filtra al HTML", "CLAVE-DE-PRUEBA-NO-REAL" not in pag)
     check("la pagina muestra las categorias en castellano", "SSH" in pag and "Escaneo de puertos" in pag)
     check("y que suele haber detras", "Que suele haber detras" in pag)
     check("y cuanta cuota queda", "900" in pag)
 
-    # --- 9) una clave rechazada no se confunde con 'sin red' ---
+    # --- 9) una RED entera: UNA peticion cubre todas sus direcciones ---
+    tmp3 = tempfile.mkdtemp(); red3 = Red(); ns3 = entorno(tmp3, red3)
+    ns3["aidb_set"]("K")
+    BLOQUE = {"data": {"networkAddress": "200.0.0.0", "netmask": "255.255.255.0",
+                       "numPossibleHosts": 256, "addressSpaceDesc": "Public",
+                       "reportedAddress": [
+                           {"ipAddress": "200.0.0.7", "numReports": 90,
+                            "abuseConfidenceScore": 100, "mostRecentReport": "2026-09-21T10:00:00+00:00",
+                            "countryCode": "EC"},
+                           {"ipAddress": "200.0.0.9", "numReports": 3,
+                            "abuseConfidenceScore": 22, "mostRecentReport": "2026-09-19T10:00:00+00:00",
+                            "countryCode": "EC"}]}}
+    red3.guion.append(BLOQUE)
+    d9, o9, e9 = ns3["aidb_consultar_red"]("200.0.0.0/24")
+    check("una /24 se resuelve con UNA sola peticion, no 256",
+          len(red3.llamadas) == 1 and o9 == "api", (len(red3.llamadas), o9, e9))
+    check("se usa el endpoint de bloques", "check-block" in red3.llamadas[0]["url"], red3.llamadas[0]["url"])
+    check("dice cuantas direcciones tiene la red", d9.get("hosts") == 256, d9)
+    check("y cuales estan denunciadas", d9.get("n_den") == 2, d9)
+    check("ordenadas de peor a mejor", d9["denunciadas"][0][0] == "200.0.0.7", d9["denunciadas"])
+    check("gasta la cuota de REDES, no la de IPs",
+          ns3["aidb_restantes_bloque"]() == ns3["AIDB_CUOTA_BLOQUE"] - 1
+          and ns3["aidb_restantes"]() == ns3["AIDB_CUOTA"], 
+          (ns3["aidb_restantes_bloque"](), ns3["aidb_restantes"]()))
+    n9 = len(red3.llamadas)
+    _d, o9b, _e = ns3["aidb_consultar_red"]("200.0.0.0/24")
+    check("repetirla sale de cache", o9b == "cache" and len(red3.llamadas) == n9, o9b)
+
+    # redes que NO se consultan
+    for mala, porque in (("10.0.0.0/8", "privada"), ("192.168.0.0/16", "privada"),
+                         ("200.0.0.0/8", "demasiado grande"), ("no-es-red/24", "invalida")):
+        n = len(red3.llamadas)
+        _d, _o, err = ns3["aidb_consultar_red"](mala)
+        check("la red %s no se consulta (%s)" % (mala, porque),
+              len(red3.llamadas) == n and err, err)
+
+    # el 402 del plan se explica en vez de salir como error generico
+    red3.guion.append(urllib.error.HTTPError("https://api.abuseipdb.com/", 402, "x", {}, None))
+    _d, _o, err402 = ns3["aidb_consultar_red"]("200.1.0.0/20")
+    check("si el plan no llega a ese tamaño, se dice", "plan" in (err402 or ""), err402)
+
+    # --- 10) el repartidor: mezcla de IPs y redes en el mismo cuadro ---
+    tmp4 = tempfile.mkdtemp(); red4 = Red(); ns4 = entorno(tmp4, red4)
+    ns4["aidb_set"]("K")
+    red4.guion.extend([BLOQUE, FICHA])
+    lote, aviso = ns4["aidb_lote"]("200.0.0.0/24, 1.1.1.1")
+    check("se pueden mezclar redes e IPs", len(lote) == 2 and not aviso, (len(lote), aviso))
+    check("la red va al endpoint de bloques y la IP al de siempre",
+          "check-block" in red4.llamadas[0]["url"] and "check?" in red4.llamadas[1]["url"],
+          [c["url"][:60] for c in red4.llamadas])
+    check("la red se marca como tal para pintarla distinto",
+          lote[0][1].get("tipo") == "red" and lote[1][1].get("tipo") != "red", lote[0][1].get("tipo"))
+    n4 = len(red4.llamadas)
+    ns4["aidb_lote"]("1.1.1.1 1.1.1.1 1.1.1.1")
+    check("una IP repetida en el mismo pegado no se consulta 3 veces",
+          len(red4.llamadas) == n4, len(red4.llamadas))
+
+    # --- 11) una clave rechazada no se confunde con 'sin red' ---
     tmp2 = tempfile.mkdtemp(); red2 = Red(); ns2 = entorno(tmp2, red2)
     ns2["aidb_set"]("MALA")
     red2.guion.append(http(401))

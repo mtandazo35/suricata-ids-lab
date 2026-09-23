@@ -2536,6 +2536,45 @@ def entrantes_section(n_src=8, n_sub=6, max_src=5000, max_det=60):
 
 top_sec = top_origenes_section()
 
+# --- Quien nos ataca desde internet ------------------------------------------------
+# Se guarda aparte porque el panel lo necesita para armar la lista de bloqueo del borde.
+# La cadena es: el atacante de fuera infecta al CPE, el CPE infectado ensucia tu IP
+# publica. Cortar la entrada es lo que corta infecciones NUEVAS.
+ENTRANTES_FILE = "/var/log/suricata-entrantes.json"
+try:
+    _ent = {}
+    for (_s, _sp, _d, _dp, _pr, _sig), _v in flujos.items():
+        _sip = ip_de(_s)
+        if es_mi_cpe(_sip) or not es_mi_cpe(_d):
+            continue                      # solo internet -> tu red
+        _e = _ent.get(_sip)
+        if _e is None:
+            if len(_ent) >= 20000:        # cota: un dia malo son decenas de miles de origenes
+                continue
+            _e = _ent[_sip] = {"alertas": 0, "dst": set(), "puertos": set(),
+                               "firma": "", "ultima": 0}
+        _e["alertas"] += _v[0]
+        if len(_e["dst"]) < 50:
+            _e["dst"].add(_d)
+        if _dp and len(_e["puertos"]) < 20:
+            _e["puertos"].add(_dp)
+        if not _e["firma"]:
+            _e["firma"] = (_sig or "")[:90]
+        if _v[2] > _e["ultima"]:
+            _e["ultima"] = _v[2]
+    _sal_ent = {k: {"alertas": v["alertas"], "destinos": len(v["dst"]),
+                    "puertos": sorted(v["puertos"])[:10], "firma": v["firma"],
+                    "ultima": int(v["ultima"] or 0), "pais": pais(k)}
+                for k, v in sorted(_ent.items(), key=lambda kv: kv[1]["alertas"],
+                                   reverse=True)[:5000]}
+    _tmpe = ENTRANTES_FILE + ".tmp"
+    with open(_tmpe, "w", encoding="utf-8") as _f:
+        json.dump({"generado": int(time.time()), "ventana_min": VENTANA_MIN,
+                   "origenes": _sal_ent}, _f)
+    os.replace(_tmpe, ENTRANTES_FILE)
+except Exception:
+    pass
+
 # --- Cuarentena (Fase A, dry-run): CPEs INFECTADOS CONFIRMADOS (repeticion/contexto).
 # Solo se ESCRIBE la lista de candidatos; NO se toca el MikroTik. El panel la muestra.
 try:
@@ -4371,6 +4410,114 @@ def mk_publicas_detectadas(router=None):
         try: s_.close()
         except OSError: pass
     return sorted(encontradas)
+
+# ---------------------------------------------------------------------------------
+# Bloqueo en el BORDE: los que nos atacan desde internet
+# ---------------------------------------------------------------------------------
+ENTRANTES_FILE = "/var/log/suricata-entrantes.json"
+BL_LISTA = "suricata-atacantes"
+BL_MIN_ALERTAS = 20        # por debajo de esto es ruido de fondo de internet
+BL_MIN_DESTINOS = 3        # que golpee a varios: uno solo puede ser un falso positivo
+BL_TOPE = 20000            # cada entrada ocupa RAM en el router: no se manda una barbaridad
+
+_REP_CACHE = {"mtime": 0, "ips": {}}
+_REP_MAX = 300000          # tope duro: el archivo de feeds puede ser enorme
+
+def rep_fuente(ip):
+    """De que feed viene una IP, si es que viene de alguno. Solo IPs exactas: los CIDR
+    los resuelve el generador, aqui solo hace falta una pista de confianza."""
+    f = os.path.join(os.path.dirname(FEEDS_META), "reputation.lst")
+    try:
+        mt = os.path.getmtime(f)
+    except OSError:
+        return ""
+    if mt != _REP_CACHE["mtime"]:
+        ips = {}
+        try:
+            with open(f, encoding="utf-8") as fh:
+                for n, linea in enumerate(fh):
+                    if n >= _REP_MAX:
+                        break
+                    ind, _tab, fuente = linea.strip().partition("	")
+                    if ind and "/" not in ind:
+                        ips[ind] = fuente or "feed"
+        except OSError:
+            return ""
+        _REP_CACHE["ips"] = ips
+        _REP_CACHE["mtime"] = mt
+    return _REP_CACHE["ips"].get(ip, "")
+
+def cargar_entrantes():
+    try:
+        return (json.load(open(ENTRANTES_FILE, encoding="utf-8")).get("origenes") or {})
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+def blocklist_borde(tope=BL_TOPE):
+    """Las IPs a cortar en la entrada, con por que esta cada una.
+
+    Solo entra lo OBSERVADO atacandonos, no los feeds enteros: un feed trae cientos de
+    miles de IPs, llena la RAM del router y mete falsos positivos de sitios que tus
+    abonados visitan. Lo que nos golpea a nosotros es corto y es el que importa."""
+    out = []
+    for ip, d in sorted(cargar_entrantes().items(),
+                        key=lambda kv: int(kv[1].get("alertas", 0)), reverse=True):
+        if len(out) >= tope:
+            break
+        try:
+            o = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if not o.is_global or es_mi_cpe(ip) or nunca_bloquear(ip):
+            continue               # nunca lo propio ni la allowlist
+        al = int(d.get("alertas", 0)); ds = int(d.get("destinos", 0))
+        fuente = rep_fuente(ip)    # ademas en un feed de reputacion: confianza alta
+        if not (fuente or (al >= BL_MIN_ALERTAS and ds >= BL_MIN_DESTINOS)):
+            continue
+        out.append({"ip": ip, "alertas": al, "destinos": ds,
+                    "pais": d.get("pais", ""), "firma": d.get("firma", ""),
+                    "fuente": fuente or ""})
+    return out
+
+def blocklist_rsc(lista=BL_LISTA, ttl="1d"):
+    """El script que el router se descarga e importa.
+
+    Se publica para que el MikroTik lo baje EL, en vez de meterle miles de entradas una
+    a una por la API: por ahi tardaria horas."""
+    hoy = time.strftime("%Y-%m-%d %H:%M")
+    filas = blocklist_borde()
+    out = ["# Atacantes vistos por el sensor Suricata. Generado %s" % hoy,
+           "# %d direcciones. Se reemplaza la lista entera en cada importacion." % len(filas),
+           "/ip firewall address-list",
+           ":local viejas [find list=%s]" % lista,
+           ":foreach i in=$viejas do={remove $i}"]
+    for f in filas:
+        por = f["fuente"] or ("%d alertas a %d destinos" % (f["alertas"], f["destinos"]))
+        com = re.sub(r'[^A-Za-z0-9 ._:/()-]', " ", por)[:60]
+        out.append('add list=%s address=%s timeout=%s comment="%s"' % (lista, f["ip"], ttl, com))
+    return "\n".join(out) + "\n"
+
+def blocklist_reglas(lista=BL_LISTA):
+    """Las reglas. El detalle que decide si esto sirve o rompe clientes es
+    connection-state=new: si se corta en raw o sin ese matcher, tambien se tiran las
+    RESPUESTAS a conexiones que abrio tu abonado, y el cliente se queda sin poder entrar
+    a un sitio legitimo sin que nadie entienda por que."""
+    return "\n".join([
+        "# 1) que el router se baje la lista solo, cada hora",
+        "/system scheduler",
+        'add name=suricata-atacantes interval=1h on-event="/tool fetch '
+        'url=\\"http://IP_DEL_SENSOR:PUERTO/blocklist.rsc\\" dst-path=atacantes.rsc; '
+        ':delay 5s; /import atacantes.rsc" comment="Suricata: lista de atacantes"',
+        "",
+        "# 2) cortar SOLO las conexiones NUEVAS que entran desde esas IPs.",
+        "#    Sin connection-state=new se tiran tambien las respuestas a lo que pidio tu",
+        "#    abonado, y el cliente se queda sin acceso a sitios legitimos.",
+        "/ip firewall filter",
+        'add chain=forward connection-state=new src-address-list=%s action=drop '
+        'comment="Suricata: atacantes de internet"' % lista,
+        'add chain=input connection-state=new src-address-list=%s action=drop '
+        'comment="Suricata: atacantes contra el router"' % lista,
+    ])
 
 def _mk_print(s_, cmd, props):
     """Un print de la API como lista de diccionarios."""
@@ -8435,6 +8582,30 @@ trafico legitimo; se prueba antes con <code>loose</code>.</li>
 crear la conexion, para no llenar la tabla de conntrack.</li>
 </ul>
 
+<h2>Cortar a los que te atacan desde internet</h2>
+<p>Es la otra mitad del problema, y la cadena importa: <b>el atacante de fuera es el que infecta al
+CPE, y el CPE infectado es el que ensucia tus publicas</b>. Cortar la entrada no limpia lo que ya
+esta infectado &mdash;para eso esta la cuarentena&mdash; pero corta las <b>infecciones nuevas</b>,
+que es lo unico que hace que el numero baje y se quede abajo.</p>
+<p>En <b>Abuso saliente</b> el panel arma la lista con los origenes de internet que <b>de verdad</b>
+estan golpeando tu red: los que pegan fuerte y a varios destinos, mas los que ademas aparecen
+fichados en los feeds de reputacion (a esos les basta con poco). <b>No</b> se vuelcan los feeds
+enteros: son cientos de miles de IPs, llenan la RAM del router y meten falsos positivos de sitios
+que tus abonados visitan.</p>
+<h3>Dos detalles que deciden si esto sirve o rompe clientes</h3>
+<ul>
+<li><b><code>connection-state=new</code>.</b> Se cortan solo las conexiones que <b>entran</b> desde
+esas IPs. Sin ese matcher &mdash;o cortando en <code>raw</code>&mdash; se tiran tambien las
+<b>respuestas</b> a lo que pidio tu abonado, y el cliente se queda sin poder entrar a un sitio
+legitimo sin que nadie entienda por que.</li>
+<li><b>El router se baja la lista solo</b> con <code>/tool fetch</code> cada hora, y la importa.
+Meterle miles de entradas una a una por la API tardaria horas. La URL <code>/blocklist.rsc</code>
+responde <b>unicamente</b> a las IPs de los routers dados de alta, asi que no hace falta poner
+ninguna contraseña en la configuracion del router.</li>
+</ul>
+<p>Nunca entran en la lista tus propias redes ni las de <b>Nunca bloquear</b>, y cada importacion
+<b>reemplaza</b> la lista entera, asi que lo que deja de atacar desaparece solo.</p>
+
 <h2>Reglas de salida: lo que baja los baneos</h2>
 <p>Al final de <b>Abuso saliente</b> el panel propone <b>reglas de firewall para el MikroTik</b>
 sacadas de lo que el sensor vio <b>de verdad</b>, no de una lista generica. Cada una dice
@@ -9795,12 +9966,43 @@ def historico_page(dias_n=30):
               f"<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;"
               f"padding:10px;overflow-x:auto;font-size:12px'>{esc(reglas_salida_texto(grupos))}</pre>"
               "</details></section>")
+    # --- cortar a los que nos atacan desde internet ---------------------------------
+    bl = blocklist_borde()
+    bl_html = ""
+    if bl:
+        con_feed = sum(1 for x in bl if x["fuente"])
+        top = "".join(
+            f"<tr><td class=mono>{esc(x['ip'])}</td><td>{esc(x['pais'])}</td>"
+            f"<td class=num>{x['alertas']:,}</td><td class=num>{x['destinos']:,}</td>"
+            f"<td>{esc(x['fuente'] or '')}</td></tr>" for x in bl[:10])
+        bl_html = (
+            "<section class=card><h2 style='font-size:15px;margin:0 0 4px'>"
+            "Cortar a los que te atacan desde internet</h2>"
+            f"<p class=sub2 style='margin:0 0 8px'><b>{len(bl):,}</b> IPs de internet estan "
+            f"golpeando tu red"
+            + (f", <b>{con_feed:,}</b> de ellas ademas fichadas en feeds de reputacion" if con_feed else "")
+            + ". Cortarlas no limpia lo que ya esta infectado, pero <b>corta las infecciones "
+              "nuevas</b>: el atacante de fuera es el que infecta al CPE, y el CPE infectado es "
+              "el que ensucia tus publicas.</p>"
+            "<div class=tablewrap><table><thead><tr><th>IP</th><th>Pais</th>"
+            "<th class=num>Alertas</th><th class=num>Destinos</th><th>Feed</th></tr></thead>"
+            f"<tbody>{top}</tbody></table></div>"
+            + (f"<p class=hint>Las 10 peores de {len(bl):,}.</p>" if len(bl) > 10 else "")
+            + "<details style='margin-top:10px'><summary style='cursor:pointer;font-weight:600;"
+              "font-size:13px'>Como montarlo en el MikroTik</summary>"
+              "<p class=hint style='margin:6px 0'>El router se baja la lista solo cada hora: "
+              "meterle miles de entradas por la API tardaria horas. La URL solo responde a las "
+              "IPs de los routers dados de alta.</p>"
+              f"<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;"
+              f"padding:10px;overflow-x:auto;font-size:12px'>{esc(blocklist_reglas())}</pre>"
+              "</details></section>")
+
     diag_html = ""
     for r in rs:
         if (r.get("HOST") or "") and r.get("ENABLED") == "1":
             diag_html += _diag_html(r, r.get("nombre") or r.get("HOST") or r.get("id", ""),
                                     len(rs) > 1)
-    reglas_html = diag_html + "".join(secc_reglas)
+    reglas_html = diag_html + bl_html + "".join(secc_reglas)
 
     sel = "".join(
         f"<a href='?d={n}' class='{'on' if n == dias_n else ''}'>{n} dias</a>"
@@ -10669,6 +10871,21 @@ class H(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers(); self.wfile.write(data); return
             self.send_error(404); return
+        if path == "/blocklist.rsc":
+            # La descarga el propio MikroTik con /tool fetch, asi que no puede pedir
+            # sesion. Se abre SOLO a las IPs de los routers dados de alta: nada de meter
+            # un token en la configuracion del router.
+            quien = self._client_ip()
+            permitidas = {(r.get("HOST") or "").strip()
+                          for r in cargar_routers() if (r.get("HOST") or "").strip()}
+            if quien not in permitidas:
+                return self._html("<h1>No autorizado</h1>", 403)
+            cuerpo = blocklist_rsc().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(cuerpo)))
+            self.end_headers(); self.wfile.write(cuerpo)
+            return
         if not ip_confiable(self._client_ip()):
             return self._html("<!doctype html><meta charset=utf-8><title>Acceso restringido</title>"
                               "<div style='font:15px system-ui;max-width:520px;margin:60px auto;padding:24px;text-align:center'>"

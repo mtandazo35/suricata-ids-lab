@@ -94,14 +94,22 @@ def main():
                       "_media", "_grafico", "historico_page",
                       "GRUPOS_SALIDA", "_cpes_de_reporte", "analisis_salida",
                       "regla_salida", "reglas_salida_texto",
-                      "GRUPOS_CONDUCTA", "analisis_conducta", "reglas_conducta_texto"),
+                      "GRUPOS_CONDUCTA", "analisis_conducta", "reglas_conducta_texto",
+                      "ENTRANTES_FILE", "BL_LISTA", "BL_MIN_ALERTAS", "BL_MIN_DESTINOS",
+                      "BL_TOPE", "_REP_CACHE", "_REP_MAX", "rep_fuente", "cargar_entrantes",
+                      "blocklist_borde", "blocklist_rsc", "blocklist_reglas"),
                extra={"BASE_CSS": "", "nav": lambda a="": "<!--nav-->",
                       "wrap": lambda b, refresh=True, active="": b, "LOGDIR": tmp,
                       "cargar_routers": lambda: [{"id": "", "nombre": "MikroTik"}],
+                      "ipaddress": __import__("ipaddress"), "re": __import__("re"),
+                      "es_mi_cpe": lambda ip: ip.startswith("10."),
+                      "nunca_bloquear": lambda ip: False,
+                      "FEEDS_META": os.path.join(tmp, "reputation.meta"),
                       "mis_redes": lambda: ["10.0.0.0/8"],
                       "clave_cpe": lambda ip, rid: (rid + "|" + ip) if rid else ip})
     d["ACCIONES_FILE"] = os.path.join(tmp, "acciones.json")
     d["METRICAS_FILE"] = os.path.join(tmp, "metricas.json")
+    d["ENTRANTES_FILE"] = os.path.join(tmp, "entrantes.json")
 
     d["contar_accion"]("ENVIADO"); d["contar_accion"]("ENVIADO"); d["contar_accion"]("QUITADO")
     acc = d["cargar_acciones"]()
@@ -240,6 +248,60 @@ def main():
     check("con el porcentaje que corta cada una", "rpct" in pag_r)
     check("y el aviso de excluir el servidor de correo",
           "servidor de correo" in pag_r, "")
+
+    # ---------- bloqueo en el borde: cortar a los que nos atacan ----------
+    check("sin datos de entrantes no se propone bloquear a nadie",
+          d["blocklist_borde"]() == [], d["blocklist_borde"]())
+
+    # Aqui NO se pueden usar 203.0.113.x ni 198.51.100.x: son rangos de documentacion,
+    # no son direcciones publicas enrutables, y el codigo los rechaza a proposito (eso se
+    # comprueba mas abajo). Se usan resolutores publicos conocidos como relleno.
+    json.dump({"origenes": {
+        # golpea fuerte y a muchos: se bloquea
+        "1.1.1.1": {"alertas": 900, "destinos": 40, "pais": "CN", "firma": "SSH scan"},
+        # una sola alerta contra un solo destino: ruido de fondo de internet
+        "8.8.8.8": {"alertas": 1, "destinos": 1, "pais": "US", "firma": "x"},
+        # pocas alertas PERO fichada en un feed: entra igual
+        "9.9.9.9": {"alertas": 2, "destinos": 1, "pais": "RU", "firma": "y"},
+        # una IP nuestra que aparezca por error NO se bloquea jamas
+        "10.6.1.10": {"alertas": 5000, "destinos": 80, "pais": "EC", "firma": "z"},
+        # un rango de documentacion no es publico: no se bloquea aunque golpee
+        "203.0.113.50": {"alertas": 900, "destinos": 40, "pais": "XX", "firma": "w"},
+    }}, open(d["ENTRANTES_FILE"], "w", encoding="utf-8"))
+    io = __import__("io")
+    with io.open(os.path.join(tmp, "reputation.lst"), "w", encoding="utf-8") as fh:
+        fh.write("9.9.9.9\tfeodo\n")
+    with io.open(os.path.join(tmp, "reputation.meta"), "w", encoding="utf-8") as fh:
+        fh.write("{}")
+
+    bl = {x["ip"]: x for x in d["blocklist_borde"]()}
+    check("se bloquea al que golpea fuerte y a muchos destinos", "1.1.1.1" in bl, list(bl))
+    check("el ruido de fondo NO se bloquea", "8.8.8.8" not in bl, list(bl))
+    check("pero si esta fichada en un feed, entra aunque golpee poco",
+          "9.9.9.9" in bl and bl["9.9.9.9"]["fuente"] == "feodo", bl.get("9.9.9.9"))
+    check("un rango de documentacion no se bloquea: no es una IP publica",
+          "203.0.113.50" not in bl, list(bl))
+    check("una IP de TUS redes no se bloquea nunca", "10.6.1.10" not in bl, list(bl))
+    check("se dice por que esta cada una",
+          bl["1.1.1.1"]["alertas"] == 900 and bl["1.1.1.1"]["destinos"] == 40,
+          bl["1.1.1.1"])
+
+    rsc = d["blocklist_rsc"]()
+    check("el script limpia la lista vieja antes de escribir",
+          "remove $i" in rsc and "find list=suricata-atacantes" in rsc, rsc[:200])
+    check("y agrega las IPs con caducidad", "add list=suricata-atacantes" in rsc and "timeout=1d" in rsc)
+    check("sin meter comillas ni cosas raras en el comentario",
+          '"' not in rsc.split("comment=")[1].split('"')[1] if "comment=" in rsc else True)
+
+    reg = d["blocklist_reglas"]()
+    check("EL detalle que evita romper clientes: solo conexiones NUEVAS",
+          reg.count("connection-state=new") >= 2, reg)
+    check("no se corta en raw, que tiraria tambien las respuestas",
+          "/ip firewall raw" not in reg, reg)
+    check("el router se baja la lista solo, no se le meten miles por la API",
+          "/tool fetch" in reg and "scheduler" in reg)
+    check("se cubre lo que entra a la red y lo que entra al router",
+          "chain=forward" in reg and "chain=input" in reg)
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

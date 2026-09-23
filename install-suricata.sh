@@ -8896,8 +8896,11 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                    "<a href='https://www.abuseipdb.com/account/api' target=_blank rel=noopener>"
                    "abuseipdb.com</a> y se pega en <b>Ajustes &rarr; Reputacion</b>.</div>")
 
-    def _scb(n, corto=False):
-        c = "#3a9d5d" if n == 0 else ("#e58a00" if n < 25 else ("#e07b39" if n < 75 else "#e34948"))
+    def _scb(n, corto=False, verde=True):
+        # verde=False cuando hay direcciones con denuncias aunque el peor puntaje sea 0:
+        # pintarlo de verde diria "todo bien" y no es lo que pasa
+        c = ("#3a9d5d" if verde else "#8a8a86") if n == 0 else (
+            "#e58a00" if n < 25 else ("#e07b39" if n < 75 else "#e34948"))
         txt = f"{n} %" if corto else f"Confianza de abuso {n}%"
         return (f"<span style='background:{c};color:#fff;font-weight:700;font-size:12px;"
                 f"padding:3px 10px;border-radius:20px'>{txt}</span>")
@@ -9100,14 +9103,15 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 bl_html = ("<div class=hint style='margin-top:8px'>Listas de bloqueo: sin revisar "
                            "todavia (se revisan solas cada 6 h).</div>")
 
-            den_n = ""
+            den_n = ""; n_den = 0
             if isinstance(dat, dict) and dat.get("tipo") == "red":
-                den_n = (f"<span class=hint>{int(dat.get('n_den', 0)):,} de "
-                         f"{int(dat.get('hosts', 0)):,} denunciadas</span>")
+                n_den = int(dat.get("n_den", 0))
+                den_n = (f"<span class=hint>{n_den:,} de "
+                         f"{int(dat.get('hosts', 0)):,} con denuncias</span>")
             filas.append(
                 "<div style='padding:10px 0;border-top:1px solid #f0efec'>"
                 "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap'>"
-                f"<b class=mono>{esc(ent)}</b>{_scb(sc)}{den_n}"
+                f"<b class=mono>{esc(ent)}</b>{_scb(sc, verde=(sc == 0 and not n_den))}{den_n}"
                 f"<a class=hint href='?ips={esc(ent)}'>ver detalle</a>"
                 f"<span class=hint style='margin-left:auto'>ultima verificacion: {esc(visto)}</span></div>"
                 + bl_html + det + "</div>")
@@ -9195,7 +9199,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             f"Hoy quedan <b>{quedan:,}</b> consultas por IP y <b>{quedan_red:,}</b> por red.</p>"
             + banner + atras
             + ("".join(tarjetas) if tarjetas else "")
-            + pub_html
+            + ("" if res else pub_html)
             + "</main></body></html>")
 
 def bitacora_page(embed=False):

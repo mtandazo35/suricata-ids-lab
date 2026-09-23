@@ -326,6 +326,12 @@ def main():
           adm.lower().count("revisar ahora") == 1, adm.lower().count("revisar ahora"))
     check("y el enlace del detalle dice lo que hace", "ver detalle" in adm)
 
+    # mirando un resultado, el bloque de publicas estorba: para volver esta el boton
+    res_adm = ns["reputacion_page"](res=[("1.1.1.1", d, "cache", "")], es_admin=True)
+    check("con un resultado a la vista NO sale 'Tus IPs publicas'",
+          "Tus IPs publicas" not in res_adm)
+    check("pero sin consulta si sale", "Tus IPs publicas" in adm)
+
     # --- 12) una clave rechazada no se confunde con 'sin red' ---
     tmp2 = tempfile.mkdtemp(); red2 = Red(); ns2 = entorno(tmp2, red2)
     ns2["aidb_set"]("MALA")

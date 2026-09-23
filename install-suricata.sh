@@ -8919,7 +8919,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             den = d.get("denunciadas") or []
             hosts = int(d.get("hosts") or 0)
             cuando = time.strftime("%d/%m %H:%M", time.localtime(d.get("ts", 0)))
-            proc = "consultada ahora" if origen == "api" else f"de cache ({cuando})"
+            proc = f"ultima verificacion: {cuando}"
             if not den:
                 cuerpo = ("<div style='background:#e6f4ea;color:#1a7f37;border:1px solid #b7e0c2;"
                           "border-radius:8px;padding:12px 14px;font-size:13px'>"
@@ -8990,7 +8990,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
         if d.get("blanca"):
             extra.append("en lista blanca de AbuseIPDB")
         cuando = time.strftime("%d/%m %H:%M", time.localtime(d.get("ts", 0)))
-        proc = "consultado ahora" if origen == "api" else f"de cache ({cuando})"
+        proc = f"ultima verificacion: {cuando}"
         tarjetas.append(
             "<div class=card style='margin:0 0 12px'>"
             f"<div style='display:flex;align-items:center;gap:12px;flex-wrap:wrap'>"
@@ -9024,7 +9024,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             h = hist.get(ent) or {}
             sc = int(h.get("ultimo_score", 0))
             visto = (time.strftime("%d/%m %H:%M", time.localtime(h["ultimo_ts"]))
-                     if h.get("ultimo_ts") else "sin revisar")
+                     if h.get("ultimo_ts") else "nunca")
             dat = (_aidb_cache() or {}).get(ent) or {}
             cats = _cats_de(dat)
             # que se le denuncia y, sobre todo, QUIEN de este nodo lo esta haciendo
@@ -9105,7 +9105,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap'>"
                 f"<b class=mono>{esc(ent)}</b>{_scb(sc)}"
                 f"<a class=hint href='?ips={esc(ent)}'>revisar ahora</a>"
-                f"<span class=hint style='margin-left:auto'>revisada {esc(visto)}</span></div>"
+                f"<span class=hint style='margin-left:auto'>ultima verificacion: {esc(visto)}</span></div>"
                 + bl_html + det + "</div>")
         if not entradas and not es_admin:
             continue
@@ -9155,8 +9155,11 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
         "border:1px solid #cfe0f6;border-radius:9px;padding:7px 14px;text-decoration:none;"
         "font:600 13px system-ui}"
         ".volver a:hover{background:#dceafb;border-color:#a7c0ea}"
-        ".qbar input[name=ips]{padding:8px 11px;border:1px solid #d9d7d2;border-radius:9px;"
-        "font:13px ui-monospace,Consolas,monospace;min-width:230px}"
+        ".cab{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin:0 0 6px}"
+        ".busca{display:flex;align-items:center;gap:8px;margin-left:auto}"
+        ".busca input[name=ips]{padding:7px 11px;border:1px solid #d9d7d2;border-radius:9px;"
+        "font:13px ui-monospace,Consolas,monospace;min-width:190px}"
+        ".busca .chk{font-size:12.5px;color:#8a8a86;white-space:nowrap}"
         ".pedit{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}"
         ".pchip{display:inline-flex;align-items:center;gap:6px;background:#f1f1ef;"
         "border:1px solid #e0dfda;border-radius:20px;padding:3px 6px 3px 11px;font-size:12.5px}"
@@ -9171,27 +9174,24 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>"
             f"<style>{css}</style></head><body>" + nav("/reputacion") +
-            "<main><h1>Reputacion de IPs</h1>"
-            "<p class=sub2>Que ataques se le denuncian a una IP publica, en que listas de bloqueo esta, "
-            "y &mdash;si es tuya&mdash; que abonado la esta ensuciando.</p>"
+            "<main><div class=cab><h1 style='margin:0'>Reputacion de IPs</h1>"
+            # El buscador vive en la cabecera. Antes era una seccion entera con su titulo,
+            # su tarjeta y tres lineas de ayuda, justo debajo del bloque que hace lo mismo
+            # con TUS publicas: dos sitios para lo mismo y el doble de pagina para nada.
+            "<form method=get action='/reputacion' class=busca>"
+            f"<input name=ips size=22 value='{esc(texto)}' autocomplete=off "
+            "placeholder='Buscar IP o red (CIDR)' "
+            "title='Una red en CIDR se revisa con una sola peticion; hasta "
+            + str(AIDB_MAX_LOTE) + " separadas por comas. Las privadas nunca se envian'>"
+            "<label class=chk title='Ignora la cache y vuelve a preguntar'>"
+            "<input type=checkbox name=refrescar> sin cache</label>"
+            "<button class=primary type=submit>Buscar</button></form></div>"
+            "<p class=sub2>Que ataques se le denuncian a una IP publica, en que listas de bloqueo "
+            "esta, y &mdash;si es tuya&mdash; que abonado la esta ensuciando. "
+            f"Hoy quedan <b>{quedan:,}</b> consultas por IP y <b>{quedan_red:,}</b> por red.</p>"
             + banner + atras
             + ("".join(tarjetas) if tarjetas else "")
-            + ("" if res else pub_html)
-            + "<h2 style='font-size:17px;margin:18px 0 10px'>Consultar cualquier IP o red</h2>"
-            "<section class=card><form method=get action='/reputacion'>"
-            "<div class=qbar>"
-            f"<input name=ips size=30 value='{esc(texto)}' autocomplete=off "
-            "placeholder='IP o red: 200.0.0.0/24'>"
-            "<button class=primary type=submit>Consultar</button>"
-            "<label class=chk style='font-size:13px'><input type=checkbox name=refrescar> "
-            "Forzar consulta nueva</label>"
-            f"<span class=hint style='margin-left:auto'>Hoy quedan <b>{quedan:,}</b> de {AIDB_CUOTA:,} "
-            f"por IP y <b>{quedan_red:,}</b> de {AIDB_CUOTA_BLOQUE:,} por red</span></div>"
-            f"<div class=hint style='margin-top:8px'>Una red en CIDR revisa todas sus direcciones con "
-            "<b>una sola</b> peticion (el plan gratuito llega a /24). Se pueden separar varias por "
-            f"comas, hasta {AIDB_MAX_LOTE}. Las privadas nunca se envian.</div>"
-            "</form></section>"
-            + (pub_html if res else "")
+            + pub_html
             + "</main></body></html>")
 
 def bitacora_page(embed=False):

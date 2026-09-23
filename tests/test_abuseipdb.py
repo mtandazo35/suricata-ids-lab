@@ -295,6 +295,8 @@ def main():
                                    texto="200.0.0.7", volver="200.0.0.0/24")
     check("al mirar una direccion hay boton de vuelta a su red",
           "Volver a 200.0.0.0/24" in pag_ip)
+    check("se dice CUANDO se verifico, no de donde salio el dato",
+          "ultima verificacion" in pag_ip and "de cache" not in pag_ip, "")
     check("y la vuelta va ANTES del resultado, no al final de la pagina",
           pag_ip.index("Volver a 200.0.0.0/24") < pag_ip.index("Confianza de abuso"),
           (pag_ip.index("Volver a 200.0.0.0/24"), pag_ip.index("Confianza de abuso")))
@@ -314,8 +316,10 @@ def main():
     check("y cada ficha se puede quitar", "action='/publicas/quitar'" in adm)
     check("el titulo 'Tus IPs publicas' no sale dos veces",
           adm.count("Tus IPs publicas") == 1, adm.count("Tus IPs publicas"))
-    check("la consulta tambien es un campo de una linea",
-          "name=ips size=30" in adm, "")
+    check("el buscador es un campo pequeño en la cabecera, no una seccion",
+          "name=ips size=22" in adm and "class=busca" in adm, "")
+    check("ya no hay una seccion aparte 'Consultar cualquier IP o red'",
+          "Consultar cualquier IP" not in adm)
 
     # --- 12) una clave rechazada no se confunde con 'sin red' ---
     tmp2 = tempfile.mkdtemp(); red2 = Red(); ns2 = entorno(tmp2, red2)

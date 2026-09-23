@@ -1314,6 +1314,10 @@ NOW = time.time()
 sev_by_src = {}                    # peor severidad Suricata vista (1=alta..3=baja)
 dst_by_src = defaultdict(set)      # IPs destino distintas (barrido/propagacion)
 dpt_by_src = defaultdict(set)      # puertos destino distintos (port-sweep)
+# Con CUENTA, no solo distintos: para saber si un CPE es "el del 25/tcp" hace falta el
+# volumen, no la variedad. Acotados igual que el resto para no comerse la RAM.
+dport_cnt_by_src = defaultdict(Counter)   # CPE -> Counter("25/tcp" -> alertas)
+cat_cnt_by_src = defaultdict(Counter)     # CPE -> Counter("Fuerza bruta" -> alertas)
 n5_by_src = Counter()              # alertas en los ultimos 5 min (actividad ahora)
 n1h_by_src = Counter()             # alertas en la ultima hora (sostenido)
 patron_src = defaultdict(set)      # (sig,dport) -> CPEs que lo comparten (correlacion de flota)
@@ -1471,6 +1475,9 @@ for p in files:
                 dst_by_src[src].add(dst)
             if dport and len(dpt_by_src[src]) < MAX_CARD:
                 dpt_by_src[src].add(dport)
+            if dport:
+                _cuenta_acotada(dport_cnt_by_src[src], f"{dport}/{proto}")
+            _cuenta_acotada(cat_cnt_by_src[src], traducir(sig))
             if dport and len(patron_src[(sig, dport)]) < MAX_CARD:
                 patron_src[(sig, dport)].add(src)
             _sl = sig.lower()
@@ -2570,6 +2577,8 @@ try:
         sc, band, _c, _d = riesgo(src)
         cand.append({
             "ip": ip_de(src), "router": rid_de(src),
+            "puertos_top": dict(dport_cnt_by_src.get(src, Counter()).most_common(8)),
+            "cats_top": dict(cat_cnt_by_src.get(src, Counter()).most_common(6)),
             "riesgo": sc,
             "banda": band,
             "confianza": confianza,
@@ -2641,6 +2650,10 @@ try:
         # esta lista (no desde 'candidatos'), y sin estos datos el bloqueo quedaba sin
         # motivo que mostrar y el panel lo rotulaba como "manual / sin motivo".
         top_r.append({"ip": ip_de(_s), "router": rid_de(_s),
+                      # con que puertos y que tipo de trafico: es lo que permite cruzar
+                      # la reputacion de la IP publica con el abonado que la ensucia
+                      "puertos_top": dict(dport_cnt_by_src.get(_s, Counter()).most_common(8)),
+                      "cats_top": dict(cat_cnt_by_src.get(_s, Counter()).most_common(6)),
                       "riesgo": _sc, "banda": _bd, "desglose": _d2, "alertas": _t,
                       "destinos": len(dst_by_src.get(_s, ())), "puertos": len(dpt_by_src.get(_s, ()))})
     _cq = {"generado": int(time.time()), "ventana_min": VENTANA_MIN,
@@ -5603,6 +5616,214 @@ def aidb_denunciar(ip, firma="", dport="", proto="", n=0, quien="?"):
     nom = ", ".join(AIDB_CATS.get(c, str(c)) for c in cats)
     return True, f"{ip} denunciado como {nom}" + (f" (ahora {sc}% de abuso)" if sc is not None else "")
 
+# ---------------------------------------------------------------------------------
+# Las IPs PUBLICAS del cliente (el NAT de salida)
+# ---------------------------------------------------------------------------------
+# El espejo del MikroTik es PRE-NAT: Suricata ve 10.x, nunca la IP publica por la que
+# salio el ataque. Por eso las publicas se DECLARAN aqui, por nodo. A partir de ahi:
+#
+#   la reputacion de la publica dice QUE tipo de abuso sale por ella,
+#   Suricata dice QUIEN, dentro de ese nodo, hace ese tipo de trafico,
+#   y el cruce de las dos cosas es el abonado al que hay que meter en cuarentena.
+#
+# Sin el cruce solo se sabe "algo sale mal por esta IP", que no sirve para actuar.
+PUBLICAS_CONF = "/etc/suricata-publicas.json"
+PUB_HIST = "/var/log/suricata-publicas-reputacion.json"
+PUB_HIST_DIAS = 180
+PUB_UMBRAL_AVISO = 25          # a partir de aqui la IP ya esta ensuciada: avisar
+_PUB_LOCK = threading.RLock()
+
+def cargar_publicas():
+    """{id_router: [ "200.0.0.0/24", "190.0.2.7", ... ]}"""
+    try:
+        d = json.load(open(PUBLICAS_CONF, encoding="utf-8"))
+        n = d.get("nodos")
+        if isinstance(n, dict):
+            return {k: [str(x) for x in (v or [])] for k, v in n.items()}
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {}
+
+def guardar_publicas(d):
+    tmp = PUBLICAS_CONF + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"nodos": d}, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, PUBLICAS_CONF)
+    return d
+
+def publicas_texto(rid):
+    return "\n".join(cargar_publicas().get(rid, []))
+
+def guardar_publicas_de(rid, texto):
+    """Guarda las entradas de un nodo. Devuelve (guardadas, rechazadas)."""
+    ok, mal = [], []
+    for t in re.split(r"[\s,;]+", texto or ""):
+        t = t.strip()
+        if not t:
+            continue
+        if "/" in t:
+            red, porque = aidb_red_valida(t)
+            (ok.append(str(red)) if red is not None else mal.append(f"{t} ({porque})"))
+        else:
+            v, porque = aidb_ip_valida(t)
+            (ok.append(t) if v else mal.append(f"{t} ({porque})"))
+    d = cargar_publicas()
+    if ok:
+        d[rid] = sorted(set(ok))
+    else:
+        d.pop(rid, None)
+    guardar_publicas(d)
+    return ok, mal
+
+def _pub_hist():
+    try:
+        return json.load(open(PUB_HIST, encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+def _guardar_pub_hist(d):
+    try:
+        tmp = "%s.%d.tmp" % (PUB_HIST, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, PUB_HIST)
+    except OSError:
+        pass
+
+def _peor_de(dat):
+    """Puntaje representativo de una entrada: el de la IP, o el peor de la red."""
+    if not dat:
+        return 0
+    if dat.get("tipo") == "red":
+        den = dat.get("denunciadas") or []
+        return max([int(x[1]) for x in den] or [0])
+    return int(dat.get("score") or 0)
+
+def _cats_de(dat):
+    """Categorias denunciadas de una entrada, como lista de ids."""
+    if not dat or dat.get("tipo") == "red":
+        return []          # el endpoint de bloques no trae categorias (hay que mirar la IP)
+    return [int(c) for c, _n in (dat.get("cats") or []) if str(c).isdigit()]
+
+def vigilar_publicas(forzar=False):
+    """Revisa la reputacion de las publicas declaradas y guarda la serie por dia.
+    Corre en el hilo de fondo; si no hay nada declarado, no hace nada ni gasta cuota."""
+    decl = cargar_publicas()
+    if not decl or not aidb_configurada():
+        return 0
+    hoy = time.strftime("%Y-%m-%d")
+    hist = _pub_hist()
+    n = 0
+    for rid, entradas in decl.items():
+        for ent in entradas:
+            if "/" in ent:
+                dat, origen, err = aidb_consultar_red(ent, refrescar=forzar)
+            else:
+                dat, origen, err = aidb_consultar(ent, refrescar=forzar)
+            if not dat:
+                continue
+            if origen == "api":
+                n += 1
+            sc = _peor_de(dat)
+            h = hist.get(ent)
+            if not isinstance(h, dict):
+                h = {"router": rid, "dias": {}}
+            antes = int(h.get("ultimo_score", 0))
+            h["router"] = rid
+            h["dias"] = h.get("dias") or {}
+            h["dias"][hoy] = sc
+            lim = time.strftime("%Y-%m-%d", time.localtime(time.time() - PUB_HIST_DIAS * 86400))
+            h["dias"] = {k: v for k, v in h["dias"].items() if k >= lim}
+            h["ultimo_score"] = sc
+            h["ultimo_ts"] = int(time.time())
+            hist[ent] = h
+            # aviso solo al CRUZAR el umbral: si no, avisaria en cada vuelta
+            if sc >= PUB_UMBRAL_AVISO and antes < PUB_UMBRAL_AVISO:
+                nom = (router_por_id(rid) or {}).get("nombre") or rid
+                try:
+                    enviar_telegram(f"\u26a0\ufe0f IP publica ensuciada [{_hostname()}]: {ent} "
+                                    f"({nom}) esta denunciada ({sc} % de abuso). "
+                                    f"Panel -> Consultar IP para ver que abonado lo causa.")
+                except Exception:
+                    pass
+                bitacora("PUBLICA-DENUNCIADA", f"{ent} score={sc} nodo={nom}", quien="auto")
+    with _PUB_LOCK:
+        _guardar_pub_hist(hist)
+    return n
+
+# --- de la categoria denunciada a la señal que SI ve Suricata ----------------------
+# Cada categoria de AbuseIPDB se traduce a los puertos de salida y a las categorias de
+# firma con las que ese abuso se manifiesta puertas adentro. Es una traduccion, no una
+# certeza: sirve para ORDENAR sospechosos, no para condenar a nadie sola.
+AIDB_SENAL = {
+    4:  {"cats": ["Botnet", "Botnet CnC", "Botnet Mirai", "Botnet Katana"]},
+    5:  {"puertos": ["21"], "cats": ["Fuerza bruta"]},
+    8:  {"puertos": ["5060", "5061"], "cats": ["Fuerza bruta"]},
+    9:  {"puertos": ["3128", "8080", "1080", "9050"]},
+    11: {"puertos": ["25", "465", "587"], "cats": ["Spam"]},
+    14: {"cats": ["Escaneo de puertos", "Escaneo saliente", "Escaneo SSH",
+                  "Escaneo Telnet", "Escaneo TR-069"]},
+    15: {"cats": ["Exploit", "Trafico de malware"]},
+    16: {"puertos": ["80", "443", "3306", "1433"], "cats": ["Exploit"]},
+    18: {"puertos": ["22", "23", "21", "3389", "5060", "2222"], "cats": ["Fuerza bruta"]},
+    19: {"puertos": ["80", "443"], "cats": ["Anomalia HTTP", "User-Agent raro", "Cliente HTTP Go"]},
+    20: {"cats": ["Botnet CnC", "Troyano", "Trafico de malware", "Ransomware", "Criptomineria"]},
+    21: {"puertos": ["80", "443", "8080", "8443"], "cats": ["Exploit", "Anomalia HTTP"]},
+    22: {"puertos": ["22", "2222"], "cats": ["Escaneo SSH", "Fuerza bruta"]},
+    23: {"puertos": ["23", "2323", "7547", "37215"],
+         "cats": ["Escaneo Telnet", "Escaneo TR-069", "Botnet Mirai"]},
+}
+
+def senal_de_categorias(cats):
+    """Puertos y categorias de firma a buscar, a partir de las categorias denunciadas."""
+    puertos, firmas = set(), set()
+    for c in cats or []:
+        sen = AIDB_SENAL.get(int(c)) or {}
+        puertos |= set(sen.get("puertos") or [])
+        firmas |= set(sen.get("cats") or [])
+    return puertos, firmas
+
+def _cpes_del_nodo(rid):
+    """CPEs con actividad del reporte actual, con lo que hace falta para el cruce."""
+    try:
+        cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    fuera = {}
+    for clave in ("candidatos", "dns_candidatos", "top_riesgo"):
+        for c in cq.get(clave, []):
+            if (c.get("router") or "") != (rid or ""):
+                continue
+            k = clave_cpe(c.get("ip", ""), c.get("router", ""))
+            prev = fuera.get(k) or {}
+            # 'candidatos' trae mas contexto que 'top_riesgo': que no lo pise
+            fuera[k] = {**c, **{x: y for x, y in prev.items() if y and not c.get(x)}}
+    return list(fuera.items())
+
+def culpables_de(rid, cats, tope=12):
+    """Ordena los CPEs de ese nodo por cuanto encajan con lo que se denuncia de su IP
+    publica. Devuelve [(clave, cpe, puntos, [motivos])]."""
+    puertos, firmas = senal_de_categorias(cats)
+    if not puertos and not firmas:
+        return []
+    env = set(cargar_enviados(MK_SENT)) | set(cargar_enviados(MK_SENT_DNS))
+    out = []
+    for k, c in _cpes_del_nodo(rid):
+        pts = 0; motivos = []
+        pt = c.get("puertos_top") or {}
+        for p_, n_ in pt.items():
+            if str(p_).split("/", 1)[0] in puertos:
+                pts += int(n_); motivos.append(f"{int(n_):,} alertas por {p_}")
+        ct = c.get("cats_top") or {}
+        for cat, n_ in ct.items():
+            if cat in firmas:
+                pts += int(n_); motivos.append(f"{int(n_):,} de {cat}")
+        if not pts:
+            continue
+        out.append((k, c, pts, motivos[:4], k in env))
+    out.sort(key=lambda x: x[2], reverse=True)
+    return out[:tope]
+
 def aidb_probar(key):
     """Valida una clave ANTES de guardarla. (True|False|None, mensaje)."""
     key = (key or "").strip()
@@ -6013,6 +6234,7 @@ def refrescador():
     ult_sensor = 0.0
     ult_fast = 0.0
     ult_aidb = 0.0
+    ult_pub = 0.0
     ult_forzado = 0.0   # ultima regeneracion pedida a mano/por cambios (ver REGEN_MIN_SECS)
     while True:
         global FORCE_REGEN
@@ -6038,6 +6260,10 @@ def refrescador():
             try: precargar_abuseipdb()
             except Exception as _e: sys.stderr.write("precarga abuseipdb: %s\n" % _e)
             ult_aidb = time.time()
+        if time.time() - ult_pub > 6 * 3600:   # cada ~6 h: reputacion de TUS IPs publicas
+            try: vigilar_publicas()
+            except Exception as _e: sys.stderr.write("vigilancia de publicas: %s\n" % _e)
+            ult_pub = time.time()
         nr = newest_report()
         # una regeneracion FORZADA se atiende como mucho cada REGEN_MIN_SECS; la marca no
         # se pierde, solo se agrupa (un lote de cambios = una sola generacion)
@@ -7865,6 +8091,29 @@ si se corta en el borde.</li>
 SSH, hay un <b>abonado infectado</b> detras atacando al resto de internet desde tu red. Eso es lo que
 hay que corregir, y es la unica forma de enterarte antes de que te metan en una lista negra.</li>
 </ul>
+<h3>Tus IPs publicas: de "me banean" a "este abonado lo causa"</h3>
+<p>El espejo del MikroTik es <b>pre-NAT</b>: Suricata ve <code>10.x</code> y <b>nunca</b> la IP
+publica por la que salio el ataque. Por eso las publicas se <b>declaran</b> en la propia pestana
+<b>Consultar IP</b> (arriba del todo, una caja por nodo, admite IPs sueltas y redes CIDR). A partir
+de ahi el panel hace el cruce que ninguna de las dos mitades puede hacer sola:</p>
+<ol class=doc>
+<li>La <b>reputacion de tu publica</b> dice <b>que tipo</b> de abuso sale por ella: fuerza bruta SSH,
+escaneo de puertos, spam de correo&hellip;</li>
+<li><b>Suricata</b> dice <b>quien</b>, dentro de ese nodo, hace ese tipo de trafico: que CPEs hablan
+por el 22, por el 25, cuales escanean.</li>
+<li>El panel <b>traduce</b> cada categoria denunciada a esos puertos y firmas, y te lista los CPEs
+del nodo ordenados por cuanto encajan, <b>diciendo por que</b> ("1.500 alertas por 25/tcp"). Cada
+uno lleva su boton de <b>Cuarentena</b> al lado.</li>
+</ol>
+<p>Se revisan solas <b>cada 6 horas</b>. Cuando una publica <b>cruza</b> el 25&nbsp;% de abuso llega un
+aviso por Telegram (una vez, no en cada vuelta) y queda en la bitacora. De cada publica se guarda la
+<b>serie por dia</b> durante 180 dias: es lo que permite enseñar que despues de limpiar, el puntaje
+baja.</p>
+<p>Avisos importantes de honestidad: la traduccion sirve para <b>ordenar sospechosos</b>, no para
+condenar; el listado de una <b>red</b> no trae categorias, asi que para saber el porque hay que
+consultar la direccion concreta; y si ningun CPE encaja, se dice, en vez de señalar a cualquiera.
+Los CPEs de <b>otros nodos</b> nunca se mezclan, aunque hagan lo mismo.</p>
+
 <h3>Cuota y privacidad</h3>
 <ul>
 <li>El plan gratuito da <b>1.000 consultas al dia</b> (se reinicia a medianoche <b>UTC</b>). El panel
@@ -8207,7 +8456,7 @@ def log_page(embed=False):
             "<input class=search id=lsearch placeholder='Buscar IP, usuario, accion...' oninput='lfiltrar()'></div>"
             + cuerpo + "</section></main>" + script + "</body></html>")
 
-def reputacion_page(res=None, texto="", msg="", ok=False):
+def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False):
     """Consultar en AbuseIPDB que ataques se le denuncian a una IP publica.
 
     Dos usos, y el segundo es el que de verdad arregla cosas:
@@ -8331,6 +8580,88 @@ def reputacion_page(res=None, texto="", msg="", ok=False):
             + (f" &middot; ultima {esc(d.get('ultimo'))}" if d.get("ultimo") else "") + "</div>"
             + chips + arr_html + ejem + "</div>")
 
+    # --- Tus IPs publicas: el puente entre "me banean" y "quien lo causa" -----------
+    decl = cargar_publicas()
+    hist = _pub_hist()
+    rs = cargar_routers()
+    multi = len(rs) > 1
+    bloques = []
+    for r in rs:
+        rid = r.get("id", "")
+        entradas = decl.get(rid) or []
+        nom = r.get("nombre") or r.get("HOST") or rid
+        filas = []
+        for ent in entradas:
+            h = hist.get(ent) or {}
+            sc = int(h.get("ultimo_score", 0))
+            visto = (time.strftime("%d/%m %H:%M", time.localtime(h["ultimo_ts"]))
+                     if h.get("ultimo_ts") else "sin revisar")
+            dat = (_aidb_cache() or {}).get(ent) or {}
+            cats = _cats_de(dat)
+            # que se le denuncia y, sobre todo, QUIEN de este nodo lo esta haciendo
+            det = ""
+            if sc:
+                if cats:
+                    det = "<div class=hint style='margin-top:4px'>" + esc(aidb_cats_txt(
+                        [[c, 1] for c in cats], sep=" &middot; ")).replace(" (1)", "") + "</div>"
+                culp = culpables_de(rid, cats) if cats else []
+                if culp:
+                    lis = "".join(
+                        "<li style='margin:6px 0'>"
+                        f"<b class=mono>{esc(ip_de(k))}</b> "
+                        f"<span class=hint>{esc(', '.join(mot))}</span> "
+                        + ("<span class=hint style='color:#3a9d5d'>&#10003; ya en cuarentena</span>"
+                           if yaesta else
+                           "<form method=post action='/cuarentena/enviar' style='display:inline'>"
+                           f"<input type=hidden name=ip value='{esc(k)}'>"
+                           f"<input type=hidden name=score value='{c.get('riesgo', 0)}'>"
+                           "<button class='qbtn send' style='padding:3px 10px;font-size:12px'>"
+                           "Cuarentena</button></form>")
+                        + "</li>"
+                        for k, c, _pts, mot, yaesta in culp)
+                    det += ("<details open style='margin-top:8px'><summary style='cursor:pointer;"
+                            "font-size:13px;font-weight:600'>Quien lo esta causando ("
+                            + str(len(culp)) + ")</summary>"
+                            "<ul style='margin:6px 0 0;padding-left:18px;font-size:13px'>"
+                            + lis + "</ul></details>")
+                elif cats:
+                    det += ("<div class=hint style='margin-top:6px'>Ningun CPE de este nodo "
+                            "coincide ahora mismo con ese tipo de trafico: puede haberse "
+                            "limpiado solo, o el abuso salir por otro nodo.</div>")
+                elif dat.get("tipo") == "red":
+                    det += ("<div class=hint style='margin-top:6px'>Consulta cada direccion "
+                            "denunciada (abajo) para saber por que: el listado de una red no "
+                            "trae las categorias.</div>")
+            filas.append(
+                "<div style='padding:10px 0;border-top:1px solid #f0efec'>"
+                "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap'>"
+                f"<b class=mono>{esc(ent)}</b>{_scb(sc)}"
+                f"<a class=hint href='?ips={esc(ent)}'>revisar ahora</a>"
+                f"<span class=hint style='margin-left:auto'>revisada {esc(visto)}</span></div>"
+                + det + "</div>")
+        if not entradas and not es_admin:
+            continue
+        editor = ""
+        if es_admin:
+            editor = ("<form method=post action='/publicas' style='margin-top:10px'>"
+                      f"<input type=hidden name=rid value='{esc(rid)}'>"
+                      "<div class=field><label style='font-size:12.5px'>IPs y redes publicas de este nodo "
+                      "(una por linea; acepta CIDR)</label>"
+                      f"<textarea name=entradas rows=3>{esc(publicas_texto(rid))}</textarea></div>"
+                      "<button class=primary type=submit style='padding:6px 14px;font-size:13px'>"
+                      "Guardar</button></form>")
+        bloques.append(
+            "<section class=card style='margin:0 0 12px'>"
+            + (f"<h2 style='font-size:15px;margin:0'>Nodo {esc(nom)}</h2>" if multi
+               else "<h2 style='font-size:15px;margin:0'>Tus IPs publicas</h2>")
+            + ("".join(filas) if filas else
+               "<p class=hint style='margin:8px 0 0'>Todavia no declaraste ninguna. "
+               "Ponlas aqui: el sensor no las ve (el espejo es pre-NAT) y sin ellas no se "
+               "puede ligar un baneo con el abonado que lo provoca.</p>")
+            + editor + "</section>")
+    pub_html = ("<h2 style='font-size:17px;margin:4px 0 10px'>Tus IPs publicas</h2>"
+                + "".join(bloques)) if bloques else ""
+
     css = BASE_CSS + (
         "textarea{width:100%;min-height:84px;padding:10px 12px;border:1px solid #d9d7d2;"
         "border-radius:9px;font:13px ui-monospace,Consolas,monospace;resize:vertical}"
@@ -8344,7 +8675,8 @@ def reputacion_page(res=None, texto="", msg="", ok=False):
             "te esta atacando, y &mdash;sobre todo&mdash; pegar <b>tus propias IPs publicas de NAT</b> "
             "para ver por que te denuncian a vos: eso senala que hay un abonado infectado detras y que "
             "es lo que hay que corregir.</p>"
-            + banner +
+            + banner + pub_html +
+            "<h2 style='font-size:17px;margin:18px 0 10px'>Consultar cualquier IP o red</h2>"
             "<section class=card><form method=post action='/reputacion'>"
             "<div class=field><label>IPs o redes publicas (una por linea, o separadas por comas)</label>"
             f"<textarea name=ips placeholder='200.0.0.0/24&#10;una IP publica por linea'>{esc(texto)}</textarea>"
@@ -9541,8 +9873,9 @@ class H(BaseHTTPRequestHandler):
             _t = (_qr.get("ips", [""])[0]).strip()
             if _t:
                 _res, _av = aidb_lote(_t)
-                return self._html(reputacion_page(res=_res, texto=_t, msg=_av, ok=not _av))
-            return self._html(reputacion_page())
+                return self._html(reputacion_page(res=_res, texto=_t, msg=_av, ok=not _av,
+                                                  es_admin=self._admin()))
+            return self._html(reputacion_page(es_admin=self._admin()))
         if path == "/documentacion":
             _qd = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             return self._html(documentacion_page(embed=("1" in _qd.get("embed", [])),
@@ -9870,7 +10203,8 @@ class H(BaseHTTPRequestHandler):
             res, aviso = aidb_lote(texto, refrescar=bool(q.get("refrescar")))
             if res:
                 bitacora("CONSULTA-ABUSEIPDB", f"{len(res)} entrada(s)")
-            return self._html(reputacion_page(res=res, texto=texto, msg=aviso, ok=not aviso))
+            return self._html(reputacion_page(res=res, texto=texto, msg=aviso, ok=not aviso,
+                                              es_admin=self._admin()))
         if ruta == "/reputacion/denunciar":
             if not self._operador():
                 return self._deny()
@@ -9895,6 +10229,17 @@ class H(BaseHTTPRequestHandler):
             return self._html(perfil_page(
                 "Denuncias a AbuseIPDB ACTIVADAS: aparecera un boton en cada atacante entrante."
                 if on else "Denuncias a AbuseIPDB desactivadas.", ok=True))
+        if ruta == "/publicas":
+            if not self._admin():
+                return self._deny()
+            rid = (q.get("rid", [""])[0]).strip()
+            if not router_por_id(rid):
+                return self._redirect("/reputacion")
+            ok_l, mal = guardar_publicas_de(rid, q.get("entradas", [""])[0])
+            bitacora("CONFIG-PUBLICAS", f"nodo={rid} {len(ok_l)} entrada(s)"
+                                        + (f"; rechazadas: {', '.join(mal[:3])}" if mal else ""))
+            threading.Thread(target=vigilar_publicas, daemon=True).start()
+            return self._redirect("/reputacion")
         if ruta == "/feeds/aidb":
             if not self._admin():
                 return self._deny()

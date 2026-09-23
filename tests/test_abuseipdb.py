@@ -44,7 +44,12 @@ PIEZAS = ("FEEDS_CONF", "AIDB_CACHE", "AIDB_ESTADO", "AIDB_TTL_LIMPIA", "AIDB_TT
           "aidb_consultar", "aidb_cats_txt", "reputacion_page",
           "AIDB_CUOTA_BLOQUE", "AIDB_PREFIJO_MIN", "aidb_restantes_bloque",
           "aidb_red_valida", "_aidb_pedir_red", "_aidb_resumen_red", "aidb_consultar_red",
-          "aidb_lote")
+          "aidb_lote",
+          # bloque "Tus IPs publicas" de la pagina
+          "PUBLICAS_CONF", "PUB_HIST", "PUB_HIST_DIAS", "PUB_UMBRAL_AVISO", "_PUB_LOCK",
+          "AIDB_SENAL", "cargar_publicas", "guardar_publicas", "publicas_texto",
+          "guardar_publicas_de", "_pub_hist", "_guardar_pub_hist", "_peor_de", "_cats_de",
+          "senal_de_categorias", "_cpes_del_nodo", "culpables_de")
 
 fallos = 0
 def check(d, c, e=""):
@@ -90,13 +95,19 @@ def entorno(tmp, red):
     ns = {"json": json, "os": os, "re": re, "time": __import__("time"), "html": __import__("html"),
           "threading": __import__("threading"), "ipaddress": __import__("ipaddress"),
           "urllib": types.SimpleNamespace(request=red, error=urllib.error, parse=urllib.parse),
-          "BASE_CSS": "", "nav": lambda a="": "<!--nav-->"}
+          "BASE_CSS": "", "nav": lambda a="": "<!--nav-->",
+          "cargar_routers": lambda: [], "cargar_enviados": lambda *a, **k: {},
+          "MK_SENT": "", "MK_SENT_DNS": "", "LOGDIR": tmp,
+          "clave_cpe": lambda ip, rid: (rid + "|" + ip) if rid else ip,
+          "ip_de": lambda k: k.split("|", 1)[1] if "|" in k else k}
     for n in ARBOL.body:
         nombre = getattr(n, "name", None) or (
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
         if nombre in PIEZAS:
             exec(ast.get_source_segment(DASH, n) or "", ns)
     ns["FEEDS_CONF"] = os.path.join(tmp, "feeds.conf")
+    ns["PUBLICAS_CONF"] = os.path.join(tmp, "publicas.json")
+    ns["PUB_HIST"] = os.path.join(tmp, "pub-hist.json")
     ns["AIDB_CACHE"] = os.path.join(tmp, "aidb.json")
     ns["AIDB_ESTADO"] = os.path.join(tmp, "aidb-estado.json")
     return ns

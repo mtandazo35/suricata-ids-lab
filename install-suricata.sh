@@ -1079,6 +1079,14 @@ def rid_de(clave):
 # del Top muestre "En cuarentena" en vez de "Cuarentena" cuando ya se envio.
 # Son DOS listas (infectados y DNS sospechoso): si solo se mira la primera, un CPE
 # enviado a la de DNS aparece en el Top como si no estuviera en cuarentena.
+# El panel publica aqui lo que el reporte necesita saber de el. Va aparte del .conf de
+# feeds a proposito: ese lleva las CLAVES y aqui no hace falta ninguna.
+try:
+    _FLAGS = json.load(open("/var/log/suricata-panel-flags.json", encoding="utf-8"))
+except (OSError, ValueError):
+    _FLAGS = {}
+_AIDB_REPORTAR = bool(_FLAGS.get("aidb_reportar"))
+
 _MK_ENVIADOS = set()
 for _pe in ("/var/log/suricata-cuarentena-enviados.json", "/var/log/suricata-dns-enviados.json"):
     try:
@@ -1766,7 +1774,32 @@ def _guardar_ipinfo():
     except Exception:
         pass
 
+# AbuseIPDB: lo que el PANEL ya consulto. Aqui solo se LEE la cache: el panel es el
+# unico que llama a la API, porque la cuota es diaria y con dos procesos gastandola no
+# la controlaria nadie. Si el archivo no existe, todo sigue como siempre.
+_AIDB_CACHE_F = "/var/lib/suricata-feeds/abuseipdb.json"
+try:
+    _AIDB = json.load(open(_AIDB_CACHE_F, encoding="utf-8"))
+except (OSError, ValueError):
+    _AIDB = {}
+
+def _aidb_chip(dst):
+    """Que ataques se le denuncian a ese destino, si el panel ya lo consulto."""
+    d = _AIDB.get(dst)
+    if not isinstance(d, dict):
+        return ""
+    sc = int(d.get("score") or 0)
+    if sc <= 0:
+        return ""
+    nom = ", ".join((d.get("cats_nom") or [])[:2])
+    det = f"{d.get('reportes', 0):,} denuncias de {d.get('denunciantes', 0):,} denunciantes"
+    ttl = f"AbuseIPDB: {sc}% de confianza de abuso; {det}" + (f". Denunciado por: {nom}" if nom else "")
+    col = "#e34948" if sc >= 75 else ("#e07b39" if sc >= 25 else "#e58a00")
+    return (f"<div><span class='obadge' style='background:{col};color:#fff;margin-top:4px' "
+            f"title='{esc(ttl)}'>abuso {sc}%{(' · ' + esc(nom)) if nom else ''}</span></div>")
+
 def _org_celda(dst):
+    aidb = _aidb_chip(dst)
     # 1) si el destino esta en una lista de reputacion, eso manda (aunque no tenga PTR)
     fuente = es_malo(dst)
     if fuente:
@@ -1774,20 +1807,21 @@ def _org_celda(dst):
         etq = ((cat + " · ") if cat else "") + fuente
         return (f"<td class='org'><span class='obadge bad' title='Destino en lista de reputacion "
                 f"({esc(fuente)}{(', ' + esc(cat)) if cat else ''}) &mdash; ver ficha para el CIDR y la vigencia'>"
-                f"&#9888; {esc(etq)}</span></td>")
+                f"&#9888; {esc(etq)}</span>{aidb}</td>")
     org, legit = duenio(dst)
     if org == "-":
-        return "<td class='org'>-</td>"
+        return f"<td class='org'>-{aidb}</td>"
     if legit:
         return (f"<td class='org'><span class='obadge ok' title='Servicio conocido "
-                f"(CDN/gran empresa): trafico casi siempre legitimo'>{esc(org)}</span></td>")
+                f"(CDN/gran empresa): trafico casi siempre legitimo'>{esc(org)}</span>{aidb}</td>")
     if org == "sin PTR":
-        return "<td class='org'><span class='obadge none' title='Sin DNS inverso ni operador identificable'>sin PTR</span></td>"
+        return ("<td class='org'><span class='obadge none' title='Sin DNS inverso ni operador identificable'>"
+                f"sin PTR</span>{aidb}</td>")
     via = (_ipinfo.get(dst, {}) or {}).get("via", "")
     ttl = ("Operador de red del bloque IP (RDAP); no tiene DNS inverso" if via == "rdap"
            else "Dominio del dueño segun DNS inverso; no es un servicio grande conocido")
     marca = "&#127760; " if via == "rdap" else ""   # globo: viene del operador de red, no de PTR
-    return (f"<td class='org'><span class='obadge unk' title='{ttl}'>{marca}{esc(org)}</span></td>")
+    return (f"<td class='org'><span class='obadge unk' title='{ttl}'>{marca}{esc(org)}</span>{aidb}</td>")
 
 
 # --- Reputacion: feeds de IPs/CIDR malos (suricata-feeds-update), con caducidad ---
@@ -2389,13 +2423,25 @@ def entrantes_section(n_src=8, n_sub=6, max_src=5000, max_det=60):
             f"<td class='num'>{c:,}</td></tr>" for (d, dp, pr, sig), c in sub)
         _pa = pais(ip_de(src))
         _chip = f"<span class='obadge unk'>{esc(_pa)}</span>" if _pa else ""
+        _ipa = ip_de(src)
+        # que se le denuncia a ESTE atacante (si el panel ya lo consulto en AbuseIPDB)
+        _aidb = _aidb_chip(_ipa)
+        # denunciarlo de vuelta: solo si el admin lo habilito en Ajustes
+        _den = ""
+        if _AIDB_REPORTAR:
+            _tf = sub[0][0] if sub else ("", "", "", "")
+            _den = (f"<button class='qsend' title='Denunciar esta IP a AbuseIPDB "
+                    f"(accion publica y a tu nombre)' onclick=\"qden(this,'{esc(_ipa)}',"
+                    f"'{esc((_tf[3] or '')[:90])}','{esc(_tf[1] or '')}','{esc(_tf[2] or '')}',"
+                    f"'{e['n']}')\">&#9873; Denunciar</button>")
         cards.append(
             f"<div class='tcard'>"
             f"<div class='thd'><span class='rank'>#{i}</span>"
-            f"<span class='ipx mono'>{esc(ip_de(src))}</span>{_chip}{_dst_badge(ip_de(src))}{_chip_nodo(src)}"
-            f"<span class='tot'>{e['n']:,} alertas</span>"
+            f"<span class='ipx mono'>{esc(_ipa)}</span>{_chip}{_dst_badge(_ipa)}{_chip_nodo(src)}"
+            f"<span class='tot'>{e['n']:,} alertas</span>{_den}"
             f"<span class='meta'>&rarr; golpea {len(e['dst']):,} IP(s) de tu red</span></div>"
-            f"<div class='tablewrap'><table><thead><tr>"
+            + (f"<div style='padding:0 15px 10px'>{_aidb}</div>" if _aidb else "")
+            + f"<div class='tablewrap'><table><thead><tr>"
             f"<th>IP de tu red (a quien golpea)</th><th>Puerto destino</th>"
             f"<th>Protocolo</th><th>Firma</th><th class='num'>Peticiones</th>"
             f"</tr></thead><tbody>{rows}</tbody></table></div></div>")
@@ -2406,7 +2452,19 @@ def entrantes_section(n_src=8, n_sub=6, max_src=5000, max_det=60):
         "address-list de CPEs no bloquearia nada util. Lo que corresponde es <b>cortarlos en el borde</b> "
         "(firewall de entrada) o <b>cerrar la exposicion</b> del equipo golpeado: si algo tuyo recibe "
         "escaneo constante desde internet, casi siempre es que tiene un puerto publicado que no hacia falta.</p>"
-        f"<div class=\"topwrap\">{''.join(cards)}</div></section>")
+        + ("<script>function qden(b,ip,f,dp,pr,n){if(!confirm('Denunciar '+ip+' a AbuseIPDB?\\n\\n"
+           "Es publico y queda a tu nombre. No se envia ninguna IP tuya.'))return;"
+           "b.disabled=true;var o=b.innerHTML;b.textContent='enviando...';"
+           "fetch('/reputacion/denunciar',{method:'POST',credentials:'same-origin',"
+           "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+           "body:'ip='+encodeURIComponent(ip)+'&firma='+encodeURIComponent(f)+'&dport='+"
+           "encodeURIComponent(dp)+'&proto='+encodeURIComponent(pr)+'&n='+encodeURIComponent(n)})"
+           ".then(function(r){return r.text();}).then(function(t){"
+           "if(t.indexOf('OK')===0){b.outerHTML=\"<span class='qsent'>\\u2713 Denunciado</span>\";}"
+           "else{b.disabled=false;b.innerHTML=o;alert(t.replace(/^ERR: /,''));}})"
+           ".catch(function(e){b.disabled=false;b.innerHTML=o;alert('Error: '+e);});}</script>"
+           if _AIDB_REPORTAR else "")
+        + f"<div class=\"topwrap\">{''.join(cards)}</div></section>")
 
 top_sec = top_origenes_section()
 
@@ -5050,8 +5108,10 @@ def _aidb_resumen(d):
             "reportes": int(d.get("totalReports") or 0),
             "denunciantes": int(d.get("numDistinctUsers") or 0),
             "ultimo": (d.get("lastReportedAt") or "")[:19],
-            "cats": [[c, n] for c, n in orden], "ejemplos": ejemplos,
-            "ts": int(time.time())}
+            "cats": [[c, n] for c, n in orden],
+            # ya traducidas: el generador del reporte las pinta sin conocer la taxonomia
+            "cats_nom": [AIDB_CATS.get(c, "categoria %d" % c) for c, _n in orden],
+            "ejemplos": ejemplos, "ts": int(time.time())}
 
 def aidb_consultar(ip, auto=False, refrescar=False):
     """Ficha de una IP publica. Devuelve (datos|None, origen, error);
@@ -5097,6 +5157,194 @@ def aidb_consultar(ip, auto=False, refrescar=False):
                 cache.pop(k, None)
         _aidb_guardar_cache(cache)
     return res, "api", ""
+
+def precargar_abuseipdb(max_por_ciclo=4):
+    """Va llenando la cache con los destinos de los CPEs candidatos, de a pocos.
+
+    Solo mira DESTINOS (publicos): la IP del abonado es privada y no sale de aqui. Usa
+    auto=True, asi que nunca puede comerse la reserva de consultas del operador, y si se
+    queda sin cuota o sin red deja de insistir hasta el ciclo siguiente."""
+    if not aidb_configurada():
+        return 0
+    try:
+        cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    destinos = []
+    for key in ("candidatos", "dns_candidatos"):
+        for c in cq.get(key, []):
+            for d in (c.get("destinos_ip") or []):
+                if d not in destinos:
+                    destinos.append(d)
+    hechas = 0
+    for ip in destinos:
+        if hechas >= max_por_ciclo:
+            break
+        ok, _porque = aidb_ip_valida(ip)
+        if not ok:
+            continue
+        _d, origen, err = aidb_consultar(ip, auto=True)
+        if origen == "api":
+            hechas += 1
+        elif err:
+            break               # sin cuota o sin red: no machacar en este ciclo
+    return hechas
+
+# --- Denunciar de vuelta -----------------------------------------------------------
+# Es la unica funcion del panel que PUBLICA algo hacia fuera y con tu nombre, asi que:
+# viene apagada, no se dispara sola (siempre la pulsa una persona), solo acepta atacantes
+# ENTRANTES (IPs publicas que golpean TU red, nunca tus abonados) y el comentario va sin
+# datos de nadie. AbuseIPDB pide expresamente que no se manden datos personales.
+AIDB_DENUNCIAS = "/var/lib/suricata-feeds/abuseipdb-denuncias.json"
+AIDB_REDENUNCIA = 24 * 3600      # no repetir la misma IP antes de esto
+PANEL_FLAGS = "/var/log/suricata-panel-flags.json"   # sin secretos: lo lee el reporte
+
+# Firma de Suricata -> categorias de AbuseIPDB. Se SUMAN todas las que casan; no manda la
+# primera. "ET SCAN Potential SSH Scan" es un escaneo Y es SSH: con la primera ganando se
+# denunciaba como FUERZA BRUTA algo que solo era un escaneo, y esto se publica a tu nombre.
+AIDB_FIRMA_CAT = [
+    (("ssh", "sshd"), [22]),
+    (("sql injection", "sqli"), [16]),
+    (("wordpress", "phpmyadmin", "web application", "web app", "web_server",
+      "shellshock", "struts", "joomla", "drupal"), [21]),
+    (("telnet", "mirai", "iot", "dvr", "hikvision"), [23]),
+    (("scan", "nmap", "masscan", "sweep", "probe"), [14]),
+    (("brute", "fuerza bruta", "login", "credential", "password"), [18]),
+    (("rdp", "remote desktop", "vnc"), [18]),
+    (("ftp",), [5]),
+    (("sip", "voip", "asterisk"), [8]),
+    (("ddos", "denial of service", "flood", "amplification"), [4]),
+    (("spam", "smtp"), [11]),
+    (("proxy", "tor exit"), [9]),
+    # ojo con las claves cortas: "rce" casaba dentro de "brute force" y denunciaba
+    # como Hackeo cualquier ataque de credenciales. Mejor la frase entera.
+    (("exploit", "cve-", "remote code execution", "overflow"), [15]),
+]
+
+def aidb_reportar_activo():
+    return _feeds_conf_get("ABUSEIPDB_REPORTAR") == "1"
+
+def aidb_set_reportar(v):
+    ok = _feeds_conf_set("ABUSEIPDB_REPORTAR", "1" if v else "")
+    publicar_flags()
+    return ok
+
+def publicar_flags():
+    """Publica para el generador del reporte lo que necesita saber del panel. Va aparte
+    del .conf a proposito: ese archivo lleva las CLAVES y aqui no hace falta ninguna."""
+    try:
+        tmp = PANEL_FLAGS + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"aidb_reportar": aidb_reportar_activo()}, f)
+        os.replace(tmp, PANEL_FLAGS)
+    except OSError:
+        pass
+
+def aidb_cats_de_firma(firma, dport=""):
+    """Categorias que mejor describen el ataque. Si no se reconoce la firma se denuncia
+    como 'Hackeo', que es lo que honestamente sabemos: un IDS salto."""
+    low = (firma or "").lower()
+    cats = []
+    for claves, cs in AIDB_FIRMA_CAT:
+        if any(k in low for k in claves):
+            for c in cs:
+                if c not in cats:
+                    cats.append(c)
+    if cats:
+        return cats[:4]                    # acepta varias; con 4 ya queda descrito de sobra
+    if str(dport) in ("22", "2222"):
+        return [18, 22]
+    if str(dport) in ("23", "2323"):
+        return [23, 15]
+    return [15]
+
+def aidb_comentario(firma, dport="", proto="", n=0):
+    """Texto de la denuncia SIN datos de nadie: fuera cualquier IP (la del atacante ya va
+    en su campo y la de la victima no tiene por que publicarse) y fuera caracteres raros."""
+    f = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "", firma or "")
+    f = re.sub(r"(?:[0-9A-Fa-f]{0,4}:){2,}[0-9A-Fa-f]{0,4}", "", f)   # IPv6, tambien con ::
+    f = re.sub(r"[^A-Za-z0-9 ._:/()\-]", " ", f)
+    f = re.sub(r"\s+", " ", f).strip()[:140]
+    partes = ["Suricata IDS"]
+    if f:
+        partes.append(f)
+    if str(dport).isdigit():
+        partes.append("puerto %s/%s" % (dport, (proto or "tcp").lower()[:4]))
+    if n:
+        partes.append("%d alertas" % int(n))
+    return " | ".join(partes)[:180]
+
+def _aidb_denuncias():
+    try:
+        return json.load(open(AIDB_DENUNCIAS, encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+def _aidb_guardar_denuncias(d):
+    try:
+        os.makedirs(os.path.dirname(AIDB_DENUNCIAS), exist_ok=True)
+        tmp = "%s.%d.tmp" % (AIDB_DENUNCIAS, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, AIDB_DENUNCIAS)
+    except OSError:
+        pass
+
+def aidb_denunciar(ip, firma="", dport="", proto="", n=0, quien="?"):
+    """Denuncia UN atacante entrante. Devuelve (ok, mensaje). Nunca lanza."""
+    if not aidb_reportar_activo():
+        return False, "las denuncias estan apagadas (Ajustes -> Reputacion)"
+    if not aidb_configurada():
+        return False, "falta la clave de AbuseIPDB"
+    ok, porque = aidb_ip_valida(ip)
+    if not ok:
+        return False, porque
+    if es_mi_cpe(ip):
+        # denunciar tu propio rango te mete a VOS en las listas negras
+        return False, f"{ip} es de TUS redes: eso se corrige adentro, no se denuncia"
+    if nunca_bloquear(ip):
+        return False, f"{ip} esta en la lista 'Nunca bloquear'"
+    ahora = time.time()
+    with _AIDB_LOCK:
+        reg = _aidb_denuncias()
+        prev = reg.get(ip, {})
+        if ahora - prev.get("ts", 0) < AIDB_REDENUNCIA:
+            cuando = time.strftime("%d/%m %H:%M", time.localtime(prev.get("ts", 0)))
+            return False, f"{ip} ya se denuncio el {cuando} (se espera 24 h para repetir)"
+    cats = aidb_cats_de_firma(firma, dport)
+    datos = urllib.parse.urlencode({"ip": ip, "categories": ",".join(str(c) for c in cats),
+                                    "comment": aidb_comentario(firma, dport, proto, n)})
+    req = urllib.request.Request(
+        "https://api.abuseipdb.com/api/v2/report", data=datos.encode("utf-8"),
+        headers={"Key": aidb_key(), "Accept": "application/json",
+                 "Content-Type": "application/x-www-form-urlencoded",
+                 "User-Agent": "suricata-panel/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            d = json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            return False, "cuota de denuncias agotada por hoy"
+        if e.code in (401, 403):
+            return False, f"AbuseIPDB rechazo la clave (HTTP {e.code})"
+        if e.code == 422:
+            return False, "AbuseIPDB no acepto la denuncia (IP propia o ya denunciada)"
+        return False, f"HTTP {e.code}"
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False, "sin respuesta de AbuseIPDB"
+    except ValueError:
+        return False, "respuesta ilegible de AbuseIPDB"
+    sc = ((d or {}).get("data") or {}).get("abuseConfidenceScore")
+    with _AIDB_LOCK:
+        reg = _aidb_denuncias()
+        reg[ip] = {"ts": int(ahora), "por": quien, "cats": cats}
+        lim = ahora - 30 * 86400
+        for k in [k for k, v in reg.items() if v.get("ts", 0) < lim]:
+            reg.pop(k, None)
+        _aidb_guardar_denuncias(reg)
+    bitacora("DENUNCIA-ABUSEIPDB", f"{ip} cats={','.join(str(c) for c in cats)}", quien=quien)
+    nom = ", ".join(AIDB_CATS.get(c, str(c)) for c in cats)
+    return True, f"{ip} denunciado como {nom}" + (f" (ahora {sc}% de abuso)" if sc is not None else "")
 
 def aidb_probar(key):
     """Valida una clave ANTES de guardarla. (True|False|None, mensaje)."""
@@ -5502,10 +5750,12 @@ def refrescador():
     Asi 'En vivo' sirve siempre el ultimo archivo al instante aunque generar tarde."""
     threading.Thread(target=_provisionar_geo, daemon=True).start()   # auto-cura mapa/GeoIP 1 vez
     publicar_routers_map()   # que el generador sepa que interfaz es de que router
+    publicar_flags()         # y si las denuncias a AbuseIPDB estan activadas
     ult_poda = 0.0
     ult_updchk = 0.0
     ult_sensor = 0.0
     ult_fast = 0.0
+    ult_aidb = 0.0
     ult_forzado = 0.0   # ultima regeneracion pedida a mano/por cambios (ver REGEN_MIN_SECS)
     while True:
         global FORCE_REGEN
@@ -5527,6 +5777,10 @@ def refrescador():
             try: medir_sensor()
             except Exception: pass
             ult_sensor = time.time()
+        if time.time() - ult_aidb > 300:       # cada ~5 min: unos pocos destinos a AbuseIPDB
+            try: precargar_abuseipdb()
+            except Exception as _e: sys.stderr.write("precarga abuseipdb: %s\n" % _e)
+            ult_aidb = time.time()
         nr = newest_report()
         # una regeneracion FORZADA se atiende como mucho cada REGEN_MIN_SECS; la marca no
         # se pierde, solo se agrupa (un lote de cambios = una sola generacion)
@@ -6193,6 +6447,16 @@ def perfil_page(msg="", ok=False, edit_user=None):
             f"ataques se le denuncian a una IP. El plan gratuito da <b>{AIDB_CUOTA:,}</b> consultas al dia. "
             "Se valida al guardar. Para <b>quitarla</b>, escribe <code>BORRAR</code>.</div></div>"
             "<div class=actions><button class=primary type=submit>Guardar clave de AbuseIPDB</button></div></form>"
+            "<form method=post action='/feeds/reportar'>"
+            "<label class=chk><input type=checkbox name=reportar"
+            + (" checked" if aidb_reportar_activo() else "")
+            + "> Permitir <b>denunciar</b> atacantes entrantes a AbuseIPDB</label>"
+            "<div class=hint>Apagado por defecto. Con esto activado, cada atacante de la seccion "
+            "<b>Ataques entrantes</b> muestra un boton <b>Denunciar</b>; <b>nunca</b> se denuncia solo, "
+            "siempre lo pulsa una persona. Es una accion <b>publica y a tu nombre</b>. Nunca se denuncian "
+            "IPs de tus redes ni de la lista 'Nunca bloquear', el comentario va <b>sin ninguna IP</b> "
+            "(ni la tuya) y la misma IP no se repite antes de 24 h.</div>"
+            "<div class=actions><button class=primary type=submit>Guardar</button></div></form>"
             "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px'>"
             "<form method=post action='/feeds/actualizar' style='margin:0'>"
             "<button class=cancelbtn type=submit>Actualizar feeds ahora</button></form>"
@@ -7340,6 +7604,32 @@ se rechazan antes de salir del servidor. Solo viajan IPs publicas.</li>
 que indica, en vez de insistir; mientras tanto sigue sirviendo lo que tenga en cache.</li>
 <li>Sin clave configurada, la pestana lo avisa y <b>no se llama a nadie</b>: el resto del panel
 funciona igual que siempre.</li>
+</ul>
+
+<h3>Tambien sale en el Top y en Entrantes</h3>
+<p>Lo que ya se consulto queda en cache, y el panel va consultando <b>unos pocos destinos por
+ciclo</b> de los CPE candidatos. Por eso, sin pulsar nada, en la columna <b>Dueño / organizacion</b>
+del Top y en cada atacante de <b>Ataques entrantes</b> puede aparecer una etiqueta
+<b>abuso&nbsp;NN&nbsp;%</b> con las dos categorias principales. El generador del reporte
+<b>solo lee la cache</b>: nunca llama a la API, para que la cuota la controle un unico proceso.</p>
+
+<h3>Denunciar atacantes (apagado por defecto)</h3>
+<p>El panel puede <b>devolver la denuncia</b>: mandar a AbuseIPDB las IPs de internet que golpean tu
+red, que es lo que hace que la base sirva para todos. Es la unica funcion que <b>publica algo hacia
+fuera y a tu nombre</b>, asi que viene <b>apagada</b> y se activa en <b>Ajustes &rarr; Reputacion</b>.
+Con ella activa, cada atacante de <b>Ataques entrantes</b> muestra un boton <b>Denunciar</b>.</p>
+<ul>
+<li><b>Nunca se denuncia solo.</b> Siempre lo pulsa una persona, y con confirmacion.</li>
+<li><b>Nunca se denuncian IPs tuyas.</b> Ni las privadas de tus abonados ni tus rangos publicos de
+NAT: denunciar tu propio rango te mete a <b>vos</b> en las listas negras. Tampoco las de la lista
+<b>Nunca bloquear</b>.</li>
+<li><b>El comentario no lleva ninguna IP</b>, ni la del atacante (ya va en su campo) ni la de la
+maquina golpeada. Solo el nombre de la firma, el puerto y cuantas alertas hubo.</li>
+<li>Las <b>categorias</b> salen de la firma de Suricata y se <b>suman</b>: un "SSH Scan" se denuncia
+como <i>SSH</i> y <i>Escaneo de puertos</i>, no como fuerza bruta.</li>
+<li>La misma IP <b>no se repite antes de 24 h</b>.</li>
+<li>Todo queda en la <b>bitacora</b> (<code>DENUNCIA-ABUSEIPDB</code>): quien, cuando y con que
+categorias.</li>
 </ul>
 
 <h2>Bitacora (auditoria)</h2>
@@ -9110,6 +9400,30 @@ class H(BaseHTTPRequestHandler):
             if res:
                 bitacora("CONSULTA-ABUSEIPDB", f"{len(res)} IP(s)")
             return self._html(reputacion_page(res=res, texto=texto, msg=aviso, ok=not aviso))
+        if ruta == "/reputacion/denunciar":
+            if not self._operador():
+                return self._deny()
+            ip = (q.get("ip", [""])[0]).strip()
+            okd, det = aidb_denunciar(ip, firma=q.get("firma", [""])[0],
+                                      dport=q.get("dport", [""])[0],
+                                      proto=q.get("proto", [""])[0],
+                                      n=(q.get("n", ["0"])[0] or "0"),
+                                      quien=getattr(CTX, "user", "?"))
+            b = (("OK " if okd else "ERR: ") + det).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers(); self.wfile.write(b)
+            return
+        if ruta == "/feeds/reportar":
+            if not self._admin():
+                return self._deny()
+            on = bool(q.get("reportar"))
+            aidb_set_reportar(on)
+            bitacora("CONFIG-ABUSEIPDB-REPORTAR", "activadas" if on else "desactivadas")
+            return self._html(perfil_page(
+                "Denuncias a AbuseIPDB ACTIVADAS: aparecera un boton en cada atacante entrante."
+                if on else "Denuncias a AbuseIPDB desactivadas.", ok=True))
         if ruta == "/feeds/aidb":
             if not self._admin():
                 return self._deny()

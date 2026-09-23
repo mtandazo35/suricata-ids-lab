@@ -1128,6 +1128,60 @@ except Exception:
 def opener(p):
     return io.TextIOWrapper(gzip.open(p, "rb")) if p.endswith(".gz") else open(p, encoding="utf-8", errors="replace")
 
+_RE_TS_LINEA = re.compile(r'"timestamp":"([^"]+)"')
+
+def abrir_desde(p, corte, margen=4 * 1024 * 1024):
+    """Abre un log de Suricata posicionado justo antes de `corte`.
+
+    eve.json y dns.json son append-only y van ordenados por tiempo, asi que para una
+    ventana de unas horas no hace falta leer el archivo entero: se busca por BISECCION
+    el primer punto dentro de la ventana y se empieza ahi. En un dns.json de 1,8 GB con
+    ventana de 6 h, esto pasa de leer 1,8 GB a leer unos pocos cientos de MB.
+
+    Los .gz no se pueden posicionar (habria que descomprimir igual), asi que se abren
+    como siempre; de todas formas los rotados viejos ya se saltan por su mtime.
+    El margen deja un colchon: es preferible leer de mas que perderse eventos."""
+    if p.endswith(".gz") or not corte:
+        return opener(p)
+    try:
+        f = open(p, encoding="utf-8", errors="replace")
+        tam = os.path.getsize(p)
+    except OSError:
+        return opener(p)
+    if tam <= margen * 2:
+        return f
+    lo, hi = 0, tam
+    try:
+        while hi - lo > margen:
+            mid = (lo + hi) // 2
+            f.seek(mid)
+            f.readline()                  # la primera suele venir cortada: se tira
+            ts = None
+            for _ in range(20):           # alguna linea puede no traer timestamp
+                ln = f.readline()
+                if not ln:
+                    break
+                m = _RE_TS_LINEA.search(ln)
+                if m:
+                    ts = parse_ts(m.group(1))
+                    if ts:
+                        break
+            if ts is None:
+                break                     # no se pudo orientar: leer desde donde se este
+            if ts < corte:
+                lo = mid
+            else:
+                hi = mid
+        ini = max(0, lo - margen)
+        f.seek(ini)
+        if ini:
+            # alinear al principio de una linea entera. Solo si NO se empieza en 0: en el
+            # offset 0 la primera linea ya esta entera y descartarla perdia un evento.
+            f.readline()
+    except (OSError, ValueError):
+        f.seek(0)
+    return f
+
 def cargar_exclusiones():
     """Reglas de exclusion: {tipo:'dst'|'src', ip, puertos:[int]}. Desde
     /etc/suricata-exclusiones.json (apartado Exclusiones) + lineas IGNORAR_* legacy."""
@@ -1398,7 +1452,7 @@ for p in files:
     except OSError:
         continue
     try:
-        for line in opener(p):
+        for line in abrir_desde(p, cutoff):
             seen += 1
             if seen > MAX_LINES:
                 break

@@ -2615,6 +2615,52 @@ def entrantes_section(n_src=8, n_sub=6, max_src=5000, max_det=60):
 
 top_sec = top_origenes_section()
 
+# --- Destinos de MALA REPUTACION que tus CPEs estan contactando --------------------
+# Distinto de los atacantes entrantes: estos son destinos a los que sale trafico desde tu
+# red y que estan fichados en los feeds. Bloquearlos corta el canal de control de las
+# botnets, que es lo que mantiene vivo al equipo infectado.
+DESTINOS_FILE = "/var/log/suricata-destinos-malos.json"
+try:
+    _dm = {}
+    for (_s, _sp, _d, _dp, _pr, _sig), _v in flujos.items():
+        _sip = ip_de(_s)
+        if not es_mi_cpe(_sip) or es_mi_cpe(_d):
+            continue                      # solo TU red -> internet
+        _fuente, _cidr = reputacion_de(_d)
+        if not _fuente:
+            continue
+        _e = _dm.get(_d)
+        if _e is None:
+            if len(_dm) >= 5000:
+                continue
+            _mm = REP_META.get(_fuente, {})
+            _e = _dm[_d] = {"alertas": 0, "cpes": set(), "puertos": set(),
+                            "fuente": _fuente, "categoria": _mm.get("categoria", ""),
+                            "cidr": _cidr, "vigente": bool(_mm.get("vigente")),
+                            "firma": "", "ultima": 0}
+        _e["alertas"] += _v[0]
+        if len(_e["cpes"]) < 200:
+            _e["cpes"].add(_s)
+        if _dp and len(_e["puertos"]) < 10:
+            _e["puertos"].add(_dp)
+        if not _e["firma"]:
+            _e["firma"] = (_sig or "")[:90]
+        if _v[2] > _e["ultima"]:
+            _e["ultima"] = _v[2]
+    _sal_dm = {k: {"alertas": v["alertas"], "cpes": len(v["cpes"]),
+                   "cpes_ej": sorted(v["cpes"])[:8], "puertos": sorted(v["puertos"])[:10],
+                   "fuente": v["fuente"], "categoria": v["categoria"], "cidr": v["cidr"],
+                   "vigente": v["vigente"], "firma": v["firma"],
+                   "ultima": int(v["ultima"] or 0), "pais": pais(k)}
+               for k, v in sorted(_dm.items(), key=lambda kv: kv[1]["alertas"], reverse=True)}
+    _tmpd = DESTINOS_FILE + ".tmp"
+    with open(_tmpd, "w", encoding="utf-8") as _f:
+        json.dump({"generado": int(time.time()), "ventana_min": VENTANA_MIN,
+                   "destinos": _sal_dm}, _f)
+    os.replace(_tmpd, DESTINOS_FILE)
+except Exception:
+    pass
+
 # --- Quien nos ataca desde internet ------------------------------------------------
 # Se guarda aparte porque el panel lo necesita para armar la lista de bloqueo del borde.
 # La cadena es: el atacante de fuera infecta al CPE, el CPE infectado ensucia tu IP
@@ -3982,11 +4028,13 @@ def cargar_mk_de(r):
          "LIST": "suricata-cuarentena", "TTL": "1h",
          "LIST_DNS": "suricata-dns-sospechoso", "TTL_DNS": "1d",
          "LIST_GRAD": "suricata-graduada", "TTL_GRAD": "1d",
+         "LIST_DST": "suricata-destinos-malos", "TTL_DST": "7d",
          "AUTO_MANTENER": "0", "ENABLED": "0", "CERT_FP": "",
          "POL_AUTO": "0", "POL_BAJO": "nada", "POL_MEDIO": "nada", "POL_ALTO": "nada"}
     d.update(_mk_globales())          # AUTO_MANTENER y POL_* son de toda la instalacion
     for k in ("HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL",
-              "LIST_DNS", "TTL_DNS", "LIST_GRAD", "TTL_GRAD", "CERT_FP", "ENABLED"):
+              "LIST_DNS", "TTL_DNS", "LIST_GRAD", "TTL_GRAD", "LIST_DST", "TTL_DST",
+              "CERT_FP", "ENABLED"):
         if k in (r or {}):
             d[k] = (r or {})[k]
     d["ROUTER_ID"] = (r or {}).get("id", "")
@@ -4009,7 +4057,7 @@ ROUTERS_CONF = "/etc/suricata-routers.json"
 IFACE_BASE = "ids-mon"       # el primer router conserva el nombre de siempre
 CAMPOS_ROUTER = ("id", "nombre", "iface", "HOST", "PORT", "TLS", "USER", "PASS",
                  "LIST", "TTL", "LIST_DNS", "TTL_DNS", "LIST_GRAD", "TTL_GRAD",
-                 "CERT_FP", "ENABLED")
+                 "LIST_DST", "TTL_DST", "CERT_FP", "ENABLED")
 
 def _router_vacio(idx=1):
     return {"id": "r%d" % idx, "nombre": "", "iface": IFACE_BASE if idx == 1 else "%s%d" % (IFACE_BASE, idx),
@@ -4017,6 +4065,7 @@ def _router_vacio(idx=1):
             "LIST": "suricata-cuarentena", "TTL": "1h",
             "LIST_DNS": "suricata-dns-sospechoso", "TTL_DNS": "1d",
             "LIST_GRAD": "suricata-graduada", "TTL_GRAD": "1d",
+            "LIST_DST": "suricata-destinos-malos", "TTL_DST": "7d",
             "CERT_FP": "", "ENABLED": "0"}
 
 def _mk_globales():
@@ -4052,7 +4101,8 @@ def cargar_routers():
     g = _mk_globales()                      # migracion desde la configuracion de un solo router
     uno = _router_vacio(1)
     for k in ("HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL",
-              "LIST_DNS", "TTL_DNS", "LIST_GRAD", "TTL_GRAD", "CERT_FP", "ENABLED"):
+              "LIST_DNS", "TTL_DNS", "LIST_GRAD", "TTL_GRAD", "LIST_DST", "TTL_DST",
+              "CERT_FP", "ENABLED"):
         if g.get(k, "") != "":
             uno[k] = g[k]
     uno["nombre"] = uno["HOST"] or "MikroTik"
@@ -4588,6 +4638,95 @@ def rep_fuente(ip):
         _REP_CACHE["ips"] = ips
         _REP_CACHE["mtime"] = mt
     return _REP_CACHE["ips"].get(ip, "")
+
+_REP_CAT_CACHE = {"mtime": 0, "cats": {}}
+
+def rep_categoria(ip):
+    """Que clase de infraestructura es esa IP segun el feed que la fichó.
+
+    Devuelve la categoria ("c2-activo", "atacante-observado"...) o "". Importa la
+    diferencia: hablar con un C2 ACTIVO es prueba de infeccion; hablar con una IP que
+    alguna vez escaneo a alguien, no tanto."""
+    f = rep_fuente(ip)
+    if not f:
+        return ""
+    try:
+        mt = os.path.getmtime(FEEDS_META)
+    except OSError:
+        return ""
+    if mt != _REP_CAT_CACHE["mtime"]:
+        meta = cargar_feeds_meta().get("sources") or {}
+        _REP_CAT_CACHE["cats"] = {k: (v or {}).get("categoria", "") for k, v in meta.items()}
+        _REP_CAT_CACHE["mtime"] = mt
+    return _REP_CAT_CACHE["cats"].get(f, "")
+
+# ---------------------------------------------------------------------------------
+# Destinos de MALA REPUTACION: cortarlos en el router
+# ---------------------------------------------------------------------------------
+# Es la otra direccion del problema. La cuarentena corta al CPE; esto corta el DESTINO,
+# que es lo que mantiene vivo al equipo infectado: sin canal de control, la botnet no
+# manda nada. Y funciona para todos los abonados a la vez, sin tener que identificar a
+# ninguno.
+DESTINOS_FILE = "/var/log/suricata-destinos-malos.json"
+MK_SENT_DST = "/var/log/suricata-destinos-enviados.json"
+# Por confianza del feed. Un C2 activo es lo que es; una IP que alguna vez escaneo a
+# alguien puede alojar ademas algo legitimo, y bloquearla deja sin servicio a un abonado
+# que no hizo nada.
+DST_CONFIABLES = ("c2-activo", "c2-ioc", "distribucion-malware", "infra-delictiva")
+
+def cargar_destinos_malos():
+    try:
+        return (json.load(open(DESTINOS_FILE, encoding="utf-8")).get("destinos") or {})
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+def destino_bloqueable(ip):
+    """SOLO IPs publicas. Una privada aqui seria una IP de tu propia red: bloquearla
+    como destino dejaria sin servicio a tus abonados entre si."""
+    try:
+        o = ipaddress.ip_address(ip)
+    except ValueError:
+        return False, "no es una IP"
+    if not o.is_global:
+        return False, "no es una IP publica"
+    if es_mi_cpe(ip):
+        return False, "es de tus redes"
+    return True, ""
+
+def destinos_malos(solo_confiables=True):
+    """Destinos fichados que TUS CPEs estan contactando, listos para decidir."""
+    env = cargar_enviados(MK_SENT_DST)
+    dest_ok = _dest_ok_set()
+    out = []
+    for ip, d in cargar_destinos_malos().items():
+        ok, _porque = destino_bloqueable(ip)
+        if not ok or ip in dest_ok:
+            continue                       # ya marcado como falso positivo: no se propone
+        cat = d.get("categoria", "")
+        if solo_confiables and cat not in DST_CONFIABLES:
+            continue
+        out.append({"ip": ip, "alertas": int(d.get("alertas", 0)),
+                    "cpes": int(d.get("cpes", 0)), "cpes_ej": d.get("cpes_ej") or [],
+                    "fuente": d.get("fuente", ""), "categoria": cat,
+                    "pais": d.get("pais", ""), "firma": d.get("firma", ""),
+                    "puertos": d.get("puertos") or [], "vigente": bool(d.get("vigente")),
+                    "enviado": ip in env})
+    out.sort(key=lambda x: (x["enviado"], -x["alertas"]))
+    return out
+
+def destinos_reglas(lista="suricata-destinos-malos"):
+    return "\n".join([
+        "# Cortar la salida hacia infraestructura fichada. Es dst-address-list, no src:",
+        "# aqui no se bloquea a un abonado, se bloquea A DONDE va.",
+        "/ip firewall filter",
+        'add chain=forward dst-address-list=%s action=drop '
+        'comment="Suricata: destinos de mala reputacion"' % lista,
+        "",
+        "# y que ni siquiera cree la conexion (mas barato con muchas entradas):",
+        "/ip firewall raw",
+        'add chain=prerouting dst-address-list=%s action=drop '
+        'comment="Suricata: destinos de mala reputacion"' % lista,
+    ])
 
 def cargar_entrantes():
     try:
@@ -5495,6 +5634,12 @@ def aplicar_politicas():
 _FAST_LAST = {}            # ip -> ts de la ultima accion (anti-rebote por CPE)
 _FAST_CNC = ("cnc", "c2 ", "command and control", "checkin", "check-in", "botnet", "mirai",
              "katana", "trojan", "ransom", "coinmin", "cryptomin", "compromised")
+# Contacto con infraestructura FICHADA en los feeds. Por niveles, porque no todas las
+# listas dicen lo mismo: un C2 activo (Feodo, ThreatFox) es prueba de que el equipo esta
+# infectado y basta UNA vez; una IP que alguna vez escaneo a alguien (CINS) puede ser
+# coincidencia, y ahi se exige insistencia.
+_FAST_REP_C2 = ("c2-activo", "c2-ioc")
+_FAST_REP_OTRAS = 3
 try:                      # umbral de confirmacion; alinear con el del reporte (report.conf)
     _u = 3
     for _l in open("/etc/suricata-report.conf", encoding="utf-8"):
@@ -5524,15 +5669,18 @@ def barrido_alto_rapido(maxbytes=4_000_000):
     if start > 0 and lines:
         lines = lines[1:]                        # la 1a linea casi seguro viene cortada
     reglas = cargar_exclusiones(); dest_ok = _dest_ok_set()
-    hits = {}; sids = {}
+    hits = {}; sids = {}; rep_hits = {}
     for line in lines:
         if '"event_type":"alert"' not in line:
             continue
         get = lambda k: (_RE[k].search(line).group(1) if _RE[k].search(line) else "")
         low = get("sig").lower()
-        if not any(k in low for k in _FAST_CNC):
-            continue                             # solo infeccion confirmada (CnC/botnet/troyano)
         src_ip = get("src_ip"); dst = get("dest_ip"); dp = get("dest_port"); sid = get("sid")
+        _es_cnc = any(k in low for k in _FAST_CNC)
+        # el destino esta fichado? se mira SOLO si la firma no bastaba ya
+        _cat = "" if _es_cnc else (rep_categoria(dst) if dst else "")
+        if not _es_cnc and not _cat:
+            continue                             # ni firma de infeccion ni destino fichado
         if not src_ip or nunca_bloquear(src_ip) or dst in dest_ok:
             continue
         if not es_mi_cpe(src_ip):
@@ -5540,13 +5688,33 @@ def barrido_alto_rapido(maxbytes=4_000_000):
         if _excluido(reglas, src_ip, dst, int(dp) if dp else None, sid):
             continue
         src = clave_cpe(src_ip, rid_por_iface(get("iface")))   # identidad (router, IP)
-        hits[src] = hits.get(src, 0) + 1
-        sids.setdefault(src, set()).add(sid or low)
+        if _es_cnc:
+            hits[src] = hits.get(src, 0) + 1
+            sids.setdefault(src, set()).add(sid or low)
+        else:
+            rep_hits.setdefault(src, {"c2": 0, "otras": 0, "quien": "", "cat": ""})
+            _r = rep_hits[src]
+            if _cat in _FAST_REP_C2:
+                _r["c2"] += 1
+            else:
+                _r["otras"] += 1
+            if not _r["quien"]:
+                _r["quien"] = dst; _r["cat"] = _cat
     ahora = time.time()
     env = cargar_enviados(MK_SENT); cambiado = False
+    motivos = {}
+    for src, r in rep_hits.items():
+        # hablar con un C2 activo basta una vez; con el resto de listas, insistencia
+        if r["c2"] >= 1:
+            motivos[src] = "contacto con C2 activo (%s, %s)" % (r["quien"], r["cat"])
+        elif r["otras"] >= _FAST_REP_OTRAS:
+            motivos[src] = "%d contactos con infraestructura fichada (%s, %s)" % (
+                r["otras"], r["quien"], r["cat"])
     for src in hits:
-        if not (hits[src] >= _FAST_UMBRAL or len(sids[src]) >= 2):
-            continue                             # mismo criterio de confirmacion que el reporte
+        if hits[src] >= _FAST_UMBRAL or len(sids[src]) >= 2:
+            motivos[src] = "infeccion confirmada (%d alertas CnC, %d firmas)" % (
+                hits[src], len(sids[src]))
+    for src in motivos:
         if src in env or ahora - _FAST_LAST.get(src, 0) < 60:
             continue                             # ya en la lista, o anti-rebote 60s
         _FAST_LAST[src] = ahora
@@ -5564,7 +5732,7 @@ def barrido_alto_rapido(maxbytes=4_000_000):
             try: notificar_cuarentena(ip_de(src), "ALTO (envio inmediato)", lst, quien="politica-rapida")
             except Exception: pass
             mk_log("POLITICA-RAPIDA", ip_de(src), "politica",
-                   f"lista={lst} cnc_hits={hits[src]} firmas={len(sids[src])}" + _suf_nodo(src))
+                   f"lista={lst} {motivos.get(src, '')}" + _suf_nodo(src))
             cambiado = True
     if cambiado:
         guardar_enviados(env, MK_SENT)
@@ -8759,6 +8927,28 @@ abre cientos, y un limite alto no molesta a quien solo navega.</li>
 <b>encolarlo</b> con <code>/queue</code> que intentar cortarlo.</li>
 </ul>
 
+<h2>Destinos de mala reputacion (en Cuarentena)</h2>
+<p>La cuarentena corta al <b>abonado</b>. Esto corta el <b>destino</b>, que es lo que mantiene vivo
+al equipo infectado: sin canal de control, la botnet no manda nada. Y vale para <b>todos</b> los
+abonados a la vez, sin tener que identificar a ninguno.</p>
+<p>Al final de la pestana <b>Cuarentena</b> aparecen los destinos fichados a los que tus CPEs
+<b>estan saliendo de verdad</b> (no el feed entero), con de que lista vienen, cuantos CPEs los
+contactan y un boton para bloquearlos en <b>todos</b> los nodos a la vez. La regla es de
+<code>dst-address-list</code>, no de origen: no se bloquea a nadie, se bloquea <b>a donde va</b>.</p>
+<h3>Los dos frenos, que son lo importante</h3>
+<ul>
+<li><b>Solo IPs publicas.</b> Una privada aqui seria de tu propia red, y bloquearla como destino
+dejaria a tus abonados sin verse entre si. Tambien se frena una IP <b>publica que sea tuya</b> (tu
+rango de NAT), que pasa el filtro de "es publica" y aun asi no hay que bloquearla.</li>
+<li><b>Solo feeds que se sostienen</b>: C2 activo, IOC de C2, distribucion de malware e infra
+delictiva. <b>No</b> se propone lo que viene de listas de "esta IP escaneo a alguien": esas pueden
+alojar ademas algo legitimo, y bloquearlas deja sin servicio a un abonado que no hizo nada. Si aun
+asi las quieres ver, se pueden pedir.</li>
+</ul>
+<p>Lo que marques como <b>destino confiable</b> (falso positivo) desaparece de la lista y no se
+vuelve a proponer. Y sin una regla en el MikroTik que use esa address-list, el panel diria
+"bloqueado" sin bloquear nada: la regla esta ahi mismo para copiarla.</p>
+
 <h2>Cortar a los que te atacan desde internet</h2>
 <p>Es la otra mitad del problema, y la cadena importa: <b>el atacante de fuera es el que infecta al
 CPE, y el CPE infectado es el que ensucia tus publicas</b>. Cortar la entrada no limpia lo que ya
@@ -10615,6 +10805,60 @@ def cuarentena_page(msg="", es_admin=False):
                        f"Consultas DNS a dominios maliciosos (&ge;{umbral_dns} alertas DNS o &ge;2 firmas) &rarr; lista <code>{esc(m.get('LIST_DNS',''))}</code> (otro trato)",
                        dns_cand, enviados_dns, "cuarentena/dns", m.get("LIST_DNS", ""), "alertas_dns", "alertas DNS", "firmas_dns",
                        "Sin CPEs consultando dominios maliciosos en la ventana.")
+    # --- Destinos de mala reputacion: cortar A DONDE van, no a quien va ---------------
+    # Solo IPs PUBLICAS: una privada aqui seria de tu propia red y bloquearla como destino
+    # dejaria a tus abonados sin verse entre si.
+    _dst = destinos_malos()
+    if _dst:
+        _pend = [x for x in _dst if not x["enviado"]]
+        _ya = [x for x in _dst if x["enviado"]]
+        def _fila_dst(x):
+            acc = ""
+            if es_admin and activo:
+                if x["enviado"]:
+                    acc = ("<form method=post action='/cuarentena/destino/quitar' style='display:inline'>"
+                           f"<input type=hidden name=ip value='{esc(x['ip'])}'>"
+                           "<button class='qbtn quit'>Desbloquear</button></form>")
+                else:
+                    acc = ("<form method=post action='/cuarentena/destino/bloquear' style='display:inline'>"
+                           f"<input type=hidden name=ip value='{esc(x['ip'])}'>"
+                           f"<button class='qbtn send' onclick=\"return confirm('Bloquear la salida hacia "
+                           f"{esc(x['ip'])} en TODOS los nodos?')\">Bloquear</button></form>")
+            elif not activo:
+                acc = "<span class=dry>solo sugerencia</span>"
+            marca = ("<span class='enq'>Bloqueado</span> " if x["enviado"] else "")
+            return (f"<tr><td data-label='Destino' class='mono ipx'>{esc(x['ip'])}"
+                    + (f" <span class=hint>{esc(x['pais'])}</span>" if x["pais"] else "") + "</td>"
+                    f"<td data-label='Por que'><b>{esc(x['categoria'] or 'fichada')}</b>"
+                    f"<div class=rowmeta>{esc(x['fuente'])}"
+                    + (f" &middot; {esc(x['firma'][:60])}" if x["firma"] else "") + "</div></td>"
+                    f"<td data-label='CPEs' class='num'>{x['cpes']:,}</td>"
+                    f"<td data-label='Alertas' class='num'>{x['alertas']:,}</td>"
+                    f"<td data-label='Accion'>{marca}{acc}</td></tr>")
+        _filas_dst = "".join(_fila_dst(x) for x in (_pend + _ya))
+        _reglas_dst = destinos_reglas(m.get("LIST_DST", "suricata-destinos-malos"))
+        sec_dst = (
+            "<div class=seccion><div class=shead><div>"
+            "<h2>Destinos de mala reputacion</h2>"
+            "<p class=sub>Infraestructura fichada a la que <b>tus CPEs estan saliendo</b>: "
+            "servidores de control de botnets, distribucion de malware, redes secuestradas. "
+            "Cortar el destino deja al equipo infectado <b>sin ordenes</b>, y vale para todos "
+            "los abonados a la vez sin tener que identificar a ninguno. Solo se listan IPs "
+            f"<b>publicas</b>. {len(_pend):,} sin bloquear, {len(_ya):,} ya bloqueadas.</p>"
+            "</div></div>"
+            "<div class=card><table><thead><tr><th>Destino</th><th>Por que</th>"
+            "<th class=num>CPEs</th><th class=num>Alertas</th><th>Accion</th>"
+            f"</tr></thead><tbody>{_filas_dst}</tbody></table></div>"
+            "<details style='margin-top:8px'><summary style='cursor:pointer;font-size:13px;"
+            "font-weight:600'>Regla que hace falta en el MikroTik</summary>"
+            "<p class=hint style='margin:6px 0'>Sin una regla que use esa address-list, el "
+            "panel dice 'bloqueado' y no se bloquea nada.</p>"
+            f"<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;"
+            f"padding:10px;overflow-x:auto;font-size:12px'>{esc(_reglas_dst)}</pre>"
+            "</details></div>")
+    else:
+        sec_dst = ""
+
     # --- Enviados manualmente (desde Top origenes): IPs en la lista que NO son candidatos ---
     def _fila_manual(clave, mm, pref, lista):
         # 'clave' es la identidad del CPE: con varios nodos "router|IP". Se muestra la IP
@@ -10807,7 +11051,7 @@ def cuarentena_page(msg="", es_admin=False):
             "<h1>Cuarentena y control de CPEs</h1>"
             f"<p class='sub'>Ventana {vmin} min · lista de hace {edad}. Dos categorias: <b>infectados</b> (malware/CnC) "
             "y <b>DNS sospechoso</b> (consultan dominios de botnet), cada una a su address-list del MikroTik.</p>"
-            + _salud_html() + flash + estado + sec_fp + sec_inf + sec_dns + sec_manual +
+            + _salud_html() + flash + estado + sec_fp + sec_inf + sec_dns + sec_dst + sec_manual +
             "<div id=fichamodal class=fichaov onclick=\"if(event.target===this)this.style.display='none'\">"
             "<div class=fichabox><button type=button class=fichax "
             "onclick=\"document.getElementById('fichamodal').style.display='none'\">&times;</button>"
@@ -11724,6 +11968,49 @@ class H(BaseHTTPRequestHandler):
                 return _fin(True, f"{ip} en la lista {m.get('LIST')}{nota}")
             mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), err)
             return _fin(False, f"No se pudo enviar {ip}: {err}")
+        if ruta in ("/cuarentena/destino/bloquear", "/cuarentena/destino/quitar"):
+            if not self._operador():
+                return self._deny()
+            ip = (q.get("ip", [""])[0]).strip()
+            ok_d, porque = destino_bloqueable(ip)
+            if not ok_d:
+                return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {porque}"))
+            quitar = ruta.endswith("/quitar")
+            hechos, errores = 0, []
+            # se manda a TODOS los nodos: el destino es malo para todos los abonados,
+            # no solo para los de un router
+            for r in cargar_routers():
+                d = cargar_mk_de(r)
+                if not mk_listo(d):
+                    continue
+                lst = d.get("LIST_DST", "suricata-destinos-malos")
+                try:
+                    if quitar:
+                        ok, err = mk_remove(ip, lista=lst, router=r)
+                    else:
+                        ok, err = mk_add(ip, comment=f"suricata destino malo {time.strftime('%Y-%m-%d %H:%M')}",
+                                         lista=lst, ttl=_ttl_efectivo(d, "TTL_DST"), router=r)
+                except Exception as ex:
+                    ok, err = False, str(ex)
+                if ok:
+                    hechos += 1
+                else:
+                    errores.append(f"{r.get('nombre') or r.get('id')}: {err}")
+            if hechos:
+                env = cargar_enviados(MK_SENT_DST)
+                if quitar:
+                    env.pop(ip, None)
+                else:
+                    dd = (cargar_destinos_malos().get(ip) or {})
+                    env[ip] = {"cuando": int(time.time()), "por": getattr(CTX, "user", "?"),
+                               "fuente": dd.get("fuente", ""), "categoria": dd.get("categoria", ""),
+                               "nodos": hechos}
+                guardar_enviados(env, MK_SENT_DST)
+                mk_log("DESTINO-QUITADO" if quitar else "DESTINO-BLOQUEADO", ip,
+                       getattr(CTX, "user", "?"), f"nodos={hechos}")
+            msg = (f"{ip}: {'desbloqueado' if quitar else 'bloqueado'} en {hechos} nodo(s)"
+                   if hechos else f"No se pudo: {'; '.join(errores[:2]) or 'ningun MikroTik habilitado'}")
+            return self._redirect("/cuarentena?msg=" + _up.quote(msg))
         if ruta == "/cuarentena/graduada":
             # Corte PARCIAL: se le cortan los puertos de abuso y se le deja el resto. El
             # abonado sigue navegando, no llama a soporte, y por eso el corte aguanta.

@@ -626,24 +626,38 @@ def _conf(k, d=""):
     return d
 
 AUTH_KEY = _conf("ABUSE_CH_AUTH_KEY", "")
-# fuente: (nombre, url, ttl_horas[caducidad], tipo[ip|dom], categoria, requiere_auth, min_min[intervalo minimo de descarga])
+AIDB_KEY = _conf("ABUSEIPDB_KEY", "")
+# Cada fuente dice COMO se autentica, porque no todas lo hacen igual: abuse.ch manda la
+# clave en la cabecera Auth-Key y AbuseIPDB en la cabecera Key. "" = fuente abierta.
+CLAVES = {"abusech": AUTH_KEY, "aidb": AIDB_KEY}
+CABECERA = {"abusech": "Auth-Key", "aidb": "Key"}
+
+def _clave_de(auth):
+    return CLAVES.get(auth, "")
+
+# fuente: (nombre, url, ttl_horas[caducidad], tipo[ip|dom], categoria, auth, min_min[intervalo minimo de descarga])
 # EDROP se ELIMINO como fuente aparte: se fusiono en Spamhaus DROP (abr-2024).
 # Feodo: lista RECOMENDADA (servidores C2 activos/recientes), refresca cada 5 min upstream.
 IPF = [
-    ("feodo",         _conf("FEODO_URL", "https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt"), 6, "ip", "c2-activo", False, 10),
-    ("cins",          _conf("CINS_URL", "https://cinsscore.com/list/ci-badguys.txt"), 48, "ip", "atacante-observado", False, 720),
-    ("spamhaus-drop", _conf("SPAMHAUS_DROP_URL", "https://www.spamhaus.org/drop/drop.txt"), 192, "cidr", "infra-delictiva", False, 1440),
+    ("feodo",         _conf("FEODO_URL", "https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt"), 6, "ip", "c2-activo", "", 10),
+    ("cins",          _conf("CINS_URL", "https://cinsscore.com/list/ci-badguys.txt"), 48, "ip", "atacante-observado", "", 720),
+    ("spamhaus-drop", _conf("SPAMHAUS_DROP_URL", "https://www.spamhaus.org/drop/drop.txt"), 192, "cidr", "infra-delictiva", "", 1440),
+    # AbuseIPDB: IPs denunciadas por la comunidad. El plan gratuito da 5 descargas al dia
+    # y devuelve las de confianza 100 (acotar el umbral es de pago), asi que se baja como
+    # mucho cada 6 h: la lista queda fresca y sobra cuota. Una peticion trae hasta 10.000.
+    ("abuseipdb",     _conf("ABUSEIPDB_URL", "https://api.abuseipdb.com/api/v2/blacklist?plaintext&limit=10000"), 24, "ip", "atacante-denunciado", "aidb", 360),
 ]
 DOMF = [
-    ("urlhaus",   _conf("URLHAUS_URL", "https://urlhaus.abuse.ch/downloads/hostfile/"), 24, "dom", "distribucion-malware", True, 60),
-    ("threatfox", _conf("THREATFOX_URL", "https://threatfox.abuse.ch/downloads/hostfile/"), 24, "dom", "c2-ioc", True, 60),
+    ("urlhaus",   _conf("URLHAUS_URL", "https://urlhaus.abuse.ch/downloads/hostfile/"), 24, "dom", "distribucion-malware", "abusech", 60),
+    ("threatfox", _conf("THREATFOX_URL", "https://threatfox.abuse.ch/downloads/hostfile/"), 24, "dom", "c2-ioc", "abusech", 60),
 ]
 
-def _fetch(url):
-    hdrs = {"User-Agent": "suricata-feeds/2.0"}
-    if AUTH_KEY:
-        hdrs["Auth-Key"] = AUTH_KEY                     # abuse.ch: cabecera Auth-Key
-    url = url.replace("{AUTH}", AUTH_KEY)               # o clave en la URL, si la fuente la usa asi
+def _fetch(url, auth=""):
+    hdrs = {"User-Agent": "suricata-feeds/2.0", "Accept": "text/plain"}
+    clave = _clave_de(auth)
+    if clave:
+        hdrs[CABECERA.get(auth, "Auth-Key")] = clave    # abuse.ch: Auth-Key; AbuseIPDB: Key
+    url = url.replace("{AUTH}", clave)                  # o clave en la URL, si la fuente la usa asi
     req = urllib.request.Request(url, headers=hdrs)
     with urllib.request.urlopen(req, timeout=30) as r:
         ctype = (r.headers.get("Content-Type", "") or "").lower()
@@ -709,11 +723,11 @@ def procesar(name, url, ttl_h, tipo, cat, auth, min_min):
     if fv and prev.get("estado") == "valido" and (now - fv) < min_min * 60 \
             and os.path.exists(os.path.join(SRCDIR, name + ".lst")):
         estado = "valido"                   # descargado hace poco: no re-bajar (respeta el upstream)
-    elif auth and not AUTH_KEY:
-        estado = "sin-clave"                # necesita Auth-Key y no hay -> se conserva lo viejo
+    elif auth and not _clave_de(auth):
+        estado = "sin-clave"                # necesita clave y no hay -> se conserva lo viejo
     else:
         try:
-            body, ctype = _fetch(url)
+            body, ctype = _fetch(url, auth)
             if "text/html" in ctype or _es_html(body):
                 estado = "error"            # respuesta HTML (login/portal/error), NO una lista
             else:
@@ -726,7 +740,12 @@ def procesar(name, url, ttl_h, tipo, cat, auth, min_min):
                     os.replace(tmp, os.path.join(SRCDIR, name + ".lst"))
                     estado, n, fv = "valido", len(items), now
         except urllib.error.HTTPError as e:
-            estado = "sin-clave" if e.code in (401, 403) and auth else "error"
+            if e.code in (401, 403) and auth:
+                estado = "sin-clave"
+            elif e.code == 429 and fv:
+                estado = prev.get("estado", "valido")   # cuota diaria agotada: lo de ayer vale
+            else:
+                estado = "error"
             sys.stderr.write(f"{name}: HTTP {e.code}\n")
         except Exception as e:
             estado = "error"; sys.stderr.write(f"{name}: {e}\n")
@@ -734,7 +753,8 @@ def procesar(name, url, ttl_h, tipo, cat, auth, min_min):
     caducado = fv and now > expira
     sources[name] = {"estado": estado, "count": n, "url": url, "tipo": tipo, "categoria": cat,
                      "ttl_horas": ttl_h, "fetched_valid": fv, "expira": expira,
-                     "vigente": bool(fv and not caducado), "requiere_auth": auth}
+                     "vigente": bool(fv and not caducado), "requiere_auth": bool(auth),
+                     "auth": auth}
 
 for f in IPF + DOMF:
     procesar(*f)
@@ -785,6 +805,10 @@ if [ ! -f /etc/suricata-feeds.conf ]; then
 # Overrides de URL (opcional; si abuse.ch cambia el endpoint):
 #URLHAUS_URL=https://urlhaus.abuse.ch/downloads/hostfile/
 #THREATFOX_URL=https://threatfox.abuse.ch/downloads/hostfile/
+# AbuseIPDB (clave gratuita en https://www.abuseipdb.com/account/api). Sirve para dos
+# cosas: la lista masiva de atacantes de aqui arriba y las consultas por IP del panel.
+#ABUSEIPDB_KEY=tu-clave
+#ABUSEIPDB_URL=https://api.abuseipdb.com/api/v2/blacklist?plaintext&limit=10000
 FCONF
   chmod 600 /etc/suricata-feeds.conf
 fi
@@ -4791,28 +4815,29 @@ def conf_dash_set(key, val):
 FEEDS_CONF = "/etc/suricata-feeds.conf"
 FEEDS_META = "/var/lib/suricata-feeds/reputation.meta"
 
-def feeds_auth_configurada():
-    """La Auth-Key esta puesta? (nunca se devuelve el valor, solo si existe)."""
+def _feeds_conf_get(clave):
+    """Valor de una clave del .conf de feeds. Solo lo usa el codigo que HACE la peticion;
+    nunca se devuelve a una pagina."""
     try:
         for l in open(FEEDS_CONF, encoding="utf-8"):
             l = l.strip()
-            if l.startswith("ABUSE_CH_AUTH_KEY=") and l.split("=", 1)[1].strip():
-                return True
+            if l.startswith(clave + "=") and not l.startswith("#"):
+                return l.split("=", 1)[1].strip()
     except OSError:
         pass
-    return False
+    return ""
 
-def feeds_auth_set(val):
-    """Guarda/actualiza (o borra) ABUSE_CH_AUTH_KEY en /etc/suricata-feeds.conf (permisos 600).
+def _feeds_conf_set(clave, val):
+    """Guarda/actualiza (o borra) una clave en /etc/suricata-feeds.conf (permisos 600).
     Solo-escritura: el valor NO se muestra despues. Conserva los comentarios/plantilla."""
     try:
         lineas = open(FEEDS_CONF, encoding="utf-8").read().splitlines()
     except OSError:
         lineas = []
-    out = [l for l in lineas if not l.strip().startswith("ABUSE_CH_AUTH_KEY=")]  # quita la activa vieja
+    out = [l for l in lineas if not l.strip().startswith(clave + "=")]   # quita la activa vieja
     v = (val or "").strip()
     if v:
-        out.append(f"ABUSE_CH_AUTH_KEY={v}")
+        out.append(f"{clave}={v}")
     try:
         tmp = FEEDS_CONF + ".tmp"
         open(tmp, "w", encoding="utf-8").write("\n".join(out) + "\n")
@@ -4820,6 +4845,13 @@ def feeds_auth_set(val):
         return True
     except OSError:
         return False
+
+def feeds_auth_configurada():
+    """La Auth-Key de abuse.ch esta puesta? (nunca se devuelve el valor, solo si existe)."""
+    return bool(_feeds_conf_get("ABUSE_CH_AUTH_KEY"))
+
+def feeds_auth_set(val):
+    return _feeds_conf_set("ABUSE_CH_AUTH_KEY", val)
 
 def feeds_auth_probar(key):
     """Valida una Auth-Key contra abuse.ch (URLhaus). Devuelve (estado, msg):
@@ -4856,6 +4888,250 @@ def actualizar_feeds_async():
         return True
     except Exception:
         return False
+
+# ---------------------------------------------------------------------------------
+# AbuseIPDB: que hace REALMENTE una IP publica
+# ---------------------------------------------------------------------------------
+# Los feeds dicen "esta IP es mala". AbuseIPDB dice ademas POR QUE: las categorias de las
+# denuncias de la comunidad (escaneo de puertos, fuerza bruta SSH, ataque a aplicacion
+# web...). Eso es lo que permite pasar de "la bloqueo" a "se que hay que corregir".
+#
+# El plan gratuito da 1.000 consultas AL DIA, asi que NO se puede enriquecer todo solo:
+# hay cache, presupuesto diario y una reserva que lo automatico no puede tocar (para que
+# un barrido no deje al operador sin consultas). Y el UNICO proceso que llama a la API es
+# el panel: el generador del reporte solo LEE la cache, porque dos procesos gastando la
+# misma cuota se la comen sin que nadie lleve la cuenta.
+AIDB_CACHE = "/var/lib/suricata-feeds/abuseipdb.json"
+AIDB_ESTADO = "/var/lib/suricata-feeds/abuseipdb-estado.json"
+AIDB_TTL_LIMPIA = 7 * 24 * 3600    # sin denuncias: cambia poco
+AIDB_TTL_SUCIA = 12 * 3600         # con denuncias: cambia rapido
+AIDB_CUOTA = 1000                  # plan gratuito ("Standard"), por dia UTC
+AIDB_RESERVA_MANUAL = 300          # consultas que SOLO puede gastar el operador a mano
+AIDB_MAX_LOTE = 25                 # IPs por consulta manual
+AIDB_MAX_CACHE = 20000
+_AIDB_LOCK = threading.RLock()
+
+# Taxonomia oficial (https://www.abuseipdb.com/categories) en castellano, y que implica
+# cada cosa cuando la IP denunciada es TUYA (el caso que de verdad hay que corregir).
+AIDB_CATS = {
+    1: "DNS comprometido", 2: "Envenenamiento de DNS", 3: "Pedidos fraudulentos",
+    4: "Ataque DDoS", 5: "Fuerza bruta FTP", 6: "Ping de la muerte", 7: "Phishing",
+    8: "Fraude VoIP", 9: "Proxy abierto o Tor", 10: "Spam web", 11: "Spam de correo",
+    12: "Spam en blogs", 13: "IP de VPN", 14: "Escaneo de puertos", 15: "Hackeo",
+    16: "Inyeccion SQL", 17: "Suplantacion de remitente", 18: "Fuerza bruta",
+    19: "Bot web abusivo", 20: "Host comprometido", 21: "Ataque a aplicacion web",
+    22: "SSH", 23: "Dirigido a IoT",
+}
+AIDB_REMEDIO = {
+    4: "Equipo dentro participando en una botnet: buscar el CPE y ponerlo en cuarentena.",
+    5: "Hay un FTP expuesto a internet. Cerrarlo o limitarlo por origen.",
+    7: "Alojamiento de phishing: revisar hosting/servidor propio en esa IP.",
+    9: "Proxy abierto: revisar NAT y puertos redirigidos sin querer.",
+    11: "Salida de spam: bloquear 25/tcp saliente salvo tu servidor de correo.",
+    14: "Alguien detras de esa IP escanea internet: casi siempre un equipo infectado.",
+    16: "Aplicacion web expuesta siendo usada para atacar: revisar el servidor.",
+    18: "Fuerza bruta de credenciales: cerrar el acceso remoto o limitarlo por origen.",
+    20: "Equipo comprometido: aislarlo y limpiarlo, no solo bloquearlo.",
+    21: "Servicio web expuesto (router, camara, panel) usado para atacar.",
+    22: "SSH abierto a internet: cerrarlo desde la WAN o mover/limitar el puerto.",
+    23: "Camara, DVR o IoT expuesto: firmware y credenciales por defecto.",
+}
+
+def aidb_key():
+    return _feeds_conf_get("ABUSEIPDB_KEY")
+
+def aidb_configurada():
+    return bool(aidb_key())
+
+def aidb_set(val):
+    return _feeds_conf_set("ABUSEIPDB_KEY", val)
+
+def _aidb_estado():
+    """Gasto del dia. La cuota de AbuseIPDB se reinicia a medianoche UTC, no local."""
+    try:
+        d = json.load(open(AIDB_ESTADO, encoding="utf-8"))
+    except (OSError, ValueError):
+        d = {}
+    hoy = time.strftime("%Y-%m-%d", time.gmtime())
+    if d.get("dia") != hoy:
+        d = {"dia": hoy, "gastadas": 0, "auto": 0, "bloqueada_hasta": 0}
+    return d
+
+def _aidb_guardar_estado(d):
+    try:
+        tmp = "%s.%d.tmp" % (AIDB_ESTADO, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, AIDB_ESTADO)
+    except OSError:
+        pass
+
+def aidb_restantes():
+    e = _aidb_estado()
+    return max(0, AIDB_CUOTA - int(e.get("gastadas", 0)))
+
+def _aidb_cache():
+    try:
+        return json.load(open(AIDB_CACHE, encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+def _aidb_guardar_cache(c):
+    try:
+        os.makedirs(os.path.dirname(AIDB_CACHE), exist_ok=True)
+        tmp = "%s.%d.%d.tmp" % (AIDB_CACHE, os.getpid(), threading.get_ident())
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(c, f)
+        os.replace(tmp, AIDB_CACHE)
+    except OSError:
+        pass
+
+def aidb_ip_valida(ip):
+    """Solo IPs PUBLICAS. Las privadas ni se envian: son las de tus abonados y ademas
+    AbuseIPDB las rechaza."""
+    try:
+        o = ipaddress.ip_address(ip)
+    except ValueError:
+        return False, "no es una IP"
+    if not o.is_global:
+        return False, "no es una IP publica"
+    return True, ""
+
+def _aidb_pedir(ip, dias=90):
+    """Una llamada a /check con detalle. Devuelve (datos, error, gastada).
+
+    No hay un 'except Exception' a lo ancho a proposito: 'sin clave', 'cuota agotada' y
+    'sin red' se arreglan de formas distintas, y un fallo mudo aqui seria invisible."""
+    key = aidb_key()
+    if not key:
+        return None, "sin clave", False
+    url = ("https://api.abuseipdb.com/api/v2/check?ipAddress=" + urllib.parse.quote(ip)
+           + "&maxAgeInDays=%d&verbose" % dias)
+    req = urllib.request.Request(url, headers={"Key": key, "Accept": "application/json",
+                                               "User-Agent": "suricata-panel/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            d = json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            try:
+                espera = int(e.headers.get("Retry-After", "0") or 0)
+            except (TypeError, ValueError):
+                espera = 0
+            return None, "cuota:%d" % (espera or 3600), True
+        if e.code in (401, 403):
+            return None, "AbuseIPDB rechazo la clave (HTTP %d)" % e.code, True
+        if e.code == 422:
+            return None, "AbuseIPDB no acepta esa IP", True
+        return None, "HTTP %d" % e.code, True
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None, "sin respuesta de AbuseIPDB", False
+    except ValueError:
+        return None, "respuesta ilegible de AbuseIPDB", True
+    return (d or {}).get("data") or {}, "", True
+
+def _aidb_resumen(d):
+    """Se queda con lo util y, sobre todo, con QUE ataques se le denuncian."""
+    cats = {}; ejemplos = []
+    for r in (d.get("reports") or [])[:80]:
+        for c in (r.get("categories") or []):
+            try:
+                cats[int(c)] = cats.get(int(c), 0) + 1
+            except (TypeError, ValueError):
+                continue
+        com = (r.get("comment") or "").strip()
+        if com and len(ejemplos) < 3:
+            ejemplos.append(com[:160])
+    orden = sorted(cats.items(), key=lambda kv: kv[1], reverse=True)[:8]
+    return {"ip": d.get("ipAddress", ""), "score": int(d.get("abuseConfidenceScore") or 0),
+            "pais": (d.get("countryCode") or "")[:2], "isp": (d.get("isp") or "")[:70],
+            "dominio": (d.get("domain") or "")[:60], "uso": (d.get("usageType") or "")[:50],
+            "tor": bool(d.get("isTor")), "blanca": bool(d.get("isWhitelisted")),
+            "reportes": int(d.get("totalReports") or 0),
+            "denunciantes": int(d.get("numDistinctUsers") or 0),
+            "ultimo": (d.get("lastReportedAt") or "")[:19],
+            "cats": [[c, n] for c, n in orden], "ejemplos": ejemplos,
+            "ts": int(time.time())}
+
+def aidb_consultar(ip, auto=False, refrescar=False):
+    """Ficha de una IP publica. Devuelve (datos|None, origen, error);
+    origen es 'cache' o 'api'. Nunca lanza."""
+    ok, porque = aidb_ip_valida(ip)
+    if not ok:
+        return None, "", porque
+    ahora = time.time()
+    with _AIDB_LOCK:
+        ent = _aidb_cache().get(ip)
+        if ent and not refrescar:
+            ttl = AIDB_TTL_SUCIA if ent.get("score", 0) else AIDB_TTL_LIMPIA
+            if ahora - ent.get("ts", 0) < ttl:
+                return ent, "cache", ""
+        est = _aidb_estado()
+        if est.get("bloqueada_hasta", 0) > ahora:
+            return (ent, "cache", "") if ent else (None, "", "cuota diaria agotada")
+        # lo automatico no puede comerse la reserva del operador
+        tope = AIDB_CUOTA - (AIDB_RESERVA_MANUAL if auto else 0)
+        if int(est.get("gastadas", 0)) >= tope:
+            falta = "sin cuota para lo automatico" if auto else "cuota diaria agotada"
+            return (ent, "cache", "") if ent else (None, "", falta)
+    d, err, gastada = _aidb_pedir(ip)
+    with _AIDB_LOCK:
+        est = _aidb_estado()
+        if gastada:
+            est["gastadas"] = int(est.get("gastadas", 0)) + 1
+            if auto:
+                est["auto"] = int(est.get("auto", 0)) + 1
+        if err.startswith("cuota:"):
+            est["bloqueada_hasta"] = ahora + int(err.split(":", 1)[1])
+            est["gastadas"] = AIDB_CUOTA
+            _aidb_guardar_estado(est)
+            return (ent, "cache", "") if ent else (None, "", "cuota diaria agotada")
+        _aidb_guardar_estado(est)
+        if err:
+            return (ent, "cache", err) if ent else (None, "", err)
+        res = _aidb_resumen(d)
+        cache = _aidb_cache()
+        cache[ip] = res
+        if len(cache) > AIDB_MAX_CACHE:       # poda: no crecer sin fin en un espejo de ISP
+            for k, _v in sorted(cache.items(), key=lambda kv: kv[1].get("ts", 0))[:5000]:
+                cache.pop(k, None)
+        _aidb_guardar_cache(cache)
+    return res, "api", ""
+
+def aidb_probar(key):
+    """Valida una clave ANTES de guardarla. (True|False|None, mensaje)."""
+    key = (key or "").strip()
+    if not key:
+        return False, "vacia"
+    # 1.1.1.1 es el resolutor publico de Cloudflare: sirve de sonda y no es de nadie tuyo
+    req = urllib.request.Request(
+        "https://api.abuseipdb.com/api/v2/check?ipAddress=1.1.1.1&maxAgeInDays=1",
+        headers={"Key": key, "Accept": "application/json", "User-Agent": "suricata-panel/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            json.load(r)
+        return True, "valida"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return False, f"AbuseIPDB rechazo la clave (HTTP {e.code})"
+        if e.code == 429:
+            return True, "valida (hoy ya no quedan consultas)"
+        return None, f"no se pudo comprobar (HTTP {e.code})"
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None, "no se pudo comprobar ahora (sin red?)"
+    except ValueError:
+        return None, "respuesta ilegible de AbuseIPDB"
+
+def aidb_cats_txt(cats, sep=", "):
+    """Nombres de categoria en castellano, con cuantas denuncias hay de cada una."""
+    out = []
+    for par in (cats or []):
+        try:
+            c, n = int(par[0]), int(par[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        out.append("%s (%d)" % (AIDB_CATS.get(c, "categoria %d" % c), n))
+    return sep.join(out)
 
 def guardar_usuarios(lst):
     tmp = USERS_FILE + ".tmp"
@@ -5292,7 +5568,7 @@ def refrescador():
         time.sleep(10)   # poll corto para atender un cambio de ventana casi al instante
 
 _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
-              ("/cuarentena", "Cuarentena"),
+              ("/cuarentena", "Cuarentena"), ("/reputacion", "Consultar IP"),
               ("/historico", "Historico"), ("/exclusiones", "Exclusiones"),
               ("/ajustes", "Ajustes")]   # Log y Documentacion viven dentro de Ajustes
 _NAV_CSS = """<style>
@@ -5905,6 +6181,18 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<div class=hint>Al guardar se <b>valida contra abuse.ch</b> (una clave invalida se rechaza). "
             "Solo escritura. Para <b>quitarla</b>, escribe <code>BORRAR</code>.</div></div>"
             "<div class=actions><button class=primary type=submit>Guardar clave</button></div></form>"
+            "<form method=post action='/feeds/aidb'>"
+            "<div class=field><label>Clave de AbuseIPDB "
+            + ("<span style='color:#3a9d5d'>(configurada)</span>" if aidb_configurada() else "<span style='color:#b06a00'>(sin configurar)</span>")
+            + "</label>"
+            "<input type=password name=aidbkey autocomplete=new-password placeholder='"
+            + ("dejar vacio para conservar" if aidb_configurada() else "pega tu clave de AbuseIPDB") + "'>"
+            "<div class=hint>Gratis en <a href='https://www.abuseipdb.com/account/api' target=_blank "
+            "rel=noopener>abuseipdb.com</a>. Sirve para <b>dos</b> cosas: la lista masiva de atacantes "
+            "(fuente <code>abuseipdb</code> de la tabla) y la pestana <b>Consultar IP</b>, que dice que "
+            f"ataques se le denuncian a una IP. El plan gratuito da <b>{AIDB_CUOTA:,}</b> consultas al dia. "
+            "Se valida al guardar. Para <b>quitarla</b>, escribe <code>BORRAR</code>.</div></div>"
+            "<div class=actions><button class=primary type=submit>Guardar clave de AbuseIPDB</button></div></form>"
             "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px'>"
             "<form method=post action='/feeds/actualizar' style='margin:0'>"
             "<button class=cancelbtn type=submit>Actualizar feeds ahora</button></form>"
@@ -7010,13 +7298,49 @@ por su culpa. Los destinos confiables se guardan en <code>/etc/suricata-destinos
 clientes criticos), aunque disparen alertas. Se guardan en
 <code>/etc/suricata-nunca-bloquear.lst</code> y las respetan tanto las politicas como el barrido rapido.</p>
 
-<h2>Reputacion / feeds (abuse.ch)</h2>
+<h2>Reputacion / feeds (abuse.ch y AbuseIPDB)</h2>
 <p>El panel enriquece los destinos con <b>feeds de reputacion</b> (IPs/CIDR y dominios maliciosos)
-con su <b>procedencia</b> y <b>caducidad</b>. En <b>Ajustes &rarr; Reputacion/feeds</b> (admin) se pega
-la <b>Auth-Key</b> de abuse.ch (URLhaus/ThreatFox); se guarda <b>solo-escritura</b> en
-<code>/etc/suricata-feeds.conf</code> (permisos 600, no se vuelve a mostrar) y hay un <b>validador</b>
-que comprueba que la clave es valida antes de guardarla. Feodo no necesita clave. La tabla muestra el
-estado por fuente (vigente/vacia/caducada) y un boton para actualizar los feeds al momento.</p>
+con su <b>procedencia</b> y <b>caducidad</b>. En <b>Ajustes &rarr; Reputacion/feeds</b> (admin) se pegan
+las claves: la <b>Auth-Key</b> de abuse.ch (URLhaus/ThreatFox) y la <b>clave de AbuseIPDB</b>. Se
+guardan <b>solo-escritura</b> en <code>/etc/suricata-feeds.conf</code> (permisos 600, no se vuelven a
+mostrar) y hay un <b>validador</b> que comprueba cada clave antes de guardarla. Feodo, CINS y Spamhaus
+no necesitan clave. La tabla muestra el estado por fuente (vigente/vacia/caducada) y un boton para
+actualizar los feeds al momento.</p>
+<p>La fuente <code>abuseipdb</code> es la <b>lista masiva</b> de atacantes denunciados por la comunidad:
+se baja como mucho <b>cada 6 horas</b> (el plan gratuito permite 5 descargas al dia) y trae hasta
+10.000 IPs de <b>confianza 100&nbsp;%</b> &mdash; acotar ese umbral es de pago. Si un dia se agota la
+cuota, se conserva la lista anterior en vez de dar la fuente por rota.</p>
+
+<h2>Consultar IP: que ataques se le denuncian</h2>
+<p>La pestana <b>Consultar IP</b> responde algo que los feeds no responden: no solo <i>si</i> una IP
+publica es mala, sino <b>a que se dedica</b>. Se pegan una o varias IPs (hasta 25) y para cada una sale
+el <b>porcentaje de confianza de abuso</b>, el operador, el pais, el tipo de uso, cuantas denuncias
+tiene y de cuantos denunciantes distintos, y sobre todo <b>las categorias</b> de esas denuncias
+(escaneo de puertos, fuerza bruta SSH, ataque a aplicacion web, host comprometido&hellip;) con un
+resumen de <b>que suele haber detras</b> de cada una.</p>
+<p>Tiene <b>dos</b> usos, y el segundo es el que arregla cosas:</p>
+<ul>
+<li>Una IP que <b>te ataca</b> (las de la pestana Entrantes): saber a que se dedica antes de decidir
+si se corta en el borde.</li>
+<li><b>Tus propias IPs publicas de NAT.</b> Si a tu IP de salida le llueven denuncias por fuerza bruta
+SSH, hay un <b>abonado infectado</b> detras atacando al resto de internet desde tu red. Eso es lo que
+hay que corregir, y es la unica forma de enterarte antes de que te metan en una lista negra.</li>
+</ul>
+<h3>Cuota y privacidad</h3>
+<ul>
+<li>El plan gratuito da <b>1.000 consultas al dia</b> (se reinicia a medianoche <b>UTC</b>). El panel
+lleva la cuenta y la muestra en la pestana.</li>
+<li>Lo ya consultado sale de una <b>cache</b> y no gasta cuota: 7 dias si la IP esta limpia, 12 horas
+si tiene denuncias. Se puede marcar <b>Forzar consulta nueva</b> para saltarsela.</li>
+<li>El enriquecimiento automatico tiene su propio tope y <b>no puede tocar una reserva</b> de 300
+consultas, para que un barrido no te deje sin poder consultar a mano.</li>
+<li><b>Nunca</b> se envian IPs privadas: las de tus abonados (10.x, 172.16-31.x, 192.168.x, 100.64.x)
+se rechazan antes de salir del servidor. Solo viajan IPs publicas.</li>
+<li>Si AbuseIPDB responde <b>429</b> (cuota agotada), el panel deja de llamar hasta que pasa el tiempo
+que indica, en vez de insistir; mientras tanto sigue sirviendo lo que tenga en cache.</li>
+<li>Sin clave configurada, la pestana lo avisa y <b>no se llama a nadie</b>: el resto del panel
+funciona igual que siempre.</li>
+</ul>
 
 <h2>Bitacora (auditoria)</h2>
 <p>Toda accion sensible queda registrada: accesos, envios/quitados de cuarentena, cambios de
@@ -7317,6 +7641,114 @@ def log_page(embed=False):
             "<section class=card><div class=uhead><h2 style='font-size:15px;margin:0'>Ultima actividad</h2>"
             "<input class=search id=lsearch placeholder='Buscar IP, usuario, accion...' oninput='lfiltrar()'></div>"
             + cuerpo + "</section></main>" + script + "</body></html>")
+
+def reputacion_page(res=None, texto="", msg="", ok=False):
+    """Consultar en AbuseIPDB que ataques se le denuncian a una IP publica.
+
+    Dos usos, y el segundo es el que de verdad arregla cosas:
+      1. una IP que ATACA a tu red (pestana Entrantes) -> saber a que se dedica;
+      2. TUS PROPIAS IPs publicas de NAT -> ver por que te denuncian a vos, que es la
+         pista de que hay un abonado infectado detras y de que hay que corregir."""
+    esc = html.escape
+    quedan = aidb_restantes()
+    hay_clave = aidb_configurada()
+    banner = ""
+    if msg:
+        col = "#1baf7a" if ok else "#e34948"
+        banner = (f"<div class=banner style='background:{col};color:#fff;padding:10px 14px;"
+                  f"border-radius:8px;margin-bottom:16px;font-size:13px'>{esc(msg)}</div>")
+    if not hay_clave:
+        banner += ("<div class=banner style='background:#fdf0e6;color:#a15c12;border:1px solid #f2d3ad;"
+                   "padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:13px'>"
+                   "Falta la <b>clave de AbuseIPDB</b>. Se saca gratis en "
+                   "<a href='https://www.abuseipdb.com/account/api' target=_blank rel=noopener>"
+                   "abuseipdb.com</a> y se pega en <b>Ajustes &rarr; Reputacion</b>.</div>")
+
+    def _scb(n):
+        c = "#3a9d5d" if n == 0 else ("#e58a00" if n < 25 else ("#e07b39" if n < 75 else "#e34948"))
+        return (f"<span style='background:{c};color:#fff;font-weight:700;font-size:12px;"
+                f"padding:3px 10px;border-radius:20px'>Confianza de abuso {n}%</span>")
+
+    tarjetas = []
+    for ip, d, origen, err in (res or []):
+        if not d:
+            tarjetas.append(
+                f"<div class=card style='margin:0 0 12px'><b class=mono>{esc(ip)}</b> "
+                f"<span style='color:#b52a2a'>&mdash; {esc(err or 'sin datos')}</span></div>")
+            continue
+        cats = d.get("cats") or []
+        chips = "".join(
+            "<span style='display:inline-block;background:#f1f1ef;border:1px solid #e0dfda;"
+            "border-radius:20px;padding:3px 10px;margin:0 6px 6px 0;font-size:12.5px'>"
+            + esc(AIDB_CATS.get(int(c), "categoria %d" % int(c)))
+            + f" <b>{int(n)}</b></span>" for c, n in cats) or "<span class=hint>sin denuncias en 90 dias</span>"
+        # que hacer: solo de las categorias que de verdad aparecen
+        arreglos = []
+        for c, _n in cats:
+            t = AIDB_REMEDIO.get(int(c))
+            if t and t not in arreglos:
+                arreglos.append(t)
+        arr_html = ""
+        if arreglos:
+            arr_html = ("<div style='margin-top:10px'><b style='font-size:13px'>Que suele haber detras</b>"
+                        "<ul style='margin:6px 0 0;padding-left:20px;font-size:13px'>"
+                        + "".join(f"<li>{esc(t)}</li>" for t in arreglos[:5]) + "</ul></div>")
+        ejem = ""
+        if d.get("ejemplos"):
+            ejem = ("<details style='margin-top:10px'><summary style='cursor:pointer;font-size:13px'>"
+                    "Texto de las denuncias</summary>"
+                    "<ul class=mono style='font-size:12px;color:#52514e;margin:6px 0 0;padding-left:20px'>"
+                    + "".join(f"<li>{esc(t)}</li>" for t in d["ejemplos"]) + "</ul></details>")
+        extra = []
+        if d.get("tor"):
+            extra.append("nodo Tor")
+        if d.get("blanca"):
+            extra.append("en lista blanca de AbuseIPDB")
+        cuando = time.strftime("%d/%m %H:%M", time.localtime(d.get("ts", 0)))
+        proc = "consultado ahora" if origen == "api" else f"de cache ({cuando})"
+        tarjetas.append(
+            "<div class=card style='margin:0 0 12px'>"
+            f"<div style='display:flex;align-items:center;gap:12px;flex-wrap:wrap'>"
+            f"<b class=mono style='font-size:15px'>{esc(d.get('ip') or ip)}</b>{_scb(d.get('score', 0))}"
+            + (f"<span class=hint>{esc(' · '.join(extra))}</span>" if extra else "")
+            + f"<span class=hint style='margin-left:auto'>{esc(proc)}</span></div>"
+            "<div style='font-size:13px;color:#52514e;margin:8px 0 10px'>"
+            + esc(d.get("isp") or "operador desconocido")
+            + (f" &middot; {esc(d.get('pais'))}" if d.get("pais") else "")
+            + (f" &middot; {esc(d.get('uso'))}" if d.get("uso") else "")
+            + (f" &middot; {esc(d.get('dominio'))}" if d.get("dominio") else "")
+            + "</div>"
+            f"<div style='font-size:13px;margin-bottom:8px'><b>{d.get('reportes', 0):,}</b> denuncias de "
+            f"<b>{d.get('denunciantes', 0):,}</b> denunciantes distintos"
+            + (f" &middot; ultima {esc(d.get('ultimo'))}" if d.get("ultimo") else "") + "</div>"
+            + chips + arr_html + ejem + "</div>")
+
+    css = BASE_CSS + (
+        "textarea{width:100%;min-height:84px;padding:10px 12px;border:1px solid #d9d7d2;"
+        "border-radius:9px;font:13px ui-monospace,Consolas,monospace;resize:vertical}"
+        ".qbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px}")
+    return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>"
+            f"<style>{css}</style></head><body>" + nav("/reputacion") +
+            "<main><h1>Consultar IP</h1>"
+            "<p class=sub2>Pega una o varias <b>IPs publicas</b> y AbuseIPDB te dice <b>que ataques se les "
+            "denuncian</b>, no solo si son malas. Sirve para dos cosas: mirar a que se dedica una IP que "
+            "te esta atacando, y &mdash;sobre todo&mdash; pegar <b>tus propias IPs publicas de NAT</b> "
+            "para ver por que te denuncian a vos: eso senala que hay un abonado infectado detras y que "
+            "es lo que hay que corregir.</p>"
+            + banner +
+            "<section class=card><form method=post action='/reputacion'>"
+            "<div class=field><label>IPs publicas (una por linea, o separadas por comas)</label>"
+            f"<textarea name=ips placeholder='una IP publica por linea'>{esc(texto)}</textarea>"
+            f"<div class=hint>Hasta {AIDB_MAX_LOTE} por consulta. Las privadas (las de tus CPEs) no se "
+            "envian nunca. Lo ya consultado sale de la cache y no gasta cuota.</div></div>"
+            "<div class=qbar><button class=primary type=submit>Consultar</button>"
+            "<label class=chk style='font-size:13px'><input type=checkbox name=refrescar> "
+            "Forzar consulta nueva (ignora la cache)</label>"
+            f"<span class=hint style='margin-left:auto'>Quedan <b>{quedan:,}</b> de {AIDB_CUOTA:,} "
+            "consultas hoy</span></div></form></section>"
+            + ("".join(tarjetas) if tarjetas else "") +
+            "</main></body></html>")
 
 def bitacora_page(embed=False):
     """Bitacora auditable: quien hizo que y cuando (logins, cuarentenas, config, usuarios, updates)."""
@@ -8333,6 +8765,10 @@ class H(BaseHTTPRequestHandler):
                 except (ValueError, TypeError):
                     edit = None
             return self._html(exclusiones_page(edit_idx=edit))
+        if path == "/reputacion":
+            if not self._operador():
+                return self._deny()
+            return self._html(reputacion_page())
         if path == "/documentacion":
             _qd = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             return self._html(documentacion_page(embed=("1" in _qd.get("embed", [])),
@@ -8654,6 +9090,45 @@ class H(BaseHTTPRequestHandler):
                 return self._html(perfil_page("Auth-Key VALIDA y guardada (solo en este servidor). Actualizando feeds.", ok=True))
             bitacora("CONFIG-FEEDS-AUTHKEY", f"guardada sin validar ({det})")
             return self._html(perfil_page(f"Auth-Key guardada, pero {det}. Se reintentara en la proxima actualizacion.", ok=True))
+        if ruta == "/reputacion":
+            if not self._operador():
+                return self._deny()
+            texto = q.get("ips", [""])[0]
+            refrescar = bool(q.get("refrescar"))
+            pedidas = [t.strip() for t in re.split(r"[\s,;]+", texto or "") if t.strip()]
+            vistas = []
+            for t in pedidas:                     # sin repetir: repetir gasta cuota para nada
+                if t not in vistas:
+                    vistas.append(t)
+            sobran = max(0, len(vistas) - AIDB_MAX_LOTE)
+            res = [(ip,) + aidb_consultar(ip, refrescar=refrescar) for ip in vistas[:AIDB_MAX_LOTE]]
+            aviso = ""
+            if not vistas:
+                aviso = "No pusiste ninguna IP."
+            elif sobran:
+                aviso = f"Se consultaron {AIDB_MAX_LOTE}; quedan {sobran} sin consultar (repite la operacion)."
+            if res:
+                bitacora("CONSULTA-ABUSEIPDB", f"{len(res)} IP(s)")
+            return self._html(reputacion_page(res=res, texto=texto, msg=aviso, ok=not aviso))
+        if ruta == "/feeds/aidb":
+            if not self._admin():
+                return self._deny()
+            k = q.get("aidbkey", [""])[0]
+            if k.strip() == "BORRAR":
+                aidb_set(""); bitacora("CONFIG-ABUSEIPDB", "borrada")
+                return self._html(perfil_page("Clave de AbuseIPDB borrada.", ok=True))
+            if not k.strip():
+                return self._html(perfil_page("Sin cambios en la clave de AbuseIPDB.", ok=True))
+            estado, det = aidb_probar(k)          # validar ANTES de guardar (rechaza basura)
+            if estado is False:
+                bitacora("CONFIG-ABUSEIPDB", f"rechazada ({det})")
+                return self._html(perfil_page(f"No se guardo: la clave no es valida — {det}.", ok=False))
+            aidb_set(k); actualizar_feeds_async()
+            if estado is True:
+                bitacora("CONFIG-ABUSEIPDB", "validada y guardada")
+                return self._html(perfil_page("Clave de AbuseIPDB VALIDA y guardada (solo en este servidor).", ok=True))
+            bitacora("CONFIG-ABUSEIPDB", f"guardada sin validar ({det})")
+            return self._html(perfil_page(f"Clave guardada, pero {det}.", ok=True))
         if ruta == "/feeds/actualizar":
             if not self._admin():
                 return self._deny()

@@ -2897,42 +2897,54 @@ except OSError:
 # --- Metricas por dia: se SUMAN a lo ya guardado (el bucle solo conto lo nuevo) --------
 # Esto es lo que permite responder "bajo el abuso?" con un numero, meses despues, cuando
 # los reportes HTML de entonces ya no existen.
+def fusionar_metricas(prev, nuevos, ts_max, hueco, ahora=None):
+    """Suma lo contado en esta corrida a lo que ya habia. Devuelve el dict a guardar.
+
+    Se SUMA en vez de sobrescribir porque el bucle solo conto lo posterior a la ultima
+    corrida; recontar la ventana daria mal el total del dia en cuanto la ventana sea mas
+    corta que 24 h."""
+    ahora = time.time() if ahora is None else ahora
+    dias = prev.get("dias")
+    if not isinstance(dias, dict):
+        dias = {}
+    for d, v in (nuevos or {}).items():
+        e = dias.get(d)
+        if not isinstance(e, dict):
+            e = {"sal": 0, "ent": 0, "cpes_n": 0, "cpes": [], "puertos": {}, "cats": {}, "nodos": {}}
+        e["sal"] = int(e.get("sal", 0)) + int(v.get("sal", 0))
+        e["ent"] = int(e.get("ent", 0)) + int(v.get("ent", 0))
+        # CPEs distintos del dia: se guarda el conjunto mientras el dia es reciente y
+        # despues solo el numero (400 dias de listas no tendrian sentido).
+        conj = set(e.get("cpes") or []) | set(v.get("cpes") or ())
+        if len(conj) > METRICAS_MAX_CPES:
+            conj = set(sorted(conj)[:METRICAS_MAX_CPES])
+        e["cpes"] = sorted(conj)
+        e["cpes_n"] = len(conj)
+        for campo in ("puertos", "cats", "nodos"):
+            acum = dict(e.get(campo) or {})
+            for k, n in (v.get(campo) or {}).items():
+                acum[k] = int(acum.get(k, 0)) + int(n)
+            e[campo] = dict(sorted(acum.items(), key=lambda kv: kv[1], reverse=True)[:20])
+        if hueco:
+            e["hueco"] = True
+        dias[d] = e
+    corte_set = time.strftime("%Y-%m-%d", time.localtime(ahora - 3 * 86400))
+    for k, v2 in dias.items():
+        if k < corte_set and isinstance(v2, dict):
+            v2.pop("cpes", None)
+    lim = time.strftime("%Y-%m-%d", time.localtime(ahora - METRICAS_DIAS * 86400))
+    dias = {k: v for k, v in dias.items() if k >= lim}
+    return {"ultimo_ts": ts_max, "generado": int(ahora), "dias": dias}
+
 try:
-    _dias = _mprev.get("dias")
-    if not isinstance(_dias, dict):
-        _dias = {}
-    # Si el generador estuvo parado mas que la ventana, hay un agujero: se deja anotado en
+    # Si el generador estuvo parado mas que la ventana hay un agujero: se deja anotado en
     # vez de fingir que esos dias fueron tranquilos.
     _hueco = bool(METR_DESDE and ts_min and ts_min > METR_DESDE + 60)
-    for _d, _v in dias_m.items():
-        _e = _dias.get(_d)
-        if not isinstance(_e, dict):
-            _e = {"sal": 0, "ent": 0, "cpes_n": 0, "cpes": [], "puertos": {}, "cats": {}, "nodos": {}}
-        _e["sal"] = int(_e.get("sal", 0)) + _v["sal"]
-        _e["ent"] = int(_e.get("ent", 0)) + _v["ent"]
-        # CPEs distintos del dia: se guarda el conjunto mientras el dia es reciente y luego
-        # solo el numero (guardar 400 dias de listas no tendria sentido).
-        _set = set(_e.get("cpes") or []) | _v["cpes"]
-        if len(_set) > METRICAS_MAX_CPES:
-            _set = set(list(_set)[:METRICAS_MAX_CPES])
-        _e["cpes"] = sorted(_set)
-        _e["cpes_n"] = len(_set)
-        for _campo, _cnt in (("puertos", _v["puertos"]), ("cats", _v["cats"]), ("nodos", _v["nodos"])):
-            _acum = dict(_e.get(_campo) or {})
-            for _k, _n in _cnt.items():
-                _acum[_k] = int(_acum.get(_k, 0)) + _n
-            _e[_campo] = dict(sorted(_acum.items(), key=lambda kv: kv[1], reverse=True)[:20])
-        if _hueco:
-            _e["hueco"] = True
-        _dias[_d] = _e
-    # la lista de CPEs solo para los ultimos 3 dias; del resto queda el conteo
-    _corte_set = time.strftime("%Y-%m-%d", time.localtime(time.time() - 3 * 86400))
-    for _k, _v2 in _dias.items():
-        if _k < _corte_set and isinstance(_v2, dict):
-            _v2.pop("cpes", None)
-    _lim = time.strftime("%Y-%m-%d", time.localtime(time.time() - METRICAS_DIAS * 86400))
-    _dias = {k: v for k, v in _dias.items() if k >= _lim}
-    _sal = {"ultimo_ts": ts_max or METR_DESDE, "generado": int(time.time()), "dias": _dias}
+    _nuevos = {d: {"sal": v["sal"], "ent": v["ent"], "cpes": v["cpes"],
+                   "puertos": dict(v["puertos"]), "cats": dict(v["cats"]),
+                   "nodos": dict(v["nodos"])}
+               for d, v in dias_m.items()}
+    _sal = fusionar_metricas(_mprev, _nuevos, ts_max or METR_DESDE, _hueco)
     _tmpm = METRICAS_FILE + ".tmp"
     with open(_tmpm, "w", encoding="utf-8") as _f:
         json.dump(_sal, _f)
@@ -7932,6 +7944,30 @@ ademas crea/borra usuarios y cambia roles. Las claves se guardan <b>hasheadas</b
 en <code>/etc/suricata-dashboard-users.json</code>; nunca en texto plano. El primer admin sale del
 <code>USER</code>/<code>PASS</code> de <code>/etc/suricata-dashboard.conf</code> la primera vez.</p>
 
+<h2>Abuso saliente: el numero que hay que poder enseñar</h2>
+<p>La pestana <b>Historico</b> ya no es una lista de archivos: es la <b>tendencia del abuso que sale
+de tu red</b>. Es el dato que hace que las IPs publicas acaben en listas negras, y el unico que sirve
+para demostrarle a alguien &mdash;a quien te deslista, o a tu cliente&mdash; que la limpieza
+funciona.</p>
+<p>Arriba salen los numeros de cabecera: ataques salientes <b>hoy</b> y ayer, la <b>media diaria de 7
+dias</b>, la <b>tendencia</b> (los ultimos 7 dias frente a los 7 anteriores, en verde si baja), el
+maximo de <b>CPEs distintos atacando</b> y cuantos se pusieron en cuarentena y cuantos se liberaron.
+Debajo, una barra por dia (7, 30, 90 o 365) y dos tablas: <b>por que atacan</b> y <b>por que puerto
+salen</b>, que es justo lo que hay que mirar para decidir la regla de salida que mas abuso corta.</p>
+<h3>De donde salen esos numeros</h3>
+<ul>
+<li>Los reportes HTML se podan a los <b>3 dias</b>, asi que la tendencia <b>no</b> sale de ellos: se
+acumula aparte en <code>/var/log/suricata-metricas.json</code> y se guarda <b>400 dias</b>.</li>
+<li>Se cuenta de forma <b>incremental</b> (solo lo posterior a la corrida anterior), no recontando la
+ventana. Importa: si bajas la ventana a 30 minutos, recontar daria un "hoy" ridiculamente bajo y sin
+avisar de nada. Asi el total del dia es correcto sea cual sea la ventana.</li>
+<li>Si el generador estuvo parado mas que la ventana, ese dia queda <b>marcado como incompleto</b> y
+su barra sale gris: un dia sin datos no es un dia tranquilo.</li>
+<li>Las cuarentenas se cuentan aparte, en el archivo del panel, porque el log de cuarentena solo
+guarda 15 dias.</li>
+<li>La tendencia necesita <b>14 dias</b> de datos para poder comparar; antes de eso lo dice.</li>
+</ul>
+
 <h2>Reportes e informe diario</h2>
 <ul>
 <li>Reporte grafico a mano: <code>suricata-html-report</code> (queda en <code>/var/log/suricata/</code>).</li>
@@ -8664,13 +8700,15 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
         return (f"<span style='background:{c};color:#fff;font-weight:700;font-size:12px;"
                 f"padding:3px 10px;border-radius:20px'>{txt}</span>")
 
+    # Barra de vuelta. Estaba como un enlace suelto ENCIMA del bloque de las publicas, o
+    # sea fuera de la vista: se aterrizaba en una pagina larga con el resultado abajo y
+    # sin retorno aparente. Ahora va pegada al resultado y con aspecto de boton.
     atras = ""
     if res:
-        if volver:
-            atras = (f"<p style='margin:0 0 10px'><a href='?ips={esc(volver)}'>&larr; Volver a "
-                     f"{esc(volver)}</a></p>")
-        else:
-            atras = "<p style='margin:0 0 10px'><a href='/reputacion'>&larr; Volver</a></p>"
+        destino = f"?ips={esc(volver)}" if volver else "/reputacion"
+        que = ("Volver a " + esc(volver)) if volver else "Volver a Consultar IP"
+        atras = ("<div class=volver><a href='" + destino + "'>&larr; " + que + "</a>"
+                 "<span class=hint>" + esc(texto[:60]) + "</span></div>")
 
     tarjetas = []
     for ip, d, origen, err in (res or []):
@@ -8898,7 +8936,12 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
     css = BASE_CSS + (
         "textarea{width:100%;min-height:84px;padding:10px 12px;border:1px solid #d9d7d2;"
         "border-radius:9px;font:13px ui-monospace,Consolas,monospace;resize:vertical}"
-        ".qbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px}")
+        ".qbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px}"
+        ".volver{display:flex;align-items:center;gap:12px;margin:0 0 14px;flex-wrap:wrap}"
+        ".volver a{display:inline-flex;align-items:center;background:#eef4fd;color:#1c5cab;"
+        "border:1px solid #cfe0f6;border-radius:9px;padding:7px 14px;text-decoration:none;"
+        "font:600 13px system-ui}"
+        ".volver a:hover{background:#dceafb;border-color:#a7c0ea}")
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>"
             f"<style>{css}</style></head><body>" + nav("/reputacion") +
@@ -8908,8 +8951,10 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             "te esta atacando, y &mdash;sobre todo&mdash; pegar <b>tus propias IPs publicas de NAT</b> "
             "para ver por que te denuncian a vos: eso senala que hay un abonado infectado detras y que "
             "es lo que hay que corregir.</p>"
-            + banner + atras + pub_html +
-            "<h2 style='font-size:17px;margin:18px 0 10px'>Consultar cualquier IP o red</h2>"
+            + banner + atras
+            + ("".join(tarjetas) if tarjetas else "")
+            + ("" if res else pub_html)
+            + "<h2 style='font-size:17px;margin:18px 0 10px'>Consultar cualquier IP o red</h2>"
             "<section class=card><form method=get action='/reputacion'>"
             "<div class=field><label>IPs o redes publicas (una por linea, o separadas por comas)</label>"
             f"<textarea name=ips placeholder='200.0.0.0/24&#10;una IP publica por linea'>{esc(texto)}</textarea>"
@@ -8923,8 +8968,8 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             f"<span class=hint style='margin-left:auto'>Hoy quedan <b>{quedan:,}</b> de {AIDB_CUOTA:,} "
             f"consultas por IP y <b>{quedan_red:,}</b> de {AIDB_CUOTA_BLOQUE:,} por red</span>"
             "</div></form></section>"
-            + ("".join(tarjetas) if tarjetas else "") +
-            "</main></body></html>")
+            + (pub_html if res else "")
+            + "</main></body></html>")
 
 def bitacora_page(embed=False):
     """Bitacora auditable: quien hizo que y cuando (logins, cuarentenas, config, usuarios, updates)."""

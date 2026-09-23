@@ -277,7 +277,33 @@ def main():
     check("una IP repetida en el mismo pegado no se consulta 3 veces",
           len(red4.llamadas) == n4, len(red4.llamadas))
 
-    # --- 11) una clave rechazada no se confunde con 'sin red' ---
+    # --- 11) la vuelta: mirar una direccion de una red no puede dejarte encallado ----
+    # Fallo dos veces: primero porque la consulta iba por POST (Atras pedia reenviar el
+    # formulario) y luego porque el enlace de vuelta quedaba encima de un bloque largo,
+    # o sea fuera de la pantalla.
+    pag_red = ns["reputacion_page"](res=[("200.0.0.0/24",
+                                          {"tipo": "red", "red": "200.0.0.0/24", "hosts": 256,
+                                           "n_den": 1, "ts": 0,
+                                           "denunciadas": [["200.0.0.7", 38, 11, "2026-09-19", "EC"]]},
+                                          "cache", "")], texto="200.0.0.0/24")
+    check("el formulario va por GET, para que el boton Atras funcione",
+          "method=get" in pag_red and "method=post action='/reputacion'" not in pag_red)
+    check("cada direccion de la red recuerda de donde viene",
+          "volver=200.0.0.0/24" in pag_red, pag_red[pag_red.find("ver que hace") - 200:][:200])
+
+    pag_ip = ns["reputacion_page"](res=[("200.0.0.7", d, "cache", "")],
+                                   texto="200.0.0.7", volver="200.0.0.0/24")
+    check("al mirar una direccion hay boton de vuelta a su red",
+          "Volver a 200.0.0.0/24" in pag_ip)
+    check("y la vuelta va ANTES del resultado, no al final de la pagina",
+          pag_ip.index("Volver a 200.0.0.0/24") < pag_ip.index("Confianza de abuso"),
+          (pag_ip.index("Volver a 200.0.0.0/24"), pag_ip.index("Confianza de abuso")))
+    check("sin red de origen igual hay vuelta",
+          "Volver a Consultar IP" in ns["reputacion_page"](res=[("1.1.1.1", d, "cache", "")]))
+    check("y sin consulta no se pinta ninguna vuelta",
+          "class=volver" not in ns["reputacion_page"]())
+
+    # --- 12) una clave rechazada no se confunde con 'sin red' ---
     tmp2 = tempfile.mkdtemp(); red2 = Red(); ns2 = entorno(tmp2, red2)
     ns2["aidb_set"]("MALA")
     red2.guion.append(http(401))

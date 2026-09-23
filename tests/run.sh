@@ -68,6 +68,7 @@ correr "enviar/quitar de cuarentena van por identidad (router, IP)" "$PY" tests/
 correr "AbuseIPDB: cuota, cache, privacidad y categorias" "$PY" tests/test_abuseipdb.py
 correr "denuncias a AbuseIPDB: apagadas por defecto y con frenos" "$PY" tests/test_abuseipdb_denuncia.py
 correr "documentacion: paginas, categorias, buscador y modal" "$PY" tests/test_documentacion.py
+correr "ninguna ruta del panel revienta por un nombre sin definir" "$PY" tests/test_rutas_get.py
 correr "una pagina que revienta da 500 explicado, no 502 mudo" "$PY" tests/test_error_500.py
 
 printf '\n'

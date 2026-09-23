@@ -1235,6 +1235,20 @@ pais_dst = Counter()   # alertas por PAIS del destino (para el mapa "a donde ata
 # 20 entradas y el crecimiento es MULTIPLICATIVO. Sin tope es el mismo tipo de fuga que
 # tumbo la VM por OOM. Solo se muestran los 4-6 primeros de cada lista, asi que acotar no
 # cambia lo que se ve (el "+N mas" pasa a ser un minimo, que sigue siendo cierto).
+# --- Metricas por DIA: el numero que un ISP tiene que poder ENSEÑAR ---------------
+# Los reportes HTML se podan a los 3 dias, asi que la tendencia no se puede reconstruir
+# desde ellos. Esto se guarda aparte y sobrevive.
+#
+# Se acumula de forma INCREMENTAL (solo lo posterior a la ultima corrida) en vez de
+# recontar la ventana: la ventana es configurable y si alguien la baja a 30 min, recontar
+# daria un "hoy" ridiculamente bajo sin avisar de nada. Con el incremental, el total del
+# dia es correcto sea cual sea la ventana.
+METRICAS_FILE = "/var/log/suricata-metricas.json"
+METRICAS_DIAS = 400          # algo mas de un año de tendencia; el archivo sigue siendo pequeño
+METRICAS_MAX_CPES = 5000     # tope del conjunto de CPEs por dia (por encima, el conteo es un minimo)
+dias_m = defaultdict(lambda: {"sal": 0, "ent": 0, "cpes": set(),
+                              "puertos": Counter(), "cats": Counter(), "nodos": Counter()})
+
 MAX_PAIS_CARD = 800
 pais_ips = defaultdict(Counter)     # cc -> Counter(ip_destino -> alertas)
 pais_ports = defaultdict(Counter)   # cc -> Counter("dport/proto" -> alertas)
@@ -1314,6 +1328,13 @@ MAX_CARD = 2500                    # tope por set (el score satura mucho antes; 
 total = 0
 seen = 0
 ts_min = None          # timestamp del evento mas antiguo dentro de la ventana (cobertura real)
+ts_max = 0             # el mas nuevo: la marca desde la que contara la proxima corrida
+try:                   # hasta donde se conto ya (para no contar dos veces ni perderse nada)
+    _mprev = json.load(open("/var/log/suricata-metricas.json", encoding="utf-8"))
+    METR_DESDE = float(_mprev.get("ultimo_ts") or 0)
+except (OSError, ValueError, TypeError):
+    _mprev = {}
+    METR_DESDE = 0.0
 
 # --- Camino B: dominios malos (feeds URLhaus/ThreatFox) para cruzar con las consultas DNS.
 # DEBE definirse ANTES del bucle: el parseo de dns.json usa DOM_OK/dominio_malo. ---
@@ -1409,6 +1430,26 @@ for p in files:
                 continue
             if dst in DEST_OK:     # destino marcado confiable (falso positivo): la alerta no cuenta
                 continue
+            # --- metricas del dia (solo lo que aun no se habia contado) ---
+            if ts:
+                if ts > ts_max:
+                    ts_max = ts
+                if ts > METR_DESDE:
+                    _ipsrc = ip_de(src)
+                    _mio_src = es_mi_cpe(_ipsrc); _mio_dst = es_mi_cpe(dst)
+                    if _mio_src and not _mio_dst:          # TU red atacando hacia fuera
+                        _d = dias_m[time.strftime("%Y-%m-%d", time.localtime(ts))]
+                        _d["sal"] += 1
+                        if len(_d["cpes"]) < METRICAS_MAX_CPES:
+                            _d["cpes"].add(src)
+                        _d["cats"][traducir(sig)] += 1
+                        if dport:
+                            _d["puertos"][f"{dport}/{proto}"] += 1
+                        _rid = rid_de(src)
+                        if _rid:
+                            _d["nodos"][_rid] += 1
+                    elif _mio_dst and not _mio_src:        # internet golpeando tu red
+                        dias_m[time.strftime("%Y-%m-%d", time.localtime(ts))]["ent"] += 1
             by_dst[dst] += 1
             by_src[src] += 1
             _cc = pais(dst)                    # pais del destino (mapa "a donde atacan")
@@ -2840,6 +2881,52 @@ try:
 except OSError:
     pass
 
+# --- Metricas por dia: se SUMAN a lo ya guardado (el bucle solo conto lo nuevo) --------
+# Esto es lo que permite responder "bajo el abuso?" con un numero, meses despues, cuando
+# los reportes HTML de entonces ya no existen.
+try:
+    _dias = _mprev.get("dias")
+    if not isinstance(_dias, dict):
+        _dias = {}
+    # Si el generador estuvo parado mas que la ventana, hay un agujero: se deja anotado en
+    # vez de fingir que esos dias fueron tranquilos.
+    _hueco = bool(METR_DESDE and ts_min and ts_min > METR_DESDE + 60)
+    for _d, _v in dias_m.items():
+        _e = _dias.get(_d)
+        if not isinstance(_e, dict):
+            _e = {"sal": 0, "ent": 0, "cpes_n": 0, "cpes": [], "puertos": {}, "cats": {}, "nodos": {}}
+        _e["sal"] = int(_e.get("sal", 0)) + _v["sal"]
+        _e["ent"] = int(_e.get("ent", 0)) + _v["ent"]
+        # CPEs distintos del dia: se guarda el conjunto mientras el dia es reciente y luego
+        # solo el numero (guardar 400 dias de listas no tendria sentido).
+        _set = set(_e.get("cpes") or []) | _v["cpes"]
+        if len(_set) > METRICAS_MAX_CPES:
+            _set = set(list(_set)[:METRICAS_MAX_CPES])
+        _e["cpes"] = sorted(_set)
+        _e["cpes_n"] = len(_set)
+        for _campo, _cnt in (("puertos", _v["puertos"]), ("cats", _v["cats"]), ("nodos", _v["nodos"])):
+            _acum = dict(_e.get(_campo) or {})
+            for _k, _n in _cnt.items():
+                _acum[_k] = int(_acum.get(_k, 0)) + _n
+            _e[_campo] = dict(sorted(_acum.items(), key=lambda kv: kv[1], reverse=True)[:20])
+        if _hueco:
+            _e["hueco"] = True
+        _dias[_d] = _e
+    # la lista de CPEs solo para los ultimos 3 dias; del resto queda el conteo
+    _corte_set = time.strftime("%Y-%m-%d", time.localtime(time.time() - 3 * 86400))
+    for _k, _v2 in _dias.items():
+        if _k < _corte_set and isinstance(_v2, dict):
+            _v2.pop("cpes", None)
+    _lim = time.strftime("%Y-%m-%d", time.localtime(time.time() - METRICAS_DIAS * 86400))
+    _dias = {k: v for k, v in _dias.items() if k >= _lim}
+    _sal = {"ultimo_ts": ts_max or METR_DESDE, "generado": int(time.time()), "dias": _dias}
+    _tmpm = METRICAS_FILE + ".tmp"
+    with open(_tmpm, "w", encoding="utf-8") as _f:
+        json.dump(_sal, _f)
+    os.replace(_tmpm, METRICAS_FILE)
+except OSError:
+    pass
+
 print(out)
 HREP
 chmod 755 /usr/local/bin/suricata-html-report
@@ -2896,6 +2983,13 @@ def hora_ec(ts):
         except (ValueError, TypeError):
             pass
     return ts[11:19] if len(ts) >= 19 else ""
+_up = urllib.parse      # alias corto. A NIVEL DE MODULO a proposito: ver abajo.
+# Estuvo como "import urllib.parse as _up" DENTRO de un par de ramas del manejador GET, y
+# eso convierte a _up en una variable LOCAL de todo el metodo. Las ramas que la importaban
+# hacen return, asi que cualquier ruta posterior que usara _up reventaba con
+# UnboundLocalError -> el hilo moria -> el proxy devolvia un "502 Bad Gateway" mudo.
+# Le paso a /documentacion. Un import dentro de una rama no vale para las demas.
+
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -3850,12 +3944,48 @@ def bitacora(accion, detalle="", quien=None, ip=None):
     except OSError:
         pass
 
+# Acciones por dia (cuantos CPEs se pusieron en cuarentena y cuantos se liberaron).
+# Va en un archivo PROPIO del panel: las metricas de deteccion las escribe el generador y
+# dos procesos editando el mismo archivo se pisarian.
+ACCIONES_FILE = "/var/log/suricata-acciones.json"
+ACCIONES_DIAS = 400
+_ACC_LOCK = threading.RLock()
+
+def cargar_acciones():
+    try:
+        d = json.load(open(ACCIONES_FILE, encoding="utf-8"))
+        return d.get("dias") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+def contar_accion(accion):
+    """Suma 1 a esa accion en el dia de hoy. El log de cuarentena se poda a los 15 dias;
+    esto es lo que permite decir dentro de seis meses cuantos CPEs se limpiaron."""
+    hoy = time.strftime("%Y-%m-%d")
+    try:
+        with _ACC_LOCK:
+            dias = cargar_acciones()
+            dia = dias.get(hoy)
+            if not isinstance(dia, dict):
+                dia = {}
+            dia[accion] = int(dia.get(accion, 0)) + 1
+            dias[hoy] = dia
+            lim = time.strftime("%Y-%m-%d", time.localtime(time.time() - ACCIONES_DIAS * 86400))
+            dias = {k: v for k, v in dias.items() if k >= lim}
+            tmp = "%s.%d.tmp" % (ACCIONES_FILE, os.getpid())
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"dias": dias}, f)
+            os.replace(tmp, ACCIONES_FILE)
+    except OSError:
+        pass
+
 def mk_log(accion, ip, quien, detalle=""):
     try:
         with open(MK_LOG, "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {accion} {ip} por={quien} {detalle}\n")
     except OSError:
         pass
+    contar_accion(accion)
     bitacora(accion, f"{ip} {detalle}".strip(), quien=quien)   # tambien a la bitacora general
 
 def _ttl_efectivo(m, ttl_key):
@@ -8117,7 +8247,138 @@ def bitacora_page(embed=False):
             "<input class=search id=lsearch placeholder='Buscar usuario, IP, accion...' oninput='lfiltrar()'></div>"
             + cuerpo + "</section></main>" + script + "</body></html>")
 
-def historico_page():
+METRICAS_FILE = "/var/log/suricata-metricas.json"
+
+def cargar_metricas():
+    """Contadores por dia que escribe el generador (sobreviven a la poda de reportes)."""
+    try:
+        d = json.load(open(METRICAS_FILE, encoding="utf-8"))
+        return d.get("dias") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+def _serie(dias, n):
+    """Los ultimos n dias como lista [(fecha, datos)], rellenando los que faltan con 0.
+    Rellenar importa: un dia sin datos es un dia sin datos, no un dia tranquilo, pero el
+    grafico tiene que mostrar el hueco en su sitio."""
+    hoy = time.time()
+    out = []
+    for i in range(n - 1, -1, -1):
+        f = time.strftime("%Y-%m-%d", time.localtime(hoy - i * 86400))
+        out.append((f, dias.get(f) or {}))
+    return out
+
+def _media(serie, clave="sal"):
+    vals = [int((d or {}).get(clave, 0)) for _f, d in serie]
+    return (sum(vals) / len(vals)) if vals else 0.0
+
+def _grafico(serie, esc):
+    """Barras en SVG puro (sin librerias): una por dia, con el dato en el tooltip."""
+    vals = [int((d or {}).get("sal", 0)) for _f, d in serie]
+    ent = [int((d or {}).get("ent", 0)) for _f, d in serie]
+    mx = max(vals + ent + [1])
+    n = len(serie)
+    W, H, PAD = 900.0, 200.0, 24.0
+    bw = (W - PAD) / max(1, n)
+    barras = []
+    for i, (f, d) in enumerate(serie):
+        v = vals[i]
+        h = (H - PAD * 2) * (v / mx) if mx else 0
+        x = PAD + i * bw
+        y = H - PAD - h
+        col = "#2a78d6"
+        if (d or {}).get("hueco"):
+            col = "#c8ccd1"            # hubo un corte de datos ese dia: no se pinta como bueno
+        cpes = int((d or {}).get("cpes_n", 0))
+        t = f"{f}: {v:,} ataques salientes, {cpes:,} CPE distintos"
+        if (d or {}).get("hueco"):
+            t += " (faltan datos: el sensor estuvo parado)"
+        barras.append(
+            f"<g><title>{esc(t)}</title>"
+            f"<rect x='{x:.1f}' y='{y:.1f}' width='{max(1.0, bw - 1.5):.1f}' height='{max(0.0, h):.1f}' "
+            f"fill='{col}' rx='1.5'/></g>")
+    # etiquetas: primera, mitad y ultima, para no amontonar
+    etiq = []
+    for i in (0, n // 2, n - 1):
+        if 0 <= i < n:
+            x = PAD + i * bw + bw / 2
+            anc = "start" if i == 0 else ("end" if i == n - 1 else "middle")
+            etiq.append(f"<text x='{x:.1f}' y='{H - 6:.1f}' text-anchor='{anc}' "
+                        f"font-size='11' fill='#8a8a86'>{esc(serie[i][0][5:])}</text>")
+    return (f"<svg viewBox='0 0 {W:.0f} {H:.0f}' preserveAspectRatio='none' "
+            f"style='width:100%;height:200px;display:block'>"
+            f"<line x1='{PAD}' y1='{H - PAD}' x2='{W}' y2='{H - PAD}' stroke='#e7e6e2'/>"
+            f"<text x='2' y='{PAD}' font-size='11' fill='#8a8a86'>{mx:,}</text>"
+            + "".join(barras) + "".join(etiq) + "</svg>")
+
+def historico_page(dias_n=30):
+    esc = html.escape
+    dias = cargar_metricas()
+    acc = cargar_acciones()
+    serie = _serie(dias, dias_n)
+    hay = any(d for _f, d in serie)
+
+    # --- el numero que hay que poder enseñar ---
+    hoy = int((serie[-1][1] or {}).get("sal", 0)) if serie else 0
+    ayer = int((serie[-2][1] or {}).get("sal", 0)) if len(serie) > 1 else 0
+    ult7 = _media(serie[-7:]) if len(serie) >= 7 else _media(serie)
+    prev7 = _media(serie[-14:-7]) if len(serie) >= 14 else 0.0
+    if prev7 > 0:
+        var = (ult7 - prev7) / prev7 * 100.0
+        col = "#3a9d5d" if var < 0 else ("#e34948" if var > 0 else "#8a8a86")
+        flecha = "&darr;" if var < 0 else ("&uarr;" if var > 0 else "&rarr;")
+        var_html = (f"<span style='color:{col};font-weight:700'>{flecha} {abs(var):.0f} %</span>"
+                    f"<div class=kh>media de 7 dias frente a los 7 anteriores</div>")
+    else:
+        var_html = "<span style='color:#8a8a86'>&mdash;</span><div class=kh>hacen falta 14 dias de datos</div>"
+
+    total = sum(int((d or {}).get("sal", 0)) for _f, d in serie)
+    cpes_pico = max([int((d or {}).get("cpes_n", 0)) for _f, d in serie] or [0])
+    enviados = sum(int((acc.get(f) or {}).get(a, 0)) for f, _d in serie
+                   for a in ("ENVIADO", "POLITICA-ENVIADO", "POLITICA-RAPIDA"))
+    liberados = sum(int((acc.get(f) or {}).get(a, 0)) for f, _d in serie
+                    for a in ("QUITADO", "AUTO-LIBERADO", "POLITICA-LIBERADO", "LIBERADO-FALSO-POSITIVO"))
+
+    def _kpi(v, t, h=""):
+        return (f"<div class=kpi><div class=kv>{v}</div><div class=kt>{esc(t)}</div>"
+                + (f"<div class=kh>{h}</div>" if h else "") + "</div>")
+
+    kpis = ("<div class=kpis>"
+            + _kpi(f"{hoy:,}", "ataques salientes hoy", f"ayer: {ayer:,}")
+            + _kpi(f"{ult7:,.0f}", "media diaria (7 dias)")
+            + f"<div class=kpi><div class=kv>{var_html}</div><div class=kt>tendencia</div></div>"
+            + _kpi(f"{cpes_pico:,}", "CPEs distintos atacando", "maximo en el periodo")
+            + _kpi(f"{enviados:,}", "puestos en cuarentena", f"liberados: {liberados:,}")
+            + "</div>")
+
+    # --- por que atacan y por donde ---
+    def _tabla(campo, titulo, tope=8):
+        ac = {}
+        for _f, d in serie:
+            for k, v in ((d or {}).get(campo) or {}).items():
+                ac[k] = ac.get(k, 0) + int(v)
+        if not ac:
+            return ""
+        tot = sum(ac.values()) or 1
+        filas = "".join(
+            f"<tr><td>{esc(k)}</td><td class=num>{v:,}</td>"
+            f"<td class=num>{v * 100.0 / tot:.0f} %</td></tr>"
+            for k, v in sorted(ac.items(), key=lambda kv: kv[1], reverse=True)[:tope])
+        return (f"<section class=card style='flex:1;min-width:280px'><h2 style='font-size:15px;margin:0 0 8px'>{esc(titulo)}</h2>"
+                f"<table><thead><tr><th>{'Categoria' if campo == 'cats' else 'Puerto'}</th>"
+                f"<th class=num>Alertas</th><th class=num>%</th></tr></thead><tbody>{filas}</tbody></table></section>")
+
+    sel = "".join(
+        f"<a href='?d={n}' class='{'on' if n == dias_n else ''}'>{n} dias</a>"
+        for n in (7, 30, 90, 365))
+
+    vacio = ("<div class=banner style='background:#fdf0e6;color:#a15c12;border:1px solid #f2d3ad;"
+             "padding:12px 14px;border-radius:8px;margin:0 0 16px;font-size:13px'>"
+             "Todavia no hay historico. Los contadores empiezan a acumularse con la primera "
+             "corrida del generador y la tendencia se vuelve util a partir de los 14 dias.</div>"
+             if not hay else "")
+
+    # --- reportes guardados (lo que habia antes, ahora al final) ---
     fs = sorted(glob.glob(f"{LOGDIR}/report-*.html"), key=os.path.getmtime, reverse=True)
     rows = []
     for f in fs:
@@ -8141,15 +8402,37 @@ def historico_page():
     body = ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
             "<title>Suricata</title><style>" + BASE_CSS +
-            "main{max-width:800px;padding:20px}a{color:#2a78d6}"
+            "main{max-width:1100px;padding:20px}a{color:#2a78d6}"
+            ".kpis{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 18px}"
+            ".kpi{flex:1;min-width:150px;background:#fff;border:1px solid #e7e6e2;border-radius:12px;padding:14px 16px}"
+            ".kpi .kv{font-size:26px;font-weight:800;line-height:1.1;color:#33322f}"
+            ".kpi .kt{font-size:12.5px;color:#52514e;margin-top:4px}"
+            ".kpi .kh{font-size:11.5px;color:#8a8a86;margin-top:2px}"
+            ".rango{display:flex;gap:8px;margin:0 0 12px;flex-wrap:wrap}"
+            ".rango a{font:13px system-ui;padding:5px 12px;border:1px solid #d7d6d2;border-radius:20px;"
+            "text-decoration:none;color:#52514e;background:#fff}"
+            ".rango a.on{background:#2a78d6;border-color:#2a78d6;color:#fff;font-weight:600}"
+            ".doscol{display:flex;gap:14px;flex-wrap:wrap;margin:16px 0}"
             ".pager{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}"
             ".pager button{font:13px system-ui;padding:6px 12px;border:1px solid #d7d6d2;background:#fff;border-radius:8px;cursor:pointer}"
             ".pager button:hover:not(:disabled){background:#eef4fd;border-color:#2a78d6}"
             ".pager button:disabled{opacity:.4;cursor:default}.pager #hpi{font-weight:600;font-size:13px;color:#52514e}"
             "</style></head><body>"
-            "<main><h1>Reportes guardados</h1>"
-            "<p style='color:#8a8a86;font-size:13px;margin:0 0 8px'>Se guardan los ultimos 3 dias "
-            "(una instantanea por hora, mas el mas reciente).</p>"
+            "<main><h1>Abuso saliente</h1>"
+            "<p class=sub2 style='margin:0 0 14px'>Cuantos ataques salen de tu red hacia internet, dia a dia. "
+            "Es el numero que hace que las <b>IPs publicas acaben en listas negras</b>, y el unico que sirve "
+            "para demostrar que la limpieza funciona: los reportes HTML se borran a los 3 dias, esto no.</p>"
+            + vacio
+            + f"<div class=rango>{sel}</div>"
+            + kpis
+            + "<section class=card><h2 style='font-size:15px;margin:0 0 4px'>Ataques salientes por dia</h2>"
+            + f"<p class=sub2 style='margin:0 0 8px'>{total:,} en los ultimos {dias_n} dias. "
+              "Las barras grises son dias con datos incompletos (el sensor estuvo parado).</p>"
+            + _grafico(serie, esc) + "</section>"
+            + f"<div class=doscol>{_tabla('cats', 'Por que atacan')}{_tabla('puertos', 'Por que puerto salen')}</div>"
+            + "<h2 style='font-size:16px;margin:22px 0 4px'>Reportes guardados</h2>"
+            "<p style='color:#8a8a86;font-size:13px;margin:0 0 8px'>Instantaneas de los ultimos 3 dias "
+            "(una por hora, mas la mas reciente). La tendencia de arriba NO depende de ellas.</p>"
             "<table><tbody id=hbody>"
             + ("".join(rows) or "<tr><td>Sin reportes todavia.</td></tr>")
             + "</tbody></table>" + pager + script + "</main></body></html>")
@@ -9008,15 +9291,20 @@ class H(BaseHTTPRequestHandler):
                     f"<main>{detalle}</main></body></html>")
             return self._html(page)
         if path == "/historico":
-            return self._html(historico_page())
+            _qh = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            try:
+                _dn = int(_qh.get("d", ["30"])[0])
+            except (ValueError, TypeError):
+                _dn = 30
+            if _dn not in (7, 30, 90, 365):
+                _dn = 30
+            return self._html(historico_page(_dn))
         if path == "/cuarentena":
-            import urllib.parse as _up
             _qs = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             return self._html(cuarentena_page(msg=_qs.get("msg", [""])[0], es_admin=self._operador()))
         if path == "/cuarentena/ficha":
             if not self._operador():
                 return self._redirect("/")
-            import urllib.parse as _up
             _qs = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             return self._html(ficha_page(_qs.get("ip", [""])[0],
                                          embed=("embed=1" in (self.path.split("?", 1)[1] if "?" in self.path else ""))))
@@ -9049,9 +9337,8 @@ class H(BaseHTTPRequestHandler):
                 return self._redirect("/")   # lectura no gestiona exclusiones
             edit = None
             if "?" in self.path:
-                import urllib.parse
                 try:
-                    edit = int(urllib.parse.parse_qs(self.path.split("?", 1)[1]).get("edit", [""])[0])
+                    edit = int(_up.parse_qs(self.path.split("?", 1)[1]).get("edit", [""])[0])
                 except (ValueError, TypeError):
                     edit = None
             return self._html(exclusiones_page(edit_idx=edit))
@@ -9075,7 +9362,6 @@ class H(BaseHTTPRequestHandler):
         return self._html("<h1>No encontrado</h1>", 404)
     def _post(self):
         ruta = self.path.split("?", 1)[0]
-        import urllib.parse, urllib.parse as _up, ipaddress
         try:
             n = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(n).decode("utf-8", "replace") if n else ""

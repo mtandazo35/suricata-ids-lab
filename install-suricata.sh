@@ -9100,11 +9100,15 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 bl_html = ("<div class=hint style='margin-top:8px'>Listas de bloqueo: sin revisar "
                            "todavia (se revisan solas cada 6 h).</div>")
 
+            den_n = ""
+            if isinstance(dat, dict) and dat.get("tipo") == "red":
+                den_n = (f"<span class=hint>{int(dat.get('n_den', 0)):,} de "
+                         f"{int(dat.get('hosts', 0)):,} denunciadas</span>")
             filas.append(
                 "<div style='padding:10px 0;border-top:1px solid #f0efec'>"
                 "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap'>"
-                f"<b class=mono>{esc(ent)}</b>{_scb(sc)}"
-                f"<a class=hint href='?ips={esc(ent)}'>revisar ahora</a>"
+                f"<b class=mono>{esc(ent)}</b>{_scb(sc)}{den_n}"
+                f"<a class=hint href='?ips={esc(ent)}'>ver detalle</a>"
                 f"<span class=hint style='margin-left:auto'>ultima verificacion: {esc(visto)}</span></div>"
                 + bl_html + det + "</div>")
         if not entradas and not es_admin:

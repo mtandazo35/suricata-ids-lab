@@ -320,6 +320,11 @@ def main():
           "name=ips size=22" in adm and "class=busca" in adm, "")
     check("ya no hay una seccion aparte 'Consultar cualquier IP o red'",
           "Consultar cualquier IP" not in adm)
+    # dos controles llamados casi igual en la misma tarjeta confundian: uno abre el
+    # detalle y el otro refresca de verdad
+    check("solo hay UN 'Revisar ahora'",
+          adm.lower().count("revisar ahora") == 1, adm.lower().count("revisar ahora"))
+    check("y el enlace del detalle dice lo que hace", "ver detalle" in adm)
 
     # --- 12) una clave rechazada no se confunde con 'sin red' ---
     tmp2 = tempfile.mkdtemp(); red2 = Red(); ns2 = entorno(tmp2, red2)

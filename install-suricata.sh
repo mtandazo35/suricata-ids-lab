@@ -8927,6 +8927,32 @@ abre cientos, y un limite alto no molesta a quien solo navega.</li>
 <b>encolarlo</b> con <code>/queue</code> que intentar cortarlo.</li>
 </ul>
 
+<h2>Las address-lists: cual es cual</h2>
+<p>Ya son cinco y conviene tenerlas claras, porque <b>no todas se usan igual</b>: tres miran el
+<b>origen</b> (a quien se corta) y dos el <b>destino</b> o la entrada. Confundir
+<code>src-address-list</code> con <code>dst-address-list</code> en la regla es el error que hace que
+"funcione" sin bloquear nada, o que bloquee lo que no era.</p>
+<table>
+<tr><th>Lista</th><th>Que lleva dentro</th><th>En la regla</th><th>TTL</th></tr>
+<tr><td><code>suricata-cuarentena</code></td><td><b>CPEs infectados</b> (malware/CnC confirmado)</td>
+<td><code>src-address-list</code></td><td>1 h</td></tr>
+<tr><td><code>suricata-dns-sospechoso</code></td><td><b>CPEs</b> que consultan dominios de botnet</td>
+<td><code>src-address-list</code></td><td>1 d</td></tr>
+<tr><td><code>suricata-graduada</code></td><td><b>CPEs</b> con corte <b>parcial</b>: solo los puertos
+de abuso, el resto le sigue funcionando</td><td><code>src-address-list</code></td><td>1 d</td></tr>
+<tr><td><code>suricata-destinos-malos</code></td><td><b>IPs publicas ajenas</b> de mala reputacion a
+las que tus CPEs salen (C2, malware, redes secuestradas)</td><td><b><code>dst-address-list</code></b>
+</td><td>7 d</td></tr>
+<tr><td><code>suricata-atacantes</code></td><td><b>IPs publicas ajenas</b> que atacan tu red desde
+internet</td><td><code>src-address-list</code> + <code>connection-state=new</code></td><td>1 d</td></tr>
+</table>
+<p>Las tres primeras contienen <b>IPs de tus abonados</b>; las dos ultimas, <b>IPs publicas de
+terceros</b> &mdash; y ninguna de esas dos acepta una IP tuya, ni privada ni publica. Cada lista
+tiene su nombre y su TTL configurables <b>por nodo</b> en <b>Ajustes &rarr; MikroTik</b>, y cada una
+lleva su propio registro en el panel, asi que quitar algo de una no toca las demas.</p>
+<p>El TTL de los destinos es mas largo (7 d) a proposito: un servidor de control no deja de serlo en
+una hora, y ahi no hay ningun abonado esperando a que se le devuelva el servicio.</p>
+
 <h2>Destinos de mala reputacion (en Cuarentena)</h2>
 <p>La cuarentena corta al <b>abonado</b>. Esto corta el <b>destino</b>, que es lo que mantiene vivo
 al equipo infectado: sin canal de control, la botnet no manda nada. Y vale para <b>todos</b> los

@@ -4372,6 +4372,119 @@ def mk_publicas_detectadas(router=None):
         except OSError: pass
     return sorted(encontradas)
 
+def _mk_print(s_, cmd, props):
+    """Un print de la API como lista de diccionarios."""
+    filas = []
+    try:
+        _mk_send(s_, [cmd, "=.proplist=" + ",".join(props)])
+        _ok, frases, _err = _mk_reply(s_)
+    except Exception:
+        return filas
+    for f in frases:
+        if not (f and f[0] == "!re"):
+            continue
+        d = {}
+        for a in f:
+            if a.startswith("=") and "=" in a[1:]:
+                k, v = a[1:].split("=", 1)
+                d[k] = v
+        filas.append(d)
+    return filas
+
+def mk_diagnostico(router=None):
+    """Que le falta al router para poder cortar de verdad. [(estado, titulo, detalle, arreglo)]
+    estado: ok | falta | aviso."""
+    d = cargar_mk_de(router) if router else cargar_mk()
+    s_ = mk_conectar(d)
+    try:
+        filtros = _mk_print(s_, "/ip/firewall/filter/print",
+                            ["chain", "action", "src-address-list", "dst-port",
+                             "protocol", "psd", "disabled", "connection-limit"])
+        crudas = _mk_print(s_, "/ip/firewall/raw/print", ["action", "src-address-list"])
+        ajustes = _mk_print(s_, "/ip/settings/print", ["rp-filter"])
+        sniffer = _mk_print(s_, "/tool/sniffer/print",
+                            ["running", "streaming-enabled", "streaming-server",
+                             "filter-interface"])
+    finally:
+        try: s_.close()
+        except OSError: pass
+
+    activos = [f for f in filtros if f.get("disabled") != "true"]
+    def usa_lista(nombre):
+        return any(f.get("src-address-list") == nombre for f in activos + crudas)
+
+    out = []
+    # 1) sin espejo no hay nada que analizar
+    sn = sniffer[0] if sniffer else {}
+    if sn.get("running") == "true" and sn.get("streaming-enabled") == "true":
+        out.append(("ok", "El espejo esta activo",
+                    "Enviando a %s desde %s." % (sn.get("streaming-server", "?"),
+                                                 sn.get("filter-interface") or "todas las interfaces"), ""))
+    else:
+        out.append(("falta", "El espejo NO esta enviando",
+                    "Sin esto el sensor esta ciego y todo lo demas da igual.",
+                    "/tool sniffer set streaming-enabled=yes "
+                    "streaming-server=IP_DEL_SENSOR:37008 filter-stream=yes\n/tool sniffer start"))
+
+    # 2) las address-lists tienen que tener una regla que las use
+    for lista, que in ((d.get("LIST", ""), "cuarentena"),
+                       (d.get("LIST_GRAD", ""), "cuarentena graduada")):
+        if not lista:
+            continue
+        if usa_lista(lista):
+            out.append(("ok", f"La lista de {que} corta", f"Hay una regla usando '{lista}'.", ""))
+        else:
+            out.append(("falta", f"La lista de {que} NO corta nada",
+                        f"El panel mete CPEs en '{lista}', pero ninguna regla del firewall la "
+                        "usa: el abonado sigue atacando y el panel dice 'enviado'.",
+                        f"/ip firewall filter add chain=forward src-address-list={lista} "
+                        f'action=drop comment="Suricata: {que}"'))
+
+    # 3) el origen falsificado no lo ve NINGUN IDS
+    rp = (ajustes[0].get("rp-filter") if ajustes else "") or "no"
+    if rp == "strict":
+        out.append(("ok", "Origen falsificado bloqueado (rp-filter strict)",
+                    "Tus abonados no pueden salir con una IP que no es suya.", ""))
+    else:
+        out.append(("falta", "Se puede salir con IP falsificada (rp-filter = %s)" % rp,
+                    "Es la base de los ataques de amplificacion y de las quejas que no se "
+                    "pueden rastrear. Ningun IDS lo detecta, porque el trafico parece venir "
+                    "de otro sitio. OJO: con rutas asimetricas o varios proveedores, "
+                    "'strict' tira trafico legitimo; probalo primero con 'loose'.",
+                    "/ip settings set rp-filter=strict"))
+
+    # 4) deteccion de escaneo en el propio router (instantanea, sin esperar al sensor)
+    if any(f.get("psd") for f in activos):
+        out.append(("ok", "El router detecta escaneos por si solo",
+                    "Hay una regla con el matcher psd.", ""))
+    else:
+        out.append(("falta", "El router no detecta escaneos",
+                    "Suricata los ve, pero tarda: el router puede marcarlos al instante y "
+                    "sin depender del sensor. Las reglas estan mas abajo.", ""))
+
+    # 5) limite de conexiones: frena botnets sin saber nada de firmas
+    if any(f.get("connection-limit") for f in activos):
+        out.append(("ok", "Hay limite de conexiones por abonado", "", ""))
+    else:
+        out.append(("aviso", "Sin limite de conexiones por abonado",
+                    "Un CPE infectado puede abrir miles de conexiones. Un tope alto no "
+                    "molesta a nadie y le corta las piernas a un escaner.",
+                    "/ip firewall filter add chain=forward protocol=tcp "
+                    "connection-state=new connection-limit=200,32 "
+                    'action=drop comment="Suricata: tope de conexiones por abonado"'))
+
+    # 6) los drops masivos son mas baratos en raw (no pasan por conntrack)
+    if crudas:
+        out.append(("ok", "Hay reglas en raw", "Los cortes masivos no gastan conntrack.", ""))
+    else:
+        out.append(("aviso", "Los cortes van por filter, no por raw",
+                    "Con muchas IPs en cuarentena conviene cortar en raw: se descarta antes "
+                    "de crear la conexion y la tabla de conntrack no se llena.",
+                    "/ip firewall raw add chain=prerouting "
+                    f"src-address-list={d.get('LIST', 'suricata-cuarentena')} "
+                    'action=drop comment="Suricata: cortar antes de conntrack"'))
+    return out
+
 def mk_list_ips(lista, router=None):
     """Devuelve el conjunto de direcciones que estan AHORA en esa address-list del MikroTik."""
     d = cargar_mk_de(router) if router else cargar_mk()
@@ -8286,6 +8399,42 @@ guarda 15 dias.</li>
 <li>La tendencia necesita <b>14 dias</b> de datos para poder comparar; antes de eso lo dice.</li>
 </ul>
 
+<h2>IDS e IPS: que puede y que no puede hacer este montaje</h2>
+<p>Conviene tenerlo claro desde el principio. Suricata aqui recibe un <b>espejo</b>: una copia del
+trafico. Cuando ve un ataque, el paquete <b>ya paso</b>. Por diseño, <b>nunca</b> va a poder
+bloquearlo. Un IPS de verdad exige que el trafico <b>atraviese</b> el sensor (modo inline), y eso
+significa poner una maquina Linux en el camino de todos tus abonados: pasa a ser punto unico de
+fallo y tiene que aguantar el caudal entero.</p>
+<p>La alternativa practica es que <b>el que corta sea el MikroTik</b>, en dos capas:</p>
+<ul>
+<li><b>Instantanea, en el router.</b> Reglas nativas de RouterOS que no necesitan al sensor para
+nada: deteccion de escaneo (<code>psd</code>), limite de conexiones nuevas, tope de conexiones por
+abonado, higiene de salida. Cortan a velocidad de linea y funcionan aunque el sensor este apagado.
+Lo que no hacen es distinguir por firma.</li>
+<li><b>Con criterio, desde el panel.</b> Suricata identifica al CPE por firma y el panel lo mete en
+una address-list del router. Entre que el ataque empieza y el CPE queda cortado pasan segundos o
+algunos minutos, no es instantaneo, pero acierta mucho mas.</li>
+</ul>
+<p>Las dos juntas se acercan bastante a un IPS. Y el orden importa: primero las nativas, que son
+gratis y no dependen de nada; despues las del panel.</p>
+
+<h3>Proteccion en el MikroTik: que le falta</h3>
+<p>Al principio de <b>Abuso saliente</b>, el panel <b>le pregunta al router</b> y dice que tiene y
+que le falta para poder cortar, con el comando exacto de cada cosa:</p>
+<ul>
+<li><b>El espejo activo.</b> Si el sniffer se paro, el sensor esta ciego y todo lo demas da igual.</li>
+<li><b>Que las address-lists CORTEN.</b> Es el fallo mas caro: el panel mete CPEs en la lista, dice
+"enviado", y si ninguna regla usa esa lista el abonado sigue atacando igual. Una regla
+<b>desactivada</b> tampoco cuenta.</li>
+<li><b>Origen falsificado</b> (<code>rp-filter</code>). Es la base de los ataques de amplificacion y
+de las quejas que no se pueden rastrear, y <b>ningun IDS lo detecta</b>, porque el trafico parece
+venir de otro sitio. Aviso: con rutas asimetricas o varios proveedores, <code>strict</code> tira
+trafico legitimo; se prueba antes con <code>loose</code>.</li>
+<li><b>Deteccion de escaneo en el propio router</b> y <b>tope de conexiones por abonado</b>.</li>
+<li><b>Cortar en <code>raw</code></b>: con muchas IPs en cuarentena conviene descartar antes de
+crear la conexion, para no llenar la tabla de conntrack.</li>
+</ul>
+
 <h2>Reglas de salida: lo que baja los baneos</h2>
 <p>Al final de <b>Abuso saliente</b> el panel propone <b>reglas de firewall para el MikroTik</b>
 sacadas de lo que el sensor vio <b>de verdad</b>, no de una lista generica. Cada una dice
@@ -9558,6 +9707,38 @@ def historico_page(dias_n=30):
                 f"<table><thead><tr><th>{'Categoria' if campo == 'cats' else 'Puerto'}</th>"
                 f"<th class=num>Alertas</th><th class=num>%</th></tr></thead><tbody>{filas}</tbody></table></section>")
 
+    # --- Que le falta al router para poder CORTAR ------------------------------------
+    # Con un espejo, Suricata no bloquea nunca: ve una copia y el paquete ya paso. El que
+    # corta es el router, asi que lo primero es saber si esta en condiciones de hacerlo.
+    def _diag_html(r, nom, multi):
+        try:
+            checks = mk_diagnostico(r)
+        except Exception as ex:
+            return ("<section class=card><h2 style='font-size:15px;margin:0 0 6px'>"
+                    + ("Proteccion en " + esc(nom) if multi else "Proteccion en el MikroTik")
+                    + "</h2><p class=hint>No se pudo consultar el router: "
+                    + esc(str(ex)[:120]) + "</p></section>")
+        col = {"ok": "#3a9d5d", "falta": "#e34948", "aviso": "#e58a00"}
+        ico = {"ok": "&#10003;", "falta": "&#9888;", "aviso": "&#9679;"}
+        faltan = sum(1 for e, _t, _d, _f in checks if e == "falta")
+        filas = "".join(
+            "<div class=diagl>"
+            f"<span style='color:{col.get(e, '#8a8a86')};font-weight:700'>{ico.get(e, '')}</span>"
+            f"<div><b>{esc(t)}</b>"
+            + (f"<div class=rn>{esc(det)}</div>" if det else "")
+            + (f"<pre class=diagfix>{esc(fix)}</pre>" if fix else "")
+            + "</div></div>"
+            for e, t, det, fix in checks)
+        return ("<section class=card>"
+                + "<h2 style='font-size:15px;margin:0 0 4px'>"
+                + ("Proteccion en " + esc(nom) if multi else "Proteccion en el MikroTik")
+                + "</h2>"
+                + "<p class=sub2 style='margin:0 0 8px'>Suricata <b>no bloquea</b>: con un espejo "
+                  "ve una copia y el paquete ya paso. El que corta es el router. "
+                + (f"<b style='color:#b52a2a'>Le faltan {faltan} cosas.</b>" if faltan
+                   else "<b style='color:#1a7f37'>Esta en condiciones de cortar.</b>")
+                + "</p>" + filas + "</section>")
+
     # --- Reglas de salida: de los eventos que ve el sensor a lo que hay que pegar ----
     rs = cargar_routers()
     multi = len(rs) > 1
@@ -9614,7 +9795,12 @@ def historico_page(dias_n=30):
               f"<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;"
               f"padding:10px;overflow-x:auto;font-size:12px'>{esc(reglas_salida_texto(grupos))}</pre>"
               "</details></section>")
-    reglas_html = "".join(secc_reglas)
+    diag_html = ""
+    for r in rs:
+        if (r.get("HOST") or "") and r.get("ENABLED") == "1":
+            diag_html += _diag_html(r, r.get("nombre") or r.get("HOST") or r.get("id", ""),
+                                    len(rs) > 1)
+    reglas_html = diag_html + "".join(secc_reglas)
 
     sel = "".join(
         f"<a href='?d={n}' class='{'on' if n == dias_n else ''}'>{n} dias</a>"
@@ -9672,6 +9858,10 @@ def historico_page(dias_n=30):
             ".regla .rpct{margin-left:auto;font-weight:800;color:#2a78d6;font-size:15px}"
             ".regla .rn{font-size:13px;color:#52514e;margin-top:4px}"
             ".regla .rcuidado{font-size:12.5px;color:#a15c12;margin-top:4px}"
+            ".diagl{display:flex;gap:10px;align-items:flex-start;border-top:1px solid #f0efec;"
+            "padding:9px 0;font-size:13px}"
+            ".diagfix{background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;"
+            "padding:8px 10px;margin:6px 0 0;overflow-x:auto;font-size:12px;white-space:pre-wrap}"
             ".pager{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}"
             ".pager button{font:13px system-ui;padding:6px 12px;border:1px solid #d7d6d2;background:#fff;border-radius:8px;cursor:pointer}"
             ".pager button:hover:not(:disabled){background:#eef4fd;border-color:#2a78d6}"

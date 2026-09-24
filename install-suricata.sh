@@ -10741,74 +10741,215 @@ def conducta_csv(rep_):
     def q(v):
         v = str(v)
         return '"' + v.replace('"', '""') + '"' if any(c in v for c in ';"\n\r') else v
-    out = ["IP;Alertas;Eventos;Dias activos;Destinos distintos;Puertos distintos;"
+    out = ["IP;Categoria;Alertas;Eventos;Dias activos;Destinos distintos;Puertos distintos;"
            "Primera vez;Ultima vez;Top firmas;Top destinos;Top puertos;Top dominios"]
     for f in rep_.get("filas", []):
         def junta(k):
             return " | ".join("%s (%d)" % (a, b) for a, b in f.get(k, []))
         out.append(";".join(q(x) for x in [
-            f["ip"], f["alertas"], f["eventos"], f["dias"], f["destinos_n"], f["puertos_n"],
+            f["ip"], nombre_categoria(conducta_categoria(f)),
+            f["alertas"], f["eventos"], f["dias"], f["destinos_n"], f["puertos_n"],
             time.strftime("%Y-%m-%d %H:%M", time.localtime(f["primera"])),
             time.strftime("%Y-%m-%d %H:%M", time.localtime(f["ultima"])),
             junta("firmas"), junta("destinos"), junta("puertos"), junta("dominios")]))
     return ("\ufeff" + "\n".join(out)).encode("utf-8")
 
+# Como se lee cada categoria en el informe: (que es, que hacer, color).
+# El color es gravedad, no decoracion: rojo = el equipo esta comprometido y ataca a
+# terceros; ambar = abuso que se corrige sin cortar; azul = consumo, no ataque.
+CONDUCTA_GUIA = {
+    "botnet": ("El equipo esta infectado y habla con su centro de mando.",
+               "Aislar y avisar al abonado: mientras siga conectado, ataca a terceros "
+               "desde tu IP publica.", "#c0392b"),
+    "escaneo": ("Esta barriendo puertos o buscando equipos vulnerables en internet.",
+                "Cortar. Es lo que mas rapido te mete la publica en las listas negras.",
+                "#c0392b"),
+    "fuerza": ("Esta probando claves contra servicios ajenos (SSH, RDP, VNC).",
+               "Cortar. Cada intento fallido suma denuncias contra tu rango.", "#c0392b"),
+    "dns": ("Consulta dominios de malware. Suele ser el primer sintoma, antes de la "
+            "conexion real.", "Redirigir su DNS a tu resolutor, que ya filtra. No hace "
+            "falta dejarlo sin internet.", "#d68910"),
+    "spam": ("Manda correo saliente en volumen.",
+             "Cerrarle solo el correo (25/465/587). Sigue navegando y deja de quemarte "
+             "la reputacion.", "#d68910"),
+    "minado": ("Esta minando criptomonedas.",
+               "Encolar. Es consumo, no un ataque a terceros.", "#2471a3"),
+    "p2p": ("Trafico P2P / BitTorrent.",
+            "Encolar, no cortar. No ensucia tu reputacion, te come el enlace.", "#2471a3"),
+    "otros": ("Actividad que no encaja en las categorias anteriores.",
+              "Revisar a mano antes de decidir.", "#5d6d7e"),
+}
+
+def conducta_categoria(f):
+    """En que categoria cae un CPE segun lo que hizo en los dias del informe.
+
+    Se traduce cada firma a su categoria y gana la PRIMERA de CAT_CPE que casa, que va
+    de lo mas grave a lo mas leve: quien tiene botnet y ademas P2P es un CPE con
+    botnet, aunque el P2P tenga diez veces mas alertas."""
+    suyas = {traducir(fir) for fir, _ in (f.get("firmas") or [])}
+    for cat, _nom, cats, _l in CAT_CPE:
+        if suyas & set(cats):
+            return cat
+    return CAT_OTROS[0]
+
+_CD_CSS = """<style>
+.inf h2{margin:0 0 2px}
+.inf .per{color:#667;font-size:13px;margin:0 0 14px}
+.tiles{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 6px}
+.tile{flex:1 1 150px;background:#fff;border:1px solid #e3e7ec;border-radius:10px;padding:10px 12px}
+.tile .n{font-size:24px;font-weight:700;line-height:1.1}
+.tile .l{color:#667;font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 0}
+.chip{border-radius:999px;padding:4px 11px;color:#fff;font-size:12px;font-weight:600}
+.seccion{margin:22px 0 0}
+.seccion h3{display:flex;align-items:center;gap:9px;margin:0 0 3px;font-size:17px}
+.seccion h3 .pill{border-radius:6px;padding:2px 9px;color:#fff;font-size:12px}
+.seccion .qes{color:#445;margin:0 0 2px}
+.seccion .qhacer{color:#667;font-size:13px;margin:0 0 10px}
+.cpe{background:#fff;border:1px solid #e3e7ec;border-left-width:4px;border-radius:9px;
+     padding:10px 13px;margin:0 0 8px}
+.cpe .top{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px}
+.cpe .ip{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:16px;font-weight:600}
+.cpe .b{background:#f1f4f8;border-radius:6px;padding:2px 8px;font-size:12px;color:#445}
+.cpe details{margin-top:8px}
+.cpe summary{cursor:pointer;color:#2471a3;font-size:13px}
+.cpe .kv{margin:8px 0 0;line-height:1.75;font-size:13px}
+.cpe .kv b{color:#334}
+.bars{margin:6px 0 0}
+.bars .row{display:flex;align-items:center;gap:9px;margin:0 0 7px}
+.bars .lb{flex:0 0 132px;text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace;
+          font-size:13px;color:#445;overflow:hidden;text-overflow:ellipsis}
+.bars .tr{flex:1 1 auto;background:#eef1f5;border-radius:4px;height:22px}
+.bars .fi{height:22px;border-radius:4px;min-width:2px}
+.bars .vl{flex:0 0 auto;font-size:13px;color:#445;font-variant-numeric:tabular-nums}
+@media(prefers-color-scheme:dark){
+  .tile,.cpe{background:#161a20;border-color:#2a3038}
+  .cpe .b{background:#222933;color:#c8d0da}
+  .bars .tr{background:#222933}
+  .bars .lb,.bars .vl{color:#c8d0da}
+  .cpe .kv b,.seccion .qes{color:#dfe5ec}
+}
+</style>"""
+
+_CD_COLORES = ["#e05c5c", "#e08b3c", "#7ab547", "#2ba3b5", "#7d6fd1",
+               "#c95c9c", "#5d8ac9", "#8a9199"]
+
+def conducta_barras(filas, titulo, n=10):
+    """El mismo ranking de atacantes que el resumen en vivo, pero sobre TODA la ventana
+    del informe. En vivo se ve quien ataca ahora; aqui, quien lleva tres dias haciendolo,
+    que es lo que sirve para decidir un corte."""
+    esc = html.escape
+    top = [f for f in filas if f["alertas"] > 0][:n]
+    if not top:
+        return ""
+    tope = max(f["alertas"] for f in top)
+    fil = "".join(
+        "<div class=row><div class=lb>%s</div><div class=tr>"
+        "<div class=fi style='width:%.1f%%;background:%s'></div></div>"
+        "<div class=vl>%d</div></div>"
+        % (esc(f["ip"]), max(100.0 * f["alertas"] / tope, 1.0),
+           _CD_COLORES[i % len(_CD_COLORES)], f["alertas"])
+        for i, f in enumerate(top))
+    return "<div class=card><h3 style='margin:0 0 10px'>%s</h3><div class=bars>%s</div></div>" % (
+        esc(titulo), fil)
+
 def conducta_page(q="", msg=""):
-    """Tabla del reporte: un CPE por fila, y su detalle desplegado en la misma fila."""
+    """Informe por categoria de abuso: primero lo que hay que cortar, al final el ruido."""
     esc = html.escape
     rep_ = cargar_conducta()
-    filas = rep_.get("filas", [])
-    q = (q or "").strip()
-    if q:
-        filas = [f for f in filas if q in f["ip"]
-                 or any(q.lower() in a.lower() for a, _ in f.get("firmas", []))]
     if not rep_:
-        cuerpo = ("<div class=card><h2>Reporte de %d dias</h2>"
-                  "<p class=sub2>Todavia no se ha generado. Se arma solo cada %d horas, "
-                  "o pulsa <b>Generar ahora</b>: recorre los logs de los ultimos %d dias "
-                  "(incluidos los rotados) y puede tardar unos minutos.</p>"
+        cuerpo = ("<div class=card><h2>Informe de %d dias</h2>"
+                  "<p class=sub2>Todavia no se ha generado. Se arma solo cada %d horas; "
+                  "<b>Generar ahora</b> lo adelanta. Recorre los logs de los ultimos %d "
+                  "dias, incluidos los rotados, asi que puede tardar unos minutos.</p>"
                   "<form method=post action='/conducta/refrescar'>"
                   "<button class=b>Generar ahora</button></form></div>"
                   % (CONDUCTA_DIAS, CONDUCTA_CADA // 3600, CONDUCTA_DIAS))
         return wrap(cuerpo, refresh=False, active="/conducta")
-    edad = int(time.time() - rep_.get("generado", 0))
-    cab = ("<div class=card><h2>Reporte de %d dias &mdash; que hizo cada CPE</h2>"
-           "<p class=sub2>%d CPE sobre %s lineas de log. Ultima generacion hace %d min.</p>"
+
+    filas = rep_.get("filas", [])
+    q = (q or "").strip()
+    if q:
+        filas = [f for f in filas if q in f["ip"]
+                 or any(q.lower() in a.lower() for a, _ in (f.get("firmas") or []))]
+    for f in filas:
+        f["_cat"] = conducta_categoria(f)
+    orden = [c for c, _n, _cs, _l in CAT_CPE] + [CAT_OTROS[0]]
+    porcat = {c: [f for f in filas if f["_cat"] == c] for c in orden}
+
+    dias = rep_.get("dias", CONDUCTA_DIAS)
+    desde = time.strftime("%d/%m/%Y", time.localtime(time.time() - dias * 86400))
+    hasta = time.strftime("%d/%m/%Y", time.localtime())
+    alertas = sum(f["alertas"] for f in filas)
+    graves = sum(len(porcat[c]) for c in ("botnet", "escaneo", "fuerza"))
+    edad = int((time.time() - rep_.get("generado", 0)) // 60)
+
+    cab = ("<div class='card inf'><h2>Informe de %d dias &mdash; conducta por abonado</h2>"
+           "<p class=per>Del %s al %s &middot; generado hace %d min &middot; %s lineas de log</p>"
+           "<div class=tiles>"
+           "<div class=tile><div class=n>%d</div><div class=l>abonados con actividad</div></div>"
+           "<div class=tile><div class=n>%d</div><div class=l>alertas en el periodo</div></div>"
+           "<div class=tile><div class=n style='color:#c0392b'>%d</div>"
+           "<div class=l>para cortar (botnet, escaneo, fuerza bruta)</div></div>"
+           "</div><div class=chips>%s</div>"
+           "<p style='margin:14px 0 0'>"
            "<form method=get action='/conducta' style='display:inline'>"
            "<input name=q value='%s' placeholder='filtrar por IP o firma' "
-           "style='padding:6px 8px;border-radius:6px;border:1px solid #ccc'>"
+           "style='padding:6px 9px;border-radius:6px;border:1px solid #ccc'>"
            "<button class=b>Filtrar</button></form> "
            "<a class=b href='/conducta.csv'>Descargar CSV</a> "
            "<form method=post action='/conducta/refrescar' style='display:inline'>"
-           "<button class=b>Regenerar</button></form>%s</div>"
-           % (rep_.get("dias", CONDUCTA_DIAS), rep_.get("cpes", 0),
-              "{:,}".format(rep_.get("lineas", 0)).replace(",", "."), edad // 60,
+           "<button class=b>Regenerar</button></form></p>%s</div>"
+           % (dias, desde, hasta, edad,
+              "{:,}".format(rep_.get("lineas", 0)).replace(",", "."),
+              len(filas), alertas, graves,
+              "".join("<span class=chip style='background:%s'>%s: %d</span>"
+                      % (CONDUCTA_GUIA[c][2], esc(nombre_categoria(c)), len(porcat[c]))
+                      for c in orden if porcat[c]),
               esc(q), ("<p class=sub2>" + esc(msg) + "</p>") if msg else ""))
+
     fmt = lambda t: time.strftime("%d/%m %H:%M", time.localtime(t))
-    filas_html = []
-    for f in filas[:500]:
-        def lista(k, titulo):
-            xs = f.get(k) or []
-            if not xs:
-                return ""
-            return ("<b>%s:</b> " % titulo) + ", ".join(
-                "<span class=mono>%s</span> (%d)" % (esc(str(a)), b) for a, b in xs) + "<br>"
-        det = (lista("firmas", "Firmas") + lista("destinos", "Destinos") +
-               lista("puertos", "Puertos") + lista("dominios", "Dominios"))
-        filas_html.append(
-            "<tr><td class=mono>%s</td><td class=num>%d</td><td class=num>%d</td>"
-            "<td class=num>%d</td><td class=num>%d</td><td class=num>%d</td><td>%s</td></tr>"
-            "<tr><td colspan=7><details><summary>Ver todo lo que hizo</summary>"
-            "<div style='padding:6px 0;line-height:1.7'>%s</div></details></td></tr>"
-            % (esc(f["ip"]), f["alertas"], f["eventos"], f["dias"], f["destinos_n"],
-               f["puertos_n"], fmt(f["ultima"]), det or "&mdash;"))
-    tabla = ("<div class=card><div class=tablewrap><table><thead><tr>"
-             "<th>CPE</th><th>Alertas</th><th>Eventos</th><th>Dias</th>"
-             "<th>Destinos</th><th>Puertos</th><th>Ultima vez</th></tr></thead><tbody>"
-             + "".join(filas_html) + "</tbody></table></div>"
-             + ("<p class=sub2>Se muestran los primeros 500; el CSV los trae todos.</p>"
-                if len(filas) > 500 else "") + "</div>")
-    return wrap(cab + tabla, refresh=False, active="/conducta")
+    secciones = []
+    for c in orden:
+        grupo = porcat[c]
+        if not grupo:
+            continue
+        que, hacer, color = CONDUCTA_GUIA[c]
+        tarjetas = []
+        for f in grupo[:120]:
+            def lista(k, titulo, trad=False):
+                xs = f.get(k) or []
+                if not xs:
+                    return ""
+                return ("<b>%s:</b> " % titulo) + ", ".join(
+                    "%s <span style='color:#889'>(%d)</span>"
+                    % (esc(traducir(a) if trad else str(a)), b) for a, b in xs) + "<br>"
+            tarjetas.append(
+                "<div class=cpe style='border-left-color:%s'>"
+                "<div class=top><span class=ip>%s</span>"
+                "<span class=b>%d alertas</span><span class=b>%d dias activo</span>"
+                "<span class=b>%d destinos</span><span class=b>ultima vez %s</span></div>"
+                "<details><summary>Ver todo lo que hizo</summary>"
+                "<div class=kv>%s</div></details></div>"
+                % (color, esc(f["ip"]), f["alertas"], f["dias"], f["destinos_n"],
+                   fmt(f["ultima"]),
+                   (lista("firmas", "Firmas", trad=True) + lista("destinos", "Destinos")
+                    + lista("puertos", "Puertos") + lista("dominios", "Dominios"))
+                   or "&mdash;"))
+        secciones.append(
+            "<div class='card seccion'><h3><span class=pill style='background:%s'>%d</span>"
+            "%s</h3><p class=qes>%s</p><p class=qhacer><b>Que hacer:</b> %s</p>%s%s</div>"
+            % (color, len(grupo), esc(nombre_categoria(c)), esc(que), esc(hacer),
+               "".join(tarjetas),
+               ("<p class=sub2>Se muestran los primeros 120 de %d; el CSV los trae todos.</p>"
+                % len(grupo)) if len(grupo) > 120 else ""))
+
+    if not secciones:
+        secciones = ["<div class=card><p class=sub2>Ningun abonado coincide con el filtro.</p></div>"]
+    barras = conducta_barras(
+        sorted(filas, key=lambda f: -f["alertas"]),
+        "IPs origen (atacantes) &mdash; ultimos %d dias" % dias)
+    return wrap(_CD_CSS + cab + barras + "".join(secciones), refresh=False, active="/conducta")
 
 def historico_page(dias_n=30):
     esc = html.escape

@@ -29,7 +29,9 @@ ARBOL = ast.parse(DASH)
 
 PIEZAS = ("CONDUCTA_FILE", "CONDUCTA_DIAS", "CONDUCTA_TOPE", "CONDUCTA_MAX",
           "CONDUCTA_CADA", "_CD_TS", "_cd_abrir", "_cd_ts", "_cd_top", "_cd_podar",
-          "conducta_recolectar", "conducta_csv", "guardar_conducta", "cargar_conducta")
+          "conducta_recolectar", "conducta_csv", "guardar_conducta", "cargar_conducta",
+          "_TRAD", "traducir", "CAT_CPE", "CAT_OTROS", "nombre_categoria",
+          "CONDUCTA_GUIA", "conducta_categoria", "_CD_COLORES", "conducta_barras")
 
 fallos = 0
 
@@ -46,6 +48,7 @@ def entorno(tmp):
     mias = ("192.168.", "172.17.")
     ns = {"json": json, "os": os, "time": time, "glob": _glob, "io": io, "gzip": gzip,
           "sys": sys, "html": __import__("html"), "LOGDIR": tmp,
+          "re": __import__("re"),
           "es_mi_cpe": lambda ip: any(ip.startswith(m) for m in mias)}
     for n in ARBOL.body:
         nom = getattr(n, "name", None) or (
@@ -141,6 +144,47 @@ def main():
     ns["_cd_podar"](d, 10)
     check("al podar se queda con los mas frecuentes, no con los primeros",
           d["destinos"].get("49") == 49 and "0" not in d["destinos"], d["destinos"])
+
+    # --- clasificacion por categoria de abuso ------------------------------------
+    # El informe se agrupa por categoria, asi que una firma mal clasificada manda al
+    # abonado a la seccion equivocada: al de P2P se le corta y al infectado se le encola.
+    def cat(*firmas):
+        return ns["conducta_categoria"]({"firmas": [[f, 1] for f in firmas]})
+
+    check("una firma de botnet cae en botnet", cat("ET MALWARE Botnet CnC checkin") == "botnet",
+          cat("ET MALWARE Botnet CnC checkin"))
+    check("un escaneo SSH cae en escaneo", cat("ET SCAN Potential SSH Scan") == "escaneo",
+          cat("ET SCAN Potential SSH Scan"))
+    check("BitTorrent cae en p2p", cat("ET P2P BitTorrent DHT ping request") == "p2p",
+          cat("ET P2P BitTorrent DHT ping request"))
+    check("quien tiene botnet Y P2P va a la seccion de BOTNET",
+          cat("ET P2P BitTorrent DHT ping request", "ET MALWARE Botnet CnC checkin") == "botnet",
+          cat("ET P2P BitTorrent DHT ping request", "ET MALWARE Botnet CnC checkin"))
+    check("una firma que no encaja cae en otros",
+          cat("ET INFO Observed DNS Query to .life TLD") in ("otros", "dns"),
+          cat("ET INFO Observed DNS Query to .life TLD"))
+    check("sin firmas, tambien otros", cat() == "otros", cat())
+
+    check("toda categoria tiene su explicacion y su color en la guia",
+          all(c in ns["CONDUCTA_GUIA"] for c, _n, _cs, _l in ns["CAT_CPE"])
+          and ns["CAT_OTROS"][0] in ns["CONDUCTA_GUIA"])
+    check("lo que hay que cortar va en rojo y el consumo no",
+          ns["CONDUCTA_GUIA"]["botnet"][2] == ns["CONDUCTA_GUIA"]["escaneo"][2]
+          != ns["CONDUCTA_GUIA"]["p2p"][2])
+
+    # --- el CSV lleva la categoria ------------------------------------------------
+    csv2 = ns["conducta_csv"](r).decode("utf-8").lstrip("\ufeff").split("\n")
+    check("el CSV trae la columna Categoria justo despues de la IP",
+          csv2[0].split(";")[:2] == ["IP", "Categoria"], csv2[0])
+
+    # --- el grafico de atacantes --------------------------------------------------
+    barras = ns["conducta_barras"]([{"ip": "192.168.1.1", "alertas": 100},
+                                    {"ip": "192.168.1.2", "alertas": 25}], "T")
+    check("la barra mas alta ocupa el 100%", "width:100.0%" in barras, barras)
+    check("y el resto va en proporcion, no todas iguales",
+          "width:25.0%" in barras, barras)
+    check("un CPE sin alertas no pinta barra",
+          ns["conducta_barras"]([{"ip": "192.168.1.3", "alertas": 0}], "T") == "")
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

@@ -7544,6 +7544,7 @@ def refrescador():
     ult_pub = 0.0
     ult_diag = 0.0
     ult_forzado = 0.0   # ultima regeneracion pedida a mano/por cambios (ver REGEN_MIN_SECS)
+    ult_cond = 0.0      # ultimo reporte de conducta (varios dias)
     while True:
         global FORCE_REGEN
         if time.time() - ult_fast > 60:        # cada ~60s: enviar YA los ALTO/infeccion confirmada
@@ -7578,6 +7579,19 @@ def refrescador():
             try: vigilar_dnsbl()     # y las listas negras, que son las que de verdad banean
             except Exception as _e: sys.stderr.write("vigilancia dnsbl: %s\n" % _e)
             ult_pub = time.time()
+        # reporte de varios dias: caro (recorre los rotados), asi que espaciado y
+        # con nice; el boton de la pestana lo adelanta poniendo FORCE_CONDUCTA
+        if FORCE_CONDUCTA or (time.time() - ult_cond > CONDUCTA_CADA):
+            globals()["FORCE_CONDUCTA"] = False
+            ult_cond = time.time()
+            try:
+                os.nice(10)
+            except (OSError, AttributeError):
+                pass
+            try:
+                guardar_conducta(conducta_recolectar())
+            except Exception as _e:
+                sys.stderr.write("reporte de conducta: %s\n" % _e)
         nr = newest_report()
         # una regeneracion FORZADA se atiende como mucho cada REGEN_MIN_SECS; la marca no
         # se pierde, solo se agrupa (un lote de cambios = una sola generacion)
@@ -7635,7 +7649,8 @@ def refrescador():
 
 _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
               ("/cuarentena", "Cuarentena"), ("/reputacion", "Consultar IP"),
-              ("/historico", "Historico"), ("/exclusiones", "Exclusiones"),
+              ("/historico", "Historico"), ("/conducta", "Reporte 3 dias"),
+              ("/exclusiones", "Exclusiones"),
               ("/ajustes", "Ajustes")]   # Log y Documentacion viven dentro de Ajustes
 _NAV_CSS = """<style>
 html{scrollbar-gutter:stable}  /* reservar el hueco del scroll: paginas cortas (Exclusiones) y largas (Ajustes) no desplazan el contenido */
@@ -8948,6 +8963,10 @@ imprimir a PDF salen todas las filas.</td></tr>
 Se explica mas abajo.</td></tr>
 <tr><td><b>Historico</b></td><td>Los reportes guardados de los <b>ultimos 3 dias</b> (una instantanea
 por hora, mas el mas reciente), cada uno abrible. Los mas viejos se borran solos. Paginado.</td></tr>
+<tr><td><b>Reporte 3 dias</b></td><td><b>Todo lo que hizo cada CPE</b> en los ultimos
+3 dias: alertas, firmas, destinos, puertos, dominios consultados, dias en los que estuvo
+activo y cuando se le vio por ultima vez. Se descarga en <b>CSV</b> para mandarselo al
+cliente. Se explica mas abajo.</td></tr>
 <tr><td><b>Exclusiones</b></td><td>Gestiona las IPs/firmas que NO quieres que cuenten (tus DNS,
 tu monitoreo SNMP, un falso positivo puntual). Permite exclusiones <b>temporales</b> y por
 <b>firma (SID)</b>. Se explica mas abajo. Solo <b>administrador</b>.</td></tr>
@@ -9104,6 +9123,24 @@ en <code>/etc/suricata-dashboard-users.json</code>; nunca en texto plano. El pri
 <code>USER</code>/<code>PASS</code> de <code>/etc/suricata-dashboard.conf</code> la primera vez.</p>
 
 <h2>Abuso saliente: el numero que hay que poder enseñar</h2>
+<h3>Reporte de 3 dias: que hizo cada CPE</h3>
+<p>La ficha de evidencia de Cuarentena mira la <b>ventana viva</b> (24 h como mucho) y solo
+los CPE que <b>ya</b> cruzaron el umbral. Para justificar un corte ante un cliente, o para ver
+a quien se le repite el patron dia tras dia, hace falta lo contrario: <b>varios dias</b> y
+<b>todos</b> los CPE. Eso es esta pestana.</p>
+<p>Lee <code>eve.json</code> y <code>dns.json</code> <b>y sus rotados</b>. Es importante:
+logrotate parte los logs cada dia, asi que "3 dias" nunca esta en un solo archivo; si solo se
+mirara el log actual, el reporte diria 3 dias y en realidad seria el de hoy. Los rotados mas
+viejos que la ventana se saltan por su fecha, sin abrirlos.</p>
+<p>Solo entran <b>tus abonados</b> (los rangos de <code>MIS_REDES</code>). Una IP de internet
+no es un CPE: llenaria la tabla de servidores ajenos y no serviria para decidir a quien cortar.</p>
+<p>Recorrer 3 dias de logs cuesta, asi que <b>no se genera al abrir la pagina</b>: lo hace el
+hilo de fondo cada 6 horas con prioridad baja, y el boton <b>Regenerar</b> solo lo adelanta.
+Si se generara dentro de la peticion, el navegador cortaria por timeout en cualquier caja con
+trafico de verdad.</p>
+<p>El <b>CSV</b> usa punto y coma y lleva BOM, que es lo que abre Excel en espanol sin pedir
+nada. Las firmas que traen <code>;</code> o comillas van entrecomilladas: sin eso se corren
+las columnas y el cliente termina leyendo el dato de otro abonado.</p>
 <p>La pestana <b>Historico</b> ya no es una lista de archivos: es la <b>tendencia del abuso que sale
 de tu red</b>. Es el dato que hace que las IPs publicas acaben en listas negras, y el unico que sirve
 para demostrarle a alguien &mdash;a quien te deslista, o a tu cliente&mdash; que la limpieza
@@ -10556,6 +10593,223 @@ def _grafico(serie, esc):
             f"<text x='2' y='{PAD}' font-size='11' fill='#8a8a86'>{mx:,}</text>"
             + "".join(barras) + "".join(etiq) + "</svg>")
 
+# --- Reporte de conducta por CPE (varios dias) -------------------------------------
+# Lo que la ficha de evidencia no puede dar: la ficha mira la ventana viva (24 h como
+# mucho) y solo a los CPE que ya son candidatos. Para justificar un corte ante el
+# cliente, o para ver a quien se le repite el patron dia tras dia, hace falta mirar
+# VARIOS dias y TODOS los CPE, no solo los que hoy cruzaron el umbral.
+CONDUCTA_FILE = "/var/log/suricata-conducta.json"
+CONDUCTA_DIAS = 3          # ventana del reporte, en dias
+CONDUCTA_TOPE = 12         # cuantos destinos/firmas/dominios se guardan por CPE
+CONDUCTA_MAX = 3000        # tope de CPE en el reporte (una caja de ISP no tiene mas)
+CONDUCTA_CADA = 6 * 3600   # refresco automatico en segundo plano
+FORCE_CONDUCTA = False     # el boton "Actualizar" lo pone a True
+
+def _cd_abrir(ruta):
+    """Abre el log, comprimido o no. El panel no importa gzip/io arriba (no los usa en
+    ningun otro sitio), asi que se hacen aqui y no en la cabecera."""
+    if ruta.endswith(".gz"):
+        import gzip as _gz, io as _io
+        return _io.TextIOWrapper(_gz.open(ruta, "rb"))
+    return open(ruta, encoding="utf-8", errors="replace")
+
+_CD_TS = {}
+
+def _cd_ts(s):
+    """Marca de Suricata -> epoch, con memoria por segundo.
+
+    Son millones de lineas y todas las de un mismo segundo comparten los 19 primeros
+    caracteres: sin esta memoria, strptime se lleva mas tiempo que leer los logs."""
+    if not s or len(s) < 19:
+        return 0
+    k = s[:19]
+    t = _CD_TS.get(k)
+    if t is None:
+        try:
+            t = time.mktime(time.strptime(k, "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            t = 0
+        if len(_CD_TS) > 200000:
+            _CD_TS.clear()
+        _CD_TS[k] = t
+    return t
+
+def _cd_top(c, n=CONDUCTA_TOPE):
+    return [[k, v] for k, v in sorted(c.items(), key=lambda kv: -kv[1])[:n]]
+
+def _cd_podar(d, tope):
+    """Recorta los contadores de un CPE. Sin esto, un CPE que habla con 200.000
+    destinos en 3 dias se come la RAM del panel el mismo dia que mas falta hace."""
+    for k in ("destinos", "puertos", "firmas", "dominios"):
+        c = d[k]
+        if len(c) > tope:
+            d[k] = dict(sorted(c.items(), key=lambda kv: -kv[1])[:tope])
+
+def conducta_recolectar(dias=CONDUCTA_DIAS):
+    """Recorre eve.json/dns.json y sus rotados y resume lo que hizo cada CPE.
+
+    Se apoya en los rotados a proposito: logrotate parte los logs cada dia, asi que
+    los 3 dias no estan en un solo archivo. Los que son mas viejos que la ventana se
+    saltan por su mtime, sin abrirlos."""
+    corte = time.time() - dias * 86400
+    cpes = {}
+    leidos = 0
+    archivos = sorted(set(glob.glob(f"{LOGDIR}/eve.json*") + glob.glob(f"{LOGDIR}/dns.json*")))
+    for ruta in archivos:
+        try:
+            if os.path.getmtime(ruta) < corte:
+                continue           # rotado entero fuera de la ventana
+        except OSError:
+            continue
+        try:
+            fh = _cd_abrir(ruta)
+        except OSError:
+            continue
+        with fh:
+            for linea in fh:
+                leidos += 1
+                if leidos % 200000 == 0:
+                    for d in cpes.values():
+                        _cd_podar(d, CONDUCTA_TOPE * 4)
+                try:
+                    ev = json.loads(linea)
+                except ValueError:
+                    continue
+                ip = ev.get("src_ip") or ""
+                if not ip or not es_mi_cpe(ip):
+                    continue       # solo TUS abonados: el resto es internet
+                ts = _cd_ts(ev.get("timestamp", ""))
+                if not ts or ts < corte:
+                    continue
+                d = cpes.get(ip)
+                if d is None:
+                    if len(cpes) >= CONDUCTA_MAX:
+                        continue
+                    d = cpes[ip] = {"eventos": 0, "alertas": 0, "bytes": 0,
+                                    "destinos": {}, "puertos": {}, "firmas": {},
+                                    "dominios": {}, "dias": {},
+                                    "primera": ts, "ultima": ts}
+                d["eventos"] += 1
+                d["primera"] = min(d["primera"], ts)
+                d["ultima"] = max(d["ultima"], ts)
+                d["dias"][time.strftime("%Y-%m-%d", time.localtime(ts))] = 1
+                dst = ev.get("dest_ip")
+                if dst:
+                    d["destinos"][dst] = d["destinos"].get(dst, 0) + 1
+                dp = ev.get("dest_port")
+                if dp:
+                    d["puertos"][str(dp)] = d["puertos"].get(str(dp), 0) + 1
+                tipo = ev.get("event_type")
+                if tipo == "alert":
+                    d["alertas"] += 1
+                    fir = ((ev.get("alert") or {}).get("signature") or "")[:90]
+                    if fir:
+                        d["firmas"][fir] = d["firmas"].get(fir, 0) + 1
+                elif tipo == "dns":
+                    dom = ((ev.get("dns") or {}).get("rrname") or "")[:80]
+                    if dom:
+                        d["dominios"][dom] = d["dominios"].get(dom, 0) + 1
+                fl = ev.get("flow") or {}
+                d["bytes"] += int(fl.get("bytes_toserver") or 0)
+    filas = []
+    for ip, d in cpes.items():
+        filas.append({"ip": ip, "eventos": d["eventos"], "alertas": d["alertas"],
+                      "bytes": d["bytes"], "dias": len(d["dias"]),
+                      "primera": int(d["primera"]), "ultima": int(d["ultima"]),
+                      "destinos_n": len(d["destinos"]), "puertos_n": len(d["puertos"]),
+                      "destinos": _cd_top(d["destinos"]), "puertos": _cd_top(d["puertos"]),
+                      "firmas": _cd_top(d["firmas"]), "dominios": _cd_top(d["dominios"])})
+    filas.sort(key=lambda f: (-f["alertas"], -f["eventos"]))
+    return {"generado": int(time.time()), "dias": dias, "lineas": leidos,
+            "cpes": len(filas), "filas": filas}
+
+def guardar_conducta(rep_):
+    tmp = CONDUCTA_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rep_, f, ensure_ascii=False)
+    os.replace(tmp, CONDUCTA_FILE)
+
+def cargar_conducta():
+    try:
+        return json.load(open(CONDUCTA_FILE, encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+def conducta_csv(rep_):
+    """CSV con punto y coma: es lo que abre Excel en es-EC sin pedir nada. El BOM es
+    para que no destroce los acentos ni los dominios con caracteres raros."""
+    def q(v):
+        v = str(v)
+        return '"' + v.replace('"', '""') + '"' if any(c in v for c in ';"\n\r') else v
+    out = ["IP;Alertas;Eventos;Dias activos;Destinos distintos;Puertos distintos;"
+           "Primera vez;Ultima vez;Top firmas;Top destinos;Top puertos;Top dominios"]
+    for f in rep_.get("filas", []):
+        def junta(k):
+            return " | ".join("%s (%d)" % (a, b) for a, b in f.get(k, []))
+        out.append(";".join(q(x) for x in [
+            f["ip"], f["alertas"], f["eventos"], f["dias"], f["destinos_n"], f["puertos_n"],
+            time.strftime("%Y-%m-%d %H:%M", time.localtime(f["primera"])),
+            time.strftime("%Y-%m-%d %H:%M", time.localtime(f["ultima"])),
+            junta("firmas"), junta("destinos"), junta("puertos"), junta("dominios")]))
+    return ("\ufeff" + "\n".join(out)).encode("utf-8")
+
+def conducta_page(q="", msg=""):
+    """Tabla del reporte: un CPE por fila, y su detalle desplegado en la misma fila."""
+    esc = html.escape
+    rep_ = cargar_conducta()
+    filas = rep_.get("filas", [])
+    q = (q or "").strip()
+    if q:
+        filas = [f for f in filas if q in f["ip"]
+                 or any(q.lower() in a.lower() for a, _ in f.get("firmas", []))]
+    if not rep_:
+        cuerpo = ("<div class=card><h2>Reporte de %d dias</h2>"
+                  "<p class=sub2>Todavia no se ha generado. Se arma solo cada %d horas, "
+                  "o pulsa <b>Generar ahora</b>: recorre los logs de los ultimos %d dias "
+                  "(incluidos los rotados) y puede tardar unos minutos.</p>"
+                  "<form method=post action='/conducta/refrescar'>"
+                  "<button class=b>Generar ahora</button></form></div>"
+                  % (CONDUCTA_DIAS, CONDUCTA_CADA // 3600, CONDUCTA_DIAS))
+        return wrap(cuerpo, refresh=False, active="/conducta")
+    edad = int(time.time() - rep_.get("generado", 0))
+    cab = ("<div class=card><h2>Reporte de %d dias &mdash; que hizo cada CPE</h2>"
+           "<p class=sub2>%d CPE sobre %s lineas de log. Ultima generacion hace %d min.</p>"
+           "<form method=get action='/conducta' style='display:inline'>"
+           "<input name=q value='%s' placeholder='filtrar por IP o firma' "
+           "style='padding:6px 8px;border-radius:6px;border:1px solid #ccc'>"
+           "<button class=b>Filtrar</button></form> "
+           "<a class=b href='/conducta.csv'>Descargar CSV</a> "
+           "<form method=post action='/conducta/refrescar' style='display:inline'>"
+           "<button class=b>Regenerar</button></form>%s</div>"
+           % (rep_.get("dias", CONDUCTA_DIAS), rep_.get("cpes", 0),
+              "{:,}".format(rep_.get("lineas", 0)).replace(",", "."), edad // 60,
+              esc(q), ("<p class=sub2>" + esc(msg) + "</p>") if msg else ""))
+    fmt = lambda t: time.strftime("%d/%m %H:%M", time.localtime(t))
+    filas_html = []
+    for f in filas[:500]:
+        def lista(k, titulo):
+            xs = f.get(k) or []
+            if not xs:
+                return ""
+            return ("<b>%s:</b> " % titulo) + ", ".join(
+                "<span class=mono>%s</span> (%d)" % (esc(str(a)), b) for a, b in xs) + "<br>"
+        det = (lista("firmas", "Firmas") + lista("destinos", "Destinos") +
+               lista("puertos", "Puertos") + lista("dominios", "Dominios"))
+        filas_html.append(
+            "<tr><td class=mono>%s</td><td class=num>%d</td><td class=num>%d</td>"
+            "<td class=num>%d</td><td class=num>%d</td><td class=num>%d</td><td>%s</td></tr>"
+            "<tr><td colspan=7><details><summary>Ver todo lo que hizo</summary>"
+            "<div style='padding:6px 0;line-height:1.7'>%s</div></details></td></tr>"
+            % (esc(f["ip"]), f["alertas"], f["eventos"], f["dias"], f["destinos_n"],
+               f["puertos_n"], fmt(f["ultima"]), det or "&mdash;"))
+    tabla = ("<div class=card><div class=tablewrap><table><thead><tr>"
+             "<th>CPE</th><th>Alertas</th><th>Eventos</th><th>Dias</th>"
+             "<th>Destinos</th><th>Puertos</th><th>Ultima vez</th></tr></thead><tbody>"
+             + "".join(filas_html) + "</tbody></table></div>"
+             + ("<p class=sub2>Se muestran los primeros 500; el CSV los trae todos.</p>"
+                if len(filas) > 500 else "") + "</div>")
+    return wrap(cab + tabla, refresh=False, active="/conducta")
+
 def historico_page(dias_n=30):
     esc = html.escape
     dias = cargar_metricas()
@@ -11810,6 +12064,20 @@ class H(BaseHTTPRequestHandler):
                     f"<title>Suricata</title>{head_css}</head><body>{nav('/detalle')}"
                     f"<main>{detalle}</main></body></html>")
             return self._html(page)
+        if path == "/conducta.csv":
+            data = conducta_csv(cargar_conducta())
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             "attachment; filename=conducta-%s.csv" % time.strftime("%Y%m%d"))
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path == "/conducta":
+            _qc = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            return self._html(conducta_page(q=_qc.get("q", [""])[0],
+                                            msg=_qc.get("msg", [""])[0]))
         if path == "/historico":
             _qh = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             try:
@@ -12320,6 +12588,12 @@ class H(BaseHTTPRequestHandler):
                 return self._deny()
             actualizar_feeds_async(); bitacora("ACTUALIZAR-FEEDS", "manual")
             return self._html(perfil_page("Actualizando feeds en segundo plano; recarga en un momento para ver el estado.", ok=True))
+        if ruta == "/conducta/refrescar":
+            # No se genera dentro de la peticion: recorrer 3 dias de logs puede tardar
+            # minutos y el navegador cortaria por timeout. Lo hace el hilo de fondo.
+            globals()["FORCE_CONDUCTA"] = True
+            return self._redirect("/conducta?msg=" + _up.quote(
+                "Generando en segundo plano; recarga en un rato."))
         if ruta == "/cuarentena/enviar":
             if not self._operador():
                 return self._deny()

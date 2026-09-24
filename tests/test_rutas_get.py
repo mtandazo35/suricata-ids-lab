@@ -165,7 +165,8 @@ def main():
     # arman el resumen entero y desempaquetan tuplas, asi que con dobles tontos no se
     # pueden recorrer; se dicen aparte en vez de dejar que la prueba parezca completa.
     CRITICAS = ("/documentacion", "/historico", "/reputacion", "/cuarentena",
-                "/cuarentena/ficha", "/ajustes", "/exclusiones", "/log", "/bitacora")
+                "/cuarentena/ficha", "/ajustes", "/exclusiones", "/log", "/bitacora",
+                "/conducta")
     malas = []; mudas = []; sin_cubrir = []
     for r in rutas:
         s = Self(r)

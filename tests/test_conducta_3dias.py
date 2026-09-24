@@ -1,0 +1,150 @@
+# -*- coding: utf-8 -*-
+"""Reporte de varios dias: que hizo cada CPE.
+
+Lo que protege:
+  - que se lean los ROTADOS. logrotate parte los logs cada dia, asi que "3 dias" no
+    esta nunca en un solo archivo: si solo se mirara eve.json, el reporte de 3 dias
+    seria en realidad el de hoy, y nadie lo notaria porque la tabla sale llena igual.
+  - que un evento mas viejo que la ventana NO cuente.
+  - que solo entren TUS abonados. Si entrara internet, el reporte tendria mas filas de
+    servidores ajenos que de clientes y no serviria para decidir a quien cortar.
+  - que el CSV escape los separadores: una firma trae ';' y comillas a menudo, y sin
+    escapar corre las columnas y el cliente lee el dato de otro CPE.
+"""
+import ast
+import gzip
+import io
+import json
+import os
+import sys
+import tempfile
+import time
+
+RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = open(os.path.join(RAIZ, "install-suricata.sh"), encoding="utf-8").read()
+
+_i = SRC.index("cat > /usr/local/bin/suricata-dashboard <<'DASH'")
+DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
+ARBOL = ast.parse(DASH)
+
+PIEZAS = ("CONDUCTA_FILE", "CONDUCTA_DIAS", "CONDUCTA_TOPE", "CONDUCTA_MAX",
+          "CONDUCTA_CADA", "_CD_TS", "_cd_abrir", "_cd_ts", "_cd_top", "_cd_podar",
+          "conducta_recolectar", "conducta_csv", "guardar_conducta", "cargar_conducta")
+
+fallos = 0
+
+
+def check(d, c, e=""):
+    global fallos
+    print(("  OK   " if c else " FALLA ") + d + ("" if c else "  -> " + str(e)))
+    if not c:
+        fallos += 1
+
+
+def entorno(tmp):
+    import glob as _glob
+    mias = ("192.168.", "172.17.")
+    ns = {"json": json, "os": os, "time": time, "glob": _glob, "io": io, "gzip": gzip,
+          "sys": sys, "html": __import__("html"), "LOGDIR": tmp,
+          "es_mi_cpe": lambda ip: any(ip.startswith(m) for m in mias)}
+    for n in ARBOL.body:
+        nom = getattr(n, "name", None) or (
+            getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
+        if nom in PIEZAS:
+            exec(ast.get_source_segment(DASH, n) or "", ns)
+    ns["CONDUCTA_FILE"] = os.path.join(tmp, "conducta.json")
+    return ns
+
+
+def ev(ip, hace_dias, tipo="alert", **kw):
+    t = time.time() - hace_dias * 86400
+    d = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000000", time.localtime(t)),
+         "src_ip": ip, "event_type": tipo}
+    d.update(kw)
+    return json.dumps(d) + "\n"
+
+
+def main():
+    tmp = tempfile.mkdtemp()
+
+    # eve.json de hoy
+    hoy = [
+        ev("192.168.1.10", 0.1, dest_ip="8.8.8.8", dest_port=53,
+           alert={"signature": 'ET MALWARE "raro"; con punto y coma'}),
+        ev("192.168.1.10", 0.2, dest_ip="1.1.1.1", dest_port=443,
+           alert={"signature": "ET SCAN generico"}),
+        ev("192.168.1.10", 0.3, tipo="flow", dest_ip="1.1.1.1",
+           flow={"bytes_toserver": 5000}),
+        ev("172.17.0.9", 0.1, dest_ip="9.9.9.9", dest_port=22,
+           alert={"signature": "ET SCAN SSH"}),
+        # internet: NO es un abonado y no debe aparecer
+        ev("203.0.113.5", 0.1, dest_ip="192.168.1.10", dest_port=445,
+           alert={"signature": "ET ATTACK entrante"}),
+        # mas viejo que la ventana: fuera
+        ev("192.168.1.99", 9, dest_ip="8.8.4.4", alert={"signature": "ET VIEJO"}),
+    ]
+    with open(os.path.join(tmp, "eve.json"), "w", encoding="utf-8") as f:
+        f.writelines(hoy)
+
+    # rotado de AYER, comprimido: la parte que se olvida siempre
+    ayer = [ev("192.168.1.10", 1.5, dest_ip="5.5.5.5", dest_port=8080,
+               alert={"signature": "ET AYER"}),
+            ev("192.168.2.20", 1.2, tipo="dns", dest_ip="8.8.8.8",
+               dns={"rrname": "malo.example.com"})]
+    with gzip.open(os.path.join(tmp, "eve.json.1.gz"), "wt", encoding="utf-8") as f:
+        f.writelines(ayer)
+
+    ns = entorno(tmp)
+    r = ns["conducta_recolectar"](3)
+    por_ip = {f["ip"]: f for f in r["filas"]}
+
+    check("entran los abonados que hicieron algo",
+          set(por_ip) == {"192.168.1.10", "172.17.0.9", "192.168.2.20"}, sorted(por_ip))
+    check("una IP de internet NO es un CPE y queda fuera", "203.0.113.5" not in por_ip)
+    check("lo mas viejo que la ventana no cuenta", "192.168.1.99" not in por_ip)
+
+    a = por_ip["192.168.1.10"]
+    check("se leyo el rotado .gz de ayer, no solo el log de hoy",
+          any(d == "5.5.5.5" for d, _ in a["destinos"]), a["destinos"])
+    check("cuenta solo las alertas como alertas, no todo evento",
+          a["alertas"] == 3 and a["eventos"] == 4, (a["alertas"], a["eventos"]))
+    check("suma los bytes de los eventos de flujo", a["bytes"] == 5000, a["bytes"])
+    check("cuenta los destinos distintos", a["destinos_n"] == 3, a["destinos_n"])
+    check("y los dias en los que estuvo activo", a["dias"] == 2, a["dias"])
+
+    b = por_ip["192.168.2.20"]
+    check("las consultas DNS quedan como dominios",
+          b["dominios"] == [["malo.example.com", 1]], b["dominios"])
+
+    check("el mas ruidoso va primero", r["filas"][0]["ip"] == "192.168.1.10",
+          r["filas"][0]["ip"])
+
+    # --- CSV ---
+    csv = ns["conducta_csv"](r).decode("utf-8")
+    check("el CSV abre bien en Excel (lleva BOM)", csv.startswith("﻿"))
+    cab, *cuerpo = csv.lstrip("﻿").split("\n")
+    check("una firma con ';' va entrecomillada y no corre las columnas",
+          all(l.count(";") == cab.count(";") or '"' in l for l in cuerpo if l), cuerpo)
+    linea = [l for l in cuerpo if l.startswith("192.168.1.10")][0]
+    check("y las comillas de dentro se duplican, no se comen",
+          '""raro""' in linea, linea)
+    check("hay una fila por CPE", len([l for l in cuerpo if l]) == 3, cuerpo)
+
+    # --- guardar y cargar ---
+    ns["guardar_conducta"](r)
+    check("el reporte se guarda y se relee igual",
+          ns["cargar_conducta"]()["filas"][0]["ip"] == "192.168.1.10")
+
+    # --- la poda no puede inventar ni perder el top ---
+    d = {"destinos": {str(i): i for i in range(50)}, "puertos": {}, "firmas": {},
+         "dominios": {}}
+    ns["_cd_podar"](d, 10)
+    check("al podar se queda con los mas frecuentes, no con los primeros",
+          d["destinos"].get("49") == 49 and "0" not in d["destinos"], d["destinos"])
+
+    print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
+    return 1 if fallos else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

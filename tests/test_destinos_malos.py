@@ -12,6 +12,7 @@ Los dos errores caros y por eso se prueban primero:
     ademas algo legitimo, y el abonado se queda sin servicio sin haber hecho nada.
 """
 import ast
+import io
 import json
 import os
 import sys
@@ -25,7 +26,8 @@ DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
 ARBOL = ast.parse(DASH)
 
 PIEZAS = ("DESTINOS_FILE", "MK_SENT_DST", "DST_CONFIABLES", "cargar_destinos_malos",
-          "destino_bloqueable", "destinos_malos", "destinos_reglas")
+          "destino_bloqueable", "destinos_malos", "destinos_reglas",
+          "DST_FEED_OK", "DST_FEED_TOPE", "destinos_feed", "destinos_rsc")
 
 fallos = 0
 def check(d, c, e=""):
@@ -42,6 +44,15 @@ def entorno(tmp, enviados=(), confiables=()):
           "es_mi_cpe": lambda ip: ip.startswith("10.") or ip.startswith("190.0.2."),
           "cargar_enviados": lambda path=None: {k: 1 for k in enviados},
           "_dest_ok_set": lambda: set(confiables)}
+    ns["re"] = __import__("re")
+    ns["es_publica_declarada"] = lambda ip: "190.0.2.7" if ip.startswith("190.0.2.") else ""
+    ns["FEEDS_META"] = os.path.join(tmp, "reputation.meta")
+    ns["cargar_feeds_meta"] = lambda: {"sources": {
+        "feodo": {"categoria": "c2-activo"},
+        "spamhaus-drop": {"categoria": "infra-delictiva"},
+        "cins": {"categoria": "atacante-observado"},
+        "abuseipdb": {"categoria": "atacante-denunciado"},
+    }}
     for n in ARBOL.body:
         nom = getattr(n, "name", None) or (
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
@@ -127,6 +138,38 @@ def main():
           "src-address-list=" not in reg, reg)
     check("cubre forward y tambien raw, que es mas barato con muchas entradas",
           "/ip firewall filter" in reg and "/ip firewall raw" in reg)
+
+    # --- bloqueo PREVENTIVO desde los feeds --------------------------------------
+    # Lo de arriba es reactivo (bloquea lo que YA se contacto). Esto corta antes de que
+    # nadie llegue, que es lo que de verdad evita el ataque.
+    with io.open(os.path.join(tmp, "reputation.lst"), "w", encoding="utf-8") as fh:
+        fh.write("1.1.1.1\tfeodo\n")               # C2 activo -> entra
+        fh.write("8.8.8.0/24\tspamhaus-drop\n")    # red secuestrada -> entra (CIDR)
+        fh.write("9.9.9.9\tcins\n")                # "escaneo a alguien" -> NO entra
+        fh.write("2.2.2.2\tabuseipdb\n")           # denunciada -> NO entra
+        fh.write("190.0.2.7\tfeodo\n")             # una publica TUYA -> jamas
+        fh.write("10.6.1.10\tfeodo\n")             # una privada tuya -> jamas
+    with io.open(os.path.join(tmp, "reputation.meta"), "w", encoding="utf-8") as fh:
+        fh.write("{}")
+
+    feed = dict(ns["destinos_feed"]())
+    check("entra el C2 activo", "1.1.1.1" in feed, list(feed))
+    check("y la red secuestrada, en CIDR", "8.8.8.0/24" in feed, list(feed))
+    check("NO entra 'esta IP escaneo a alguien': puede alojar algo que un abonado visita",
+          "9.9.9.9" not in feed and "2.2.2.2" not in feed, list(feed))
+    check("NUNCA una publica tuya, aunque el feed la fiche", "190.0.2.7" not in feed, list(feed))
+    check("ni una privada tuya", "10.6.1.10" not in feed, list(feed))
+
+    # lo marcado como confiable tampoco entra al preventivo
+    ns4 = entorno(tmp, confiables=("1.1.1.1",))
+    check("un destino marcado confiable queda fuera del preventivo",
+          "1.1.1.1" not in dict(ns4["destinos_feed"]()), dict(ns4["destinos_feed"]()))
+
+    rsc = ns["destinos_rsc"]("suricata-destinos-malos")
+    check("el script solo borra lo que puso el feed, no lo que bloqueaste a mano",
+          'comment~"feed"' in rsc, rsc[:300])
+    check("y agrega con caducidad", "timeout=1d" in rsc and "add list=suricata-destinos-malos" in rsc)
+    check("los CIDR van tal cual", "address=8.8.8.0/24" in rsc, rsc)
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

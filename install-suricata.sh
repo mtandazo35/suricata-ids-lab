@@ -4732,6 +4732,65 @@ def destinos_malos(solo_confiables=True):
     out.sort(key=lambda x: (x["enviado"], -x["alertas"]))
     return out
 
+# --- Bloqueo PREVENTIVO: los feeds enteros, antes de que nadie los visite -----------
+# Lo de arriba es reactivo: bloquea destinos que un CPE YA contacto. Esto es lo contrario
+# y es mejor: se corta la salida hacia infraestructura fichada ANTES de que nadie llegue,
+# asi el equipo infectado ni siquiera consigue instrucciones.
+#
+# Solo entran los feeds en los que se puede confiar para cortar POR DESTINO. La
+# diferencia importa: "esta IP alguna vez escaneo a alguien" (CINS, AbuseIPDB) describe a
+# un atacante, pero esa misma IP puede alojar una web que un abonado visita. Un servidor
+# de control de botnet o una red secuestrada, no.
+DST_FEED_OK = ("c2-activo", "infra-delictiva")
+DST_FEED_TOPE = 50000
+
+def destinos_feed(tope=DST_FEED_TOPE):
+    """Indicadores de los feeds de alta confianza, listos para una lista de DESTINO.
+
+    Devuelve [(indicador, fuente)]. Incluye CIDRs: una address-list de MikroTik los
+    acepta igual, y Spamhaus DROP son casi todo redes."""
+    try:
+        cats = {k: (v or {}).get("categoria", "")
+                for k, v in (cargar_feeds_meta().get("sources") or {}).items()}
+    except Exception:
+        return []
+    buenas = {k for k, c in cats.items() if c in DST_FEED_OK}
+    if not buenas:
+        return []
+    dest_ok = _dest_ok_set()
+    out = []
+    f = os.path.join(os.path.dirname(FEEDS_META), "reputation.lst")
+    try:
+        with open(f, encoding="utf-8") as fh:
+            for linea in fh:
+                if len(out) >= tope:
+                    break
+                ind, _tab, fuente = linea.strip().partition("\t")
+                if not ind or fuente not in buenas or ind in dest_ok:
+                    continue
+                # nunca lo propio: ni tus redes ni tus publicas declaradas
+                base = ind.split("/", 1)[0]
+                if es_mi_cpe(base) or es_publica_declarada(base):
+                    continue
+                out.append((ind, fuente))
+    except OSError:
+        return []
+    return out
+
+def destinos_rsc(lista="suricata-destinos-malos", ttl="1d"):
+    """El script que el router se baja e importa para el bloqueo preventivo."""
+    filas = destinos_feed()
+    out = ["# Destinos de alta confianza (C2 activo e infraestructura delictiva).",
+           "# Generado %s - %d entradas." % (time.strftime("%Y-%m-%d %H:%M"), len(filas)),
+           "# Se reemplaza SOLO lo que puso el feed; lo que bloqueaste a mano no se toca.",
+           "/ip firewall address-list",
+           ':local viejas [find list=%s comment~"feed"]' % lista,
+           ":foreach i in=$viejas do={remove $i}"]
+    for ind, fuente in filas:
+        out.append('add list=%s address=%s timeout=%s comment="feed %s"'
+                   % (lista, ind, ttl, re.sub(r"[^A-Za-z0-9-]", "", fuente)[:20]))
+    return "\n".join(out) + "\n"
+
 def destinos_reglas(lista="suricata-destinos-malos"):
     return "\n".join([
         "# Cortar la salida hacia infraestructura fichada. Es dst-address-list, no src:",
@@ -9067,6 +9126,20 @@ abonados a la vez, sin tener que identificar a ninguno.</p>
 <b>estan saliendo de verdad</b> (no el feed entero), con de que lista vienen, cuantos CPEs los
 contactan y un boton para bloquearlos en <b>todos</b> los nodos a la vez. La regla es de
 <code>dst-address-list</code>, no de origen: no se bloquea a nadie, se bloquea <b>a donde va</b>.</p>
+<h3>Preventivo: cortar ANTES de que nadie llegue</h3>
+<p>Lo anterior es <b>reactivo</b>: bloquea destinos que un CPE <b>ya</b> contacto. Mejor es lo
+contrario, y tambien esta: el router se baja cada hora la lista de <b>infraestructura fichada</b> y
+corta la salida hacia ella <b>antes</b> de que ningun abonado llegue. Asi el equipo infectado ni
+siquiera consigue instrucciones, y no hace falta detectarlo primero.</p>
+<p>Al <b>preventivo</b> solo entran los feeds en los que se puede confiar para cortar <b>por
+destino</b>: <b>C2 activo</b> (Feodo) e <b>infraestructura delictiva</b> (Spamhaus DROP), que son
+unos pocos miles de entradas y caben de sobra en cualquier router. <b>No</b> entran las listas de
+"esta IP escaneo a alguien" (CINS, AbuseIPDB): describen a un atacante, pero <b>esa misma IP puede
+alojar una web que un abonado visita</b>, y cortarla por destino lo deja sin servicio.</p>
+<p>La importacion <b>solo borra lo que puso el feed</b> (por el comentario), asi que lo que hayas
+bloqueado a mano desde el panel no se toca. Y nunca entra nada tuyo: ni tus redes privadas ni tus
+publicas declaradas, aunque un feed las fiche.</p>
+
 <h3>Los dos frenos, que son lo importante</h3>
 <ul>
 <li><b>Solo IPs publicas.</b> Una privada aqui seria de tu propia red, y bloquearla como destino
@@ -10978,6 +11051,17 @@ def cuarentena_page(msg="", es_admin=False):
                     f"<td data-label='Accion'>{marca}{acc}</td></tr>")
         _filas_dst = "".join(_fila_dst(x) for x in (_pend + _ya))
         _reglas_dst = destinos_reglas(m.get("LIST_DST", "suricata-destinos-malos"))
+        _n_feed = len(destinos_feed())
+        if _n_feed:
+            # que el router se baje la lista solo: son miles de entradas y meterlas
+            # una a una por la API tardaria horas
+            _reglas_dst += (
+                "\n\n# --- bloqueo PREVENTIVO: que el router se baje los feeds solo ---\n"
+                "/system scheduler\n"
+                'add name=suricata-destinos interval=1h on-event="/tool fetch '
+                'url=\\\\"http://IP_DEL_SENSOR:PUERTO/destinos.rsc\\\\" '
+                'dst-path=destinos.rsc; :delay 5s; /import destinos.rsc" '
+                'comment="Suricata: destinos de mala reputacion"')
         sec_dst = (
             "<div class=seccion><div class=shead><div>"
             "<h2>Destinos de mala reputacion</h2>"
@@ -10990,7 +11074,15 @@ def cuarentena_page(msg="", es_admin=False):
             "<div class=card><table><thead><tr><th>Destino</th><th>Por que</th>"
             "<th class=num>CPEs</th><th class=num>Alertas</th><th>Accion</th>"
             f"</tr></thead><tbody>{_filas_dst}</tbody></table></div>"
-            "<details style='margin-top:8px'><summary style='cursor:pointer;font-size:13px;"
+            + ("<div style='background:#eef4fd;border:1px solid #cfe0f6;border-radius:8px;"
+               "padding:10px 12px;margin-top:10px;font-size:13px'>"
+               f"<b>Bloqueo preventivo: {_n_feed:,} destinos</b> de los feeds de alta confianza "
+               "(C2 activo e infraestructura delictiva). Es <b>mejor que lo de arriba</b>: corta "
+               "la salida <b>antes</b> de que ningun abonado llegue, asi el equipo infectado ni "
+               "siquiera consigue instrucciones. No entran los feeds de \"esta IP escaneo a "
+               "alguien\": esa misma IP puede alojar una web que un abonado visita."
+               "</div>" if _n_feed else "")
+            + "<details style='margin-top:8px'><summary style='cursor:pointer;font-size:13px;"
             "font-weight:600'>Regla que hace falta en el MikroTik</summary>"
             "<p class=hint style='margin:6px 0'>Sin una regla que use esa address-list, el "
             "panel dice 'bloqueado' y no se bloquea nada.</p>"
@@ -11455,6 +11547,20 @@ class H(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers(); self.wfile.write(data); return
             self.send_error(404); return
+        if path == "/destinos.rsc":
+            # bloqueo PREVENTIVO de destinos. Se la baja el propio MikroTik, asi que no
+            # puede pedir sesion: se abre solo a las IPs de los routers dados de alta.
+            quien = self._client_ip()
+            permitidas = {(r.get("HOST") or "").strip()
+                          for r in cargar_routers() if (r.get("HOST") or "").strip()}
+            if quien not in permitidas:
+                return self._html("<h1>No autorizado</h1>", 403)
+            cuerpo = destinos_rsc().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(cuerpo)))
+            self.end_headers(); self.wfile.write(cuerpo)
+            return
         if path == "/blocklist.rsc":
             # La descarga el propio MikroTik con /tool fetch, asi que no puede pedir
             # sesion. Se abre SOLO a las IPs de los routers dados de alta: nada de meter

@@ -5479,29 +5479,55 @@ def listas_cpe_reglas():
     def L(c):
         return lista_de_categoria(c)
     return "\n".join([
+        "# ORDEN: estas reglas de drop van ANTES de la regla de fasttrack-connection y",
+        "# antes de los accept. Con fasttrack activo una conexion ya establecida deja de",
+        "# pasar por filter, asi que el drop parece no aplicarse aunque este bien escrito.",
         "/ip firewall filter",
         "# Lo que hay que cortar: el equipo esta comprometido y ataca a terceros.",
         'add chain=forward src-address-list=%s action=drop comment="Suricata: botnet"' % L("botnet"),
         'add chain=forward src-address-list=%s action=drop comment="Suricata: escaneo"' % L("escaneo"),
         'add chain=forward src-address-list=%s action=drop comment="Suricata: fuerza bruta"' % L("fuerza"),
         "",
+        "# Meter un CPE en la address-list NO corta lo que ya tiene abierto: la regla solo",
+        "# mira los paquetes que pasan por ella. Hay que soltar las conexiones vivas:",
+        '#   /ip firewall connection remove [find src-address~"^192.0.2.25:"]',
+        "",
         "# Spam: basta con cerrarle el correo saliente, no hace falta dejarlo sin internet.",
         'add chain=forward src-address-list=%s protocol=tcp dst-port=25,465,587 '
         'action=drop comment="Suricata: spam"' % L("spam"),
         "",
         "# DNS de malware: en vez de cortar, se le fuerza a TU resolutor, que ya filtra.",
+        "# OJO: redirect manda al resolutor DEL PROPIO ROUTER. Si el router no resuelve, el",
+        "# cliente se queda sin DNS y parece que le cortaste internet. O lo habilitas con",
+        "#   /ip dns set allow-remote-requests=yes",
+        "# o mandas el trafico a tu resolutor cambiando la accion de la regla de abajo por",
+        "#   action=dst-nat to-addresses=192.0.2.53 to-ports=53",
         "/ip firewall nat",
         'add chain=dstnat src-address-list=%s protocol=udp dst-port=53 '
         'action=redirect to-ports=53 comment="Suricata: DNS de malware al resolutor propio"' % L("dns"),
         "",
         "# P2P y minado: no son un ataque, son consumo. Encolar rinde mas que cortar.",
-        "# (ejemplo; ajusta el limite a tu plan)",
-        "/queue simple",
-        'add name=suricata-p2p target=\"\" max-limit=2M/2M comment="Suricata: P2P acotado"',
-        "# y marcar su trafico para esa cola:",
+        "# La cadena completa es: marca de CONEXION -> marca de PAQUETE -> cola de arbol",
+        "# que consume esa marca. Faltando cualquiera de los tres pasos no se limita nada",
+        "# y ademas no da error: una simple queue con target=\"\" no engancha trafico, y",
+        "# una marca de paquete que ninguna cola consume no la usa nadie.",
+        "# Cada categoria lleva SU marca y SU cola: si comparten cola, el minado se come",
+        "# el limite del P2P y no hay forma de saber cual de los dos esta consumiendo.",
+        "# (ejemplo; ajusta los limites a tu plan)",
         "/ip firewall mangle",
-        'add chain=forward src-address-list=%s action=mark-packet new-packet-mark=p2p '
-        'passthrough=no comment="Suricata: P2P"' % L("p2p"),
+        'add chain=forward src-address-list=%s action=mark-connection '
+        'new-connection-mark=p2p-con passthrough=yes comment="Suricata: P2P"' % L("p2p"),
+        'add chain=forward connection-mark=p2p-con action=mark-packet '
+        'new-packet-mark=p2p passthrough=no comment="Suricata: P2P"',
+        'add chain=forward src-address-list=%s action=mark-connection '
+        'new-connection-mark=minado-con passthrough=yes comment="Suricata: minado"' % L("minado"),
+        'add chain=forward connection-mark=minado-con action=mark-packet '
+        'new-packet-mark=minado passthrough=no comment="Suricata: minado"',
+        "/queue tree",
+        'add name=p2p-limite parent=global packet-mark=p2p max-limit=2M '
+        'comment="Suricata: P2P acotado"',
+        'add name=minado-limite parent=global packet-mark=minado max-limit=1M '
+        'comment="Suricata: minado acotado"',
     ])
 
 def _motivo_bloqueo(clave):
@@ -9194,13 +9220,36 @@ comprometido y ataca a terceros.</td></tr>
 hace falta dejarlo sin internet.</td></tr>
 <tr><td>DNS de malware</td><td><code>clientes-dns-malware</code></td><td><b>Redirigir</b> su DNS a tu
 resolutor, que ya filtra. Ni se entera.</td></tr>
-<tr><td>Criptominado</td><td><code>clientes-minado</code></td><td>Consumo, no ataque.</td></tr>
-<tr><td>P2P</td><td><code>clientes-p2p</code></td><td><b>Encolar</b>, no cortar: es consumo.</td></tr>
+<tr><td>Criptominado</td><td><code>clientes-minado</code></td><td><b>Encolar</b>, no cortar: es
+consumo. Con <b>su propia marca y su propia cola</b> (<code>minado-con</code> /
+<code>minado</code>), separadas de las del P2P.</td></tr>
+<tr><td>P2P</td><td><code>clientes-p2p</code></td><td><b>Encolar</b>, no cortar: es consumo. Marca
+<code>p2p-con</code> / <code>p2p</code> y su cola.</td></tr>
 <tr><td>Otros</td><td><code>clientes-otros</code></td><td>Lo que no encaja en nada de lo anterior.</td></tr>
 </table>
 <p>La clasificacion va de <b>lo mas grave a lo mas leve</b> y manda la primera que casa: quien tiene
 una botnet <b>y ademas</b> usa BitTorrent es, a efectos de que hacer con el, un CPE con botnet
 &mdash; aunque el P2P tenga diez veces mas alertas.</p>
+<p><b>Encolar no es poner una cola.</b> Lo que de verdad limita son <b>tres</b> piezas
+encadenadas: <code>mark-connection</code> &rarr; <code>mark-packet</code> &rarr; una
+<code>/queue tree</code> que consuma esa marca. Faltando cualquiera de las tres <b>no se limita
+nada y no da error</b>: una <code>/queue simple</code> con <code>target=""</code> no engancha
+trafico, y una marca de paquete que ninguna cola consume no la usa nadie. P2P y criptominado
+llevan <b>marcas y colas distintas</b>, para poder darles limites distintos y saber cual consume.
+Las reglas listas para copiar estan en <b>MikroTik &rarr; Reglas</b>.</p>
+<p>Tres cosas que hacen que las reglas <b>parezcan</b> no funcionar:</p>
+<ul>
+<li><b>El orden frente a <code>fasttrack-connection</code>.</b> Los <code>drop</code> tienen que ir
+<b>antes</b> de la regla de fasttrack y de los <code>accept</code>: con fasttrack activo una
+conexion ya establecida deja de pasar por <code>filter</code> y el bloqueo no se aplica.</li>
+<li><b>Meter el CPE en la lista no corta lo que ya esta abierto.</b> La regla solo mira los paquetes
+que pasan por ella; las conexiones vivas hay que soltarlas a mano con
+<code>/ip firewall connection remove [find src-address~"^192.0.2.25:"]</code>.</li>
+<li><b><code>action=redirect to-ports=53</code> apunta al resolutor del propio router.</b> Si el
+router no resuelve, el cliente se queda <b>sin DNS</b> y parece que le cortaste internet. O
+habilitas <code>/ip dns set allow-remote-requests=yes</code>, o usas
+<code>action=dst-nat to-addresses=&lt;tu resolutor&gt; to-ports=53</code>.</li>
+</ul>
 <p>Los nombres se pueden cambiar en <code>/etc/suricata-mikrotik.conf</code> con
 <code>LISTA_BOTNET=</code>, <code>LISTA_P2P=</code> y demas, por si ya tienes tu propia
 nomenclatura. Y al enviar se <b>guarda en que lista quedo</b>: si manana cambia su categoria o

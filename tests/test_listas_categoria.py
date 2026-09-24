@@ -45,6 +45,24 @@ def entorno(tmp, globales=None):
     return ns
 
 
+def secciones(texto):
+    """Agrupa las lineas generadas por la ruta de MikroTik en la que caen.
+
+    Hace falta porque un mismo 'add' significa cosas distintas segun donde este: una
+    marca de paquete bajo /ip firewall mangle es una marca, y bajo /queue tree es quien
+    la consume. Comprobar el texto entero de corrido no distingue una cosa de la otra."""
+    sec = {}
+    actual = ""
+    for ln in texto.split("\n"):
+        ln = ln.strip()
+        if ln.startswith("/"):
+            actual = ln
+            sec.setdefault(actual, [])
+        elif ln and not ln.startswith("#") and actual:
+            sec[actual].append(ln)
+    return sec
+
+
 REPORTE = {"candidatos": [], "dns_candidatos": [], "top_riesgo": [
     {"ip": "10.0.0.1", "router": "", "cats_top": {"Botnet CnC": 90, "BitTorrent / P2P": 900}},
     {"ip": "10.0.0.2", "router": "", "cats_top": {"BitTorrent / P2P": 5000}},
@@ -106,8 +124,78 @@ def main():
           "clientes-dns-malware" in reg and "action=redirect" in reg
           and "src-address-list=clientes-dns-malware action=drop" not in reg, "")
     check("el P2P se encola, no se corta",
-          "clientes-p2p" in reg and "queue" in reg
+          "clientes-p2p" in reg
           and "src-address-list=clientes-p2p action=drop" not in reg, "")
+
+    # --- encolar de verdad: marca de conexion -> marca de paquete -> cola que la consume ---
+    # Que aparezca la palabra "queue" no limita nada. Una /queue simple con target=""
+    # no engancha trafico y una marca de paquete que ninguna cola consume no la usa
+    # nadie: el operador copia las reglas, el router las acepta sin chistar y se queda
+    # creyendo que acoto el P2P. Aqui se comprueba la cadena ENTERA.
+    sec = secciones(reg)
+    mangle = sec.get("/ip firewall mangle", [])
+    arbol = sec.get("/queue tree", [])
+
+    def cadena(lista, con, pkt):
+        """Los tres eslabones, cada uno en la seccion que le toca."""
+        m_con = [r for r in mangle if "src-address-list=" + lista in r
+                 and "action=mark-connection" in r and "new-connection-mark=" + con in r]
+        m_pkt = [r for r in mangle if "connection-mark=" + con in r
+                 and "action=mark-packet" in r and "new-packet-mark=" + pkt in r]
+        cola = [r for r in arbol if "packet-mark=" + pkt in r and "max-limit=" in r]
+        return m_con, m_pkt, cola
+
+    for cat, lista, con, pkt in (("P2P", "clientes-p2p", "p2p-con", "p2p"),
+                                 ("minado", "clientes-minado", "minado-con", "minado")):
+        m_con, m_pkt, cola = cadena(lista, con, pkt)
+        check("%s: la lista marca la CONEXION (%s)" % (cat, con), len(m_con) == 1, m_con)
+        check("%s: esa conexion marca el PAQUETE (%s)" % (cat, pkt), len(m_pkt) == 1, m_pkt)
+        check("%s: y una /queue tree consume esa marca con un limite" % cat,
+              len(cola) == 1, cola)
+
+    # el eslabon que faltaba: sin cola que consuma la marca, el limite no existe
+    marcas_en_colas = set()
+    for r in arbol:
+        for t in r.split():
+            if t.startswith("packet-mark="):
+                marcas_en_colas.add(t.split("=", 1)[1])
+    marcas_puestas = set()
+    for r in mangle:
+        for t in r.split():
+            if t.startswith("new-packet-mark="):
+                marcas_puestas.add(t.split("=", 1)[1])
+    check("ninguna marca de paquete se queda sin cola que la consuma",
+          marcas_puestas and marcas_puestas <= marcas_en_colas,
+          sorted(marcas_puestas - marcas_en_colas))
+
+    # minado no es P2P: comparten cola y el uno se come el limite del otro
+    check("minado tiene su propia marca, no reutiliza la del P2P",
+          "new-connection-mark=minado-con" in reg and "new-packet-mark=minado" in reg
+          and not [r for r in mangle if "clientes-minado" in r and "p2p" in r], "")
+    colas_p2p = [r for r in arbol if "packet-mark=p2p" in r]
+    colas_min = [r for r in arbol if "packet-mark=minado" in r]
+    check("y su propia cola, distinta de la del P2P",
+          len(colas_p2p) == 1 and len(colas_min) == 1 and colas_p2p[0] != colas_min[0],
+          (colas_p2p, colas_min))
+    check("el minado no queda sin reglas propias aunque tenga lista",
+          "clientes-minado" in reg, "")
+
+    # lo que habia antes y no limitaba nada
+    reglas = [r for v in sec.values() for r in v]   # solo ordenes, sin comentarios
+    vacias = [r for r in reglas if 'target=""' in r]
+    check("nada de /queue simple con target vacio, que no engancha trafico",
+          not sec.get("/queue simple") and not vacias, (sec.get("/queue simple"), vacias))
+    check("ni marcar el paquete directo desde la address-list, sin marca de conexion",
+          not [r for r in mangle if "src-address-list=" in r and "action=mark-packet" in r], "")
+
+    # --- los tres avisos operativos, sin los cuales las reglas parecen no funcionar ---
+    coms = "\n".join(l for l in reg.split("\n") if l.strip().startswith("#")).lower()
+    check("avisa que los drop van antes de fasttrack-connection",
+          "fasttrack" in coms and "antes" in coms, "")
+    check("avisa que la lista no corta las conexiones ya abiertas",
+          "firewall connection remove" in coms, "")
+    check("avisa que redirect usa el resolutor del propio router",
+          "allow-remote-requests" in coms and "dst-nat" in coms, "")
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

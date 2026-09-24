@@ -31,7 +31,8 @@ PIEZAS = ("CONDUCTA_FILE", "CONDUCTA_DIAS", "CONDUCTA_TOPE", "CONDUCTA_MAX",
           "CONDUCTA_CADA", "_CD_TS", "_cd_abrir", "_cd_ts", "_cd_top", "_cd_podar",
           "conducta_recolectar", "conducta_csv", "guardar_conducta", "cargar_conducta",
           "_TRAD", "traducir", "CAT_CPE", "CAT_OTROS", "nombre_categoria",
-          "CONDUCTA_GUIA", "conducta_categoria", "_CD_COLORES", "conducta_barras")
+          "CONDUCTA_GUIA", "conducta_categoria", "_CD_COLORES", "conducta_barras",
+          "PUERTO_NOMBRE", "nombre_puerto", "_cd_agrupa", "_cd_minibarras")
 
 fallos = 0
 
@@ -185,6 +186,42 @@ def main():
           "width:25.0%" in barras, barras)
     check("un CPE sin alertas no pinta barra",
           ns["conducta_barras"]([{"ip": "192.168.1.3", "alertas": 0}], "T") == "")
+
+    # --- que la ficha se entienda sin ser de redes --------------------------------
+    # El caso real que lo motivo: la ficha mostraba "DNS sospechoso" seis veces con
+    # numeros distintos. Son firmas crudas distintas que significan lo mismo, y el
+    # abonado leia seis problemas donde hay uno.
+    crudas = [["ET MALWARE Known Malicious Domain A", 797],
+              ["ET MALWARE Known Malicious Domain B", 34],
+              ["ET MALWARE Known Malicious Domain C", 23],
+              ["ET SCAN Potential SSH Scan", 39]]
+    ag = ns["_cd_agrupa"](crudas, ns["traducir"])
+    etiquetas = [k for k, _v in ag]
+    check("lo que significa lo mismo se suma en una sola linea",
+          len(etiquetas) == len(set(etiquetas)), etiquetas)
+    check("y el total es la suma, no el mayor",
+          dict(ag).get(ns["traducir"]("ET MALWARE Known Malicious Domain A")) == 854,
+          ag)
+    check("ordenado de mas a menos", [v for _k, v in ag] == sorted(
+          [v for _k, v in ag], reverse=True), ag)
+
+    check("un puerto conocido se dice en castellano",
+          "navegacion" in ns["nombre_puerto"]("443"), ns["nombre_puerto"]("443"))
+    check("y sigue mostrando el numero, para el ISP",
+          "443" in ns["nombre_puerto"]("443"))
+    _desc = lambda p_: ns["nombre_puerto"](p_).split(" (")[0]
+    check("el correo saliente se llama igual en sus tres puertos",
+          _desc("25") == _desc("465") == _desc("587") == "envio de correo",
+          [_desc(x) for x in ("25", "465", "587")])
+    check("un puerto raro no inventa un nombre",
+          ns["nombre_puerto"]("47231") == "puerto 47231", ns["nombre_puerto"]("47231"))
+
+    mb = ns["_cd_minibarras"]([["navegacion segura (443)", 9690], ["consultas de DNS (53)", 2329]],
+                              "#c0392b")
+    check("la barra mayor ocupa el 100%", "width:100.0%" in mb, mb[:200])
+    check("los miles se separan para poder leerlos", "9.690" in mb, mb[:300])
+    check("sin datos no se pinta una caja vacia sin explicar",
+          "Nada que destacar" in ns["_cd_minibarras"]([], "#000"))
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

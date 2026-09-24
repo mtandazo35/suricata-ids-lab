@@ -10793,46 +10793,154 @@ def conducta_categoria(f):
     return CAT_OTROS[0]
 
 _CD_CSS = """<style>
-.inf h2{margin:0 0 2px}
-.inf .per{color:#667;font-size:13px;margin:0 0 14px}
-.tiles{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 6px}
-.tile{flex:1 1 150px;background:#fff;border:1px solid #e3e7ec;border-radius:10px;padding:10px 12px}
-.tile .n{font-size:24px;font-weight:700;line-height:1.1}
-.tile .l{color:#667;font-size:12px}
-.chips{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 0}
-.chip{border-radius:999px;padding:4px 11px;color:#fff;font-size:12px;font-weight:600}
-.seccion{margin:22px 0 0}
-.seccion h3{display:flex;align-items:center;gap:9px;margin:0 0 3px;font-size:17px}
-.seccion h3 .pill{border-radius:6px;padding:2px 9px;color:#fff;font-size:12px}
-.seccion .qes{color:#445;margin:0 0 2px}
-.seccion .qhacer{color:#667;font-size:13px;margin:0 0 10px}
-.cpe{background:#fff;border:1px solid #e3e7ec;border-left-width:4px;border-radius:9px;
-     padding:10px 13px;margin:0 0 8px}
-.cpe .top{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px}
-.cpe .ip{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:16px;font-weight:600}
-.cpe .b{background:#f1f4f8;border-radius:6px;padding:2px 8px;font-size:12px;color:#445}
-.cpe details{margin-top:8px}
-.cpe summary{cursor:pointer;color:#2471a3;font-size:13px}
-.cpe .kv{margin:8px 0 0;line-height:1.75;font-size:13px}
-.cpe .kv b{color:#334}
-.bars{margin:6px 0 0}
-.bars .row{display:flex;align-items:center;gap:9px;margin:0 0 7px}
-.bars .lb{flex:0 0 132px;text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace;
-          font-size:13px;color:#445;overflow:hidden;text-overflow:ellipsis}
-.bars .tr{flex:1 1 auto;background:#eef1f5;border-radius:4px;height:22px}
-.bars .fi{height:22px;border-radius:4px;min-width:2px}
-.bars .vl{flex:0 0 auto;font-size:13px;color:#445;font-variant-numeric:tabular-nums}
+/* Informe de conducta. Lo lee el abonado, no un ingeniero: prioridad a la jerarquia
+   visual (que se vea primero lo grave) y a que cada dato tenga su etiqueta en
+   castellano. Los colores son gravedad, no marca. */
+.inf{--rojo:#c0392b;--ambar:#d68910;--azul:#2471a3;--linea:#e3e7ec;--tinta:#1f2933;
+     --suave:#667485;--fondo:#fff}
+.inf h2{margin:0 0 4px;font-size:22px;letter-spacing:-.01em;color:var(--tinta)}
+.inf .per{color:var(--suave);font-size:13px;margin:0 0 16px}
+
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:0}
+.tile{background:var(--fondo);border:1px solid var(--linea);border-radius:12px;
+      padding:14px 16px;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.tile .n{font-size:30px;font-weight:700;line-height:1.05;letter-spacing:-.02em;
+         font-variant-numeric:tabular-nums;color:var(--tinta)}
+.tile .l{color:var(--suave);font-size:12px;margin-top:3px;line-height:1.35}
+
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+.chip{border-radius:999px;padding:5px 13px;color:#fff;font-size:12px;font-weight:600;
+      letter-spacing:.01em;box-shadow:0 1px 2px rgba(16,24,40,.12)}
+
+.acciones{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:18px 0 0}
+.acciones input{padding:7px 11px;border-radius:8px;border:1px solid #ccd3dc;
+                font-size:13px;min-width:210px}
+.acciones input:focus{outline:2px solid #9ec2e6;outline-offset:1px;border-color:#9ec2e6}
+
+.seccion{margin:20px 0 0;position:relative;overflow:hidden}
+.seccion::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;
+                 background:var(--acento,#8a9199)}
+.seccion h3{display:flex;align-items:center;gap:10px;margin:0 0 4px;font-size:18px;
+            letter-spacing:-.01em;color:var(--tinta)}
+.seccion h3 .pill{border-radius:7px;padding:2px 10px;color:#fff;font-size:13px;
+                  font-weight:700;font-variant-numeric:tabular-nums}
+.seccion .qes{color:#3c4757;margin:0 0 3px;font-size:14px;line-height:1.5}
+.seccion .qhacer{color:var(--suave);font-size:13px;margin:0 0 14px;line-height:1.5}
+
+.cpe{background:var(--fondo);border:1px solid var(--linea);border-left:4px solid;
+     border-radius:11px;padding:13px 16px;margin:0 0 10px;
+     transition:box-shadow .15s ease,transform .15s ease}
+.cpe:hover{box-shadow:0 4px 14px rgba(16,24,40,.09);transform:translateY(-1px)}
+.cpe .top{display:flex;flex-wrap:wrap;align-items:center;gap:9px}
+.cpe .ip{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:17px;font-weight:700;
+         letter-spacing:-.02em;color:var(--tinta)}
+.cpe .b{background:#f2f5f9;border:1px solid #e7ecf2;border-radius:7px;padding:3px 9px;
+        font-size:12px;color:#4a5665;font-variant-numeric:tabular-nums;white-space:nowrap}
+.cpe .resumen{margin:10px 0 0;font-size:14.5px;color:#2b3542;line-height:1.6}
+.cpe details{margin-top:10px}
+.cpe summary{cursor:pointer;color:var(--azul);font-size:13px;font-weight:600;
+             padding:4px 0;list-style:none;user-select:none}
+.cpe summary::-webkit-details-marker{display:none}
+.cpe summary::before{content:"\25b8 ";display:inline-block;transition:transform .15s ease}
+.cpe details[open]>summary::before{transform:rotate(90deg)}
+.cpe h4{margin:14px 0 4px;font-size:11.5px;color:#7a869a;text-transform:uppercase;
+        letter-spacing:.07em;font-weight:700}
+.cpe .vacio{color:#95a0ad;font-size:13px;margin:2px 0 10px}
+
+.bars,.mini{margin:6px 0 0}
+.bars .row,.mini .row{display:flex;align-items:center;gap:10px;margin:0 0 6px}
+.bars .lb{flex:0 0 140px}
+.mini .lb{flex:0 0 250px}
+.bars .lb,.mini .lb{text-align:right;font-size:13px;color:#3c4757;overflow:hidden;
+                    text-overflow:ellipsis;white-space:nowrap}
+.bars .lb{font-family:ui-monospace,Menlo,Consolas,monospace}
+.bars .tr,.mini .tr{flex:1 1 auto;background:#eef1f5;border-radius:5px;overflow:hidden}
+.bars .tr{height:24px}
+.mini .tr{height:17px}
+.bars .fi,.mini .fi{height:100%;border-radius:5px;min-width:3px;
+                    animation:cdcrece .45s cubic-bezier(.22,1,.36,1)}
+@keyframes cdcrece{from{width:0}}
+.bars .vl{flex:0 0 auto;font-size:13px;font-weight:600}
+.mini .vl{flex:0 0 62px;font-size:12px}
+.bars .vl,.mini .vl{color:#4a5665;font-variant-numeric:tabular-nums}
+
+.tecnico{margin-top:10px;border-top:1px dashed var(--linea);padding-top:8px}
+.tecnico summary{color:#95a0ad;font-size:12px;font-weight:500}
+.tecnico .kv{font-size:12px;color:#7a869a;line-height:1.75;word-break:break-all;
+             font-family:ui-monospace,Menlo,Consolas,monospace;margin-top:4px}
+
+@media(max-width:700px){
+  .inf h2{font-size:19px}
+  .mini .lb,.bars .lb{flex-basis:120px;font-size:12px}
+  .cpe{padding:11px 12px}
+  .cpe .top{gap:6px}
+}
 @media(prefers-color-scheme:dark){
-  .tile,.cpe{background:#161a20;border-color:#2a3038}
-  .cpe .b{background:#222933;color:#c8d0da}
-  .bars .tr{background:#222933}
-  .bars .lb,.bars .vl{color:#c8d0da}
-  .cpe .kv b,.seccion .qes{color:#dfe5ec}
+  .inf{--linea:#2a323c;--tinta:#e6ebf1;--suave:#95a2b3;--fondo:#161a20}
+  .tile,.cpe{box-shadow:none}
+  .cpe:hover{box-shadow:0 4px 14px rgba(0,0,0,.45)}
+  .cpe .b{background:#212932;border-color:#2d3742;color:#c3ccd8}
+  .cpe .resumen{color:#dbe2ea}
+  .seccion .qes{color:#c8d2de}
+  .bars .tr,.mini .tr{background:#212932}
+  .bars .lb,.mini .lb,.bars .vl,.mini .vl{color:#c3ccd8}
+  .acciones input{background:#11151a;border-color:#2d3742;color:#e6ebf1}
 }
 </style>"""
 
 _CD_COLORES = ["#e05c5c", "#e08b3c", "#7ab547", "#2ba3b5", "#7d6fd1",
                "#c95c9c", "#5d8ac9", "#8a9199"]
+
+# Un numero de puerto no le dice nada a quien no es de redes, y el informe lo lee el
+# abonado, no un ingeniero. Se nombra lo que el puerto SIGNIFICA para el.
+PUERTO_NOMBRE = {
+    "443": "navegacion segura (webs y apps)", "80": "webs sin cifrar",
+    "53": "consultas de DNS", "853": "DNS cifrado",
+    "25": "envio de correo", "465": "envio de correo", "587": "envio de correo",
+    "110": "descarga de correo", "143": "descarga de correo", "993": "descarga de correo",
+    "22": "acceso remoto SSH", "23": "acceso remoto Telnet (inseguro)",
+    "3389": "escritorio remoto de Windows", "5900": "escritorio remoto VNC",
+    "445": "compartir archivos de Windows", "139": "compartir archivos de Windows",
+    "137": "red local de Windows", "138": "red local de Windows",
+    "7547": "gestion remota del router (TR-069)", "1900": "descubrimiento de dispositivos",
+    "123": "sincronizar la hora", "1194": "VPN", "500": "VPN", "4500": "VPN",
+    "5060": "llamadas VoIP", "5061": "llamadas VoIP",
+    "3478": "videollamadas", "19302": "videollamadas",
+    "6881": "descargas P2P", "6882": "descargas P2P", "51413": "descargas P2P",
+    "3333": "minado de criptomonedas", "4444": "minado de criptomonedas",
+    "5555": "gestion remota de equipos", "8080": "webs (puerto alternativo)",
+    "8443": "webs seguras (puerto alternativo)", "9200": "base de datos remota",
+}
+
+def nombre_puerto(p):
+    n = PUERTO_NOMBRE.get(str(p))
+    return ("%s (%s)" % (n, p)) if n else ("puerto %s" % p)
+
+def _cd_agrupa(pares, fn=None, n=6):
+    """Suma lo que despues de traducir es lo mismo.
+
+    Sin esto la ficha sale con 'DNS sospechoso' seis veces y numeros distintos: son
+    firmas crudas diferentes que significan lo mismo, y el abonado lee seis problemas
+    donde hay uno."""
+    acc = {}
+    for a, b in (pares or []):
+        k = fn(a) if fn else str(a)
+        acc[k] = acc.get(k, 0) + int(b)
+    return sorted(acc.items(), key=lambda kv: -kv[1])[:n]
+
+def _cd_minibarras(pares, color):
+    """Barras pequenas dentro de la ficha. Una lista separada por comas con numeros
+    entre parentesis obliga a comparar de cabeza; una barra se ve de un vistazo."""
+    esc = html.escape
+    if not pares:
+        return "<p class=vacio>Nada que destacar.</p>"
+    tope = max(v for _k, v in pares) or 1
+    return "<div class=mini>" + "".join(
+        "<div class=row><div class=lb>%s</div><div class=tr>"
+        "<div class=fi style='width:%.1f%%;background:%s'></div></div>"
+        "<div class=vl>%s</div></div>"
+        % (esc(k), max(100.0 * v / tope, 1.0), color, "{:,}".format(v).replace(",", "."))
+        for k, v in pares) + "</div>"
 
 def conducta_barras(filas, titulo, n=10):
     """El mismo ranking de atacantes que el resumen en vivo, pero sobre TODA la ventana
@@ -10892,14 +11000,13 @@ def conducta_page(q="", msg=""):
            "<div class=tile><div class=n style='color:#c0392b'>%d</div>"
            "<div class=l>para cortar (botnet, escaneo, fuerza bruta)</div></div>"
            "</div><div class=chips>%s</div>"
-           "<p style='margin:14px 0 0'>"
+           "<div class=acciones>"
            "<form method=get action='/conducta' style='display:inline'>"
-           "<input name=q value='%s' placeholder='filtrar por IP o firma' "
-           "style='padding:6px 9px;border-radius:6px;border:1px solid #ccc'>"
+           "<input name=q value='%s' placeholder='filtrar por IP o firma'>"
            "<button class=b>Filtrar</button></form> "
            "<a class=b href='/conducta.csv'>Descargar CSV</a> "
            "<form method=post action='/conducta/refrescar' style='display:inline'>"
-           "<button class=b>Regenerar</button></form></p>%s</div>"
+           "<button class=b>Regenerar</button></form></div>%s</div>"
            % (dias, desde, hasta, edad,
               "{:,}".format(rep_.get("lineas", 0)).replace(",", "."),
               len(filas), alertas, graves,
@@ -10917,29 +11024,40 @@ def conducta_page(q="", msg=""):
         que, hacer, color = CONDUCTA_GUIA[c]
         tarjetas = []
         for f in grupo[:120]:
-            def lista(k, titulo, trad=False):
-                xs = f.get(k) or []
-                if not xs:
-                    return ""
-                return ("<b>%s:</b> " % titulo) + ", ".join(
-                    "%s <span style='color:#889'>(%d)</span>"
-                    % (esc(traducir(a) if trad else str(a)), b) for a, b in xs) + "<br>"
+            acts = _cd_agrupa(f.get("firmas"), traducir)
+            puertos = _cd_agrupa(f.get("puertos"), nombre_puerto)
+            doms = _cd_agrupa(f.get("dominios"))
+            # Una frase que entienda el abonado, antes de cualquier grafico.
+            resumen = ("Este equipo hizo <b>%s</b> cosas que el sistema marca como "
+                       "sospechosas en %d dia(s)." % (
+                           "{:,}".format(f["alertas"]).replace(",", "."), f["dias"]))
+            if acts:
+                resumen += " Lo mas repetido: <b>%s</b>." % esc(acts[0][0].lower())
+            tec = ", ".join("%s (%d)" % (esc(str(a)), b) for a, b in (f.get("destinos") or []))
             tarjetas.append(
                 "<div class=cpe style='border-left-color:%s'>"
                 "<div class=top><span class=ip>%s</span>"
-                "<span class=b>%d alertas</span><span class=b>%d dias activo</span>"
-                "<span class=b>%d destinos</span><span class=b>ultima vez %s</span></div>"
-                "<details><summary>Ver todo lo que hizo</summary>"
-                "<div class=kv>%s</div></details></div>"
-                % (color, esc(f["ip"]), f["alertas"], f["dias"], f["destinos_n"],
-                   fmt(f["ultima"]),
-                   (lista("firmas", "Firmas", trad=True) + lista("destinos", "Destinos")
-                    + lista("puertos", "Puertos") + lista("dominios", "Dominios"))
-                   or "&mdash;"))
+                "<span class=b>%s alertas</span><span class=b>%d dias activo</span>"
+                "<span class=b>ultima vez %s</span></div>"
+                "<p class=resumen>%s</p>"
+                "<details><summary>Ver que estuvo haciendo</summary>"
+                "<h4>Que hizo</h4>%s"
+                "<h4>Para que usa internet</h4>%s"
+                "<h4>Sitios que mas visito</h4>%s"
+                "<details class=tecnico><summary>Detalle tecnico (para el ISP)</summary>"
+                "<div class=kv>%d destinos distintos: %s</div></details>"
+                "</details></div>"
+                % (color, esc(f["ip"]), "{:,}".format(f["alertas"]).replace(",", "."),
+                   f["dias"], fmt(f["ultima"]), resumen,
+                   _cd_minibarras(acts, color),
+                   _cd_minibarras(puertos, "#5d8ac9"),
+                   _cd_minibarras(doms, "#7ab547"),
+                   f["destinos_n"], tec or "&mdash;"))
         secciones.append(
-            "<div class='card seccion'><h3><span class=pill style='background:%s'>%d</span>"
+            "<div class='card seccion' style='--acento:%s'>"
+            "<h3><span class=pill style='background:%s'>%d</span>"
             "%s</h3><p class=qes>%s</p><p class=qhacer><b>Que hacer:</b> %s</p>%s%s</div>"
-            % (color, len(grupo), esc(nombre_categoria(c)), esc(que), esc(hacer),
+            % (color, color, len(grupo), esc(nombre_categoria(c)), esc(que), esc(hacer),
                "".join(tarjetas),
                ("<p class=sub2>Se muestran los primeros 120 de %d; el CSV los trae todos.</p>"
                 % len(grupo)) if len(grupo) > 120 else ""))

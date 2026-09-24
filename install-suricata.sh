@@ -13543,6 +13543,7 @@ cfg, mon = sys.argv[1], sys.argv[2]
 s = open(cfg, encoding="utf-8").read()
 block = f"""  - interface: {mon}
     # espejo TZSP desde MikroTik (lo crea tzsp-decap.service)
+    # el cluster-id definitivo lo asigna el renumerado de mas abajo
     cluster-id: 98
     cluster-type: cluster_flow
     defrag: yes
@@ -13565,6 +13566,39 @@ PY
     sed -i "/^  - interface: ${TZSP_MON_CFG}\$/a\    block-size: 131072" "$CFG"
   fi
   done
+
+  # --- CLUSTERID: un cluster-id distinto por interfaz de espejo -------------------
+  # El fanout de af-packet es un grupo del kernel identificado por ese numero. Dos
+  # interfaces con el mismo id piden entrar al mismo grupo y el kernel rechaza la
+  # segunda con "failed to set fanout mode: Invalid argument": esa interfaz no
+  # arranca y Suricata se cae entera. Con un solo MikroTik nunca se ve; aparece al
+  # pasar un -m con varios origenes. Se renumera SIEMPRE, no solo al crear el
+  # bloque, porque las cajas instaladas antes de este arreglo ya tienen el choque
+  # y una reejecucion del instalador no las tocaria.
+  python3 - "$CFG" <<'PY'
+import re, sys
+cfg = sys.argv[1]
+lineas = open(cfg, encoding="utf-8").read().split("\n")
+actual, asignados, cambios = None, {}, []
+for i, l in enumerate(lineas):
+    m = re.match(r"\s*-\s*interface:\s*(\S+)", l)
+    if m:
+        actual = m.group(1)
+        continue
+    m = re.match(r"(\s*)cluster-id:\s*(\d+)\s*$", l)
+    if m and actual and actual.startswith("ids-mon"):
+        if actual not in asignados:
+            asignados[actual] = 98 + len(asignados)
+        quiero = asignados[actual]
+        if int(m.group(2)) != quiero:
+            lineas[i] = "%scluster-id: %d" % (m.group(1), quiero)
+            cambios.append("%s %s->%d" % (actual, m.group(2), quiero))
+if cambios:
+    open(cfg, "w", encoding="utf-8").write("\n".join(lineas))
+    print("cluster-id corregido: " + ", ".join(cambios))
+PY
+  # CLUSTERID-FIN
+
   # En modo espejo, Suricata captura SOLO ${TZSP_MON} (veth estable que crea tzsp-decap).
   # El bloque af-packet de la NIC fisica (${IFACE}) se ELIMINA: su unico valor era el
   # trafico de gestion del propio sensor, y ademas ataba a Suricata al NOMBRE de la NIC.

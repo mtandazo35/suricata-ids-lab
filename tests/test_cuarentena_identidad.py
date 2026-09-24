@@ -120,6 +120,9 @@ def llamar(ns, mk, ruta, campos, operador=True):
                 "pedir_regen": lambda *a, **k: None,
                 "es_mi_cpe": lambda ip: ip.startswith("10."),
                 "es_publica_declarada": lambda ip: "",
+                "categoria_cpe": lambda k: "botnet",
+                "lista_de_categoria": lambda c: "clientes-botnet",
+                "nombre_categoria": lambda c: "Botnet / CnC",
                 "nunca_bloquear": lambda ip: False})
     exec(compile("def _f():\n" + textwrap.indent(cuerpo_ruta(ruta), "    "), "<r>", "exec"), ns2)
     ns2["_f"]()
@@ -153,8 +156,8 @@ def main():
     v = llamar(ns, mk, "/cuarentena/enviar", {"ajax": "1", "ip": "r2|10.6.1.165", "score": "91"})
     check("se acepta la identidad 'router|IP' (antes: 'IP invalida')",
           v.get("texto", "").startswith("OK"), v)
-    check("el bloqueo sale hacia SU router y a la lista de ESE router",
-          mk.add[-1:] == [("10.6.1.165", "cuar-norte", "r2")], mk.add)
+    check("el bloqueo sale hacia SU router, a la lista de su CATEGORIA",
+          mk.add[-1:] == [("10.6.1.165", "clientes-botnet", "r2")], mk.add)
 
     reg = ns["cargar_enviados"](ns["MK_SENT"])
     check("queda registrado por identidad, no por IP pelada",
@@ -173,15 +176,24 @@ def main():
     llamar(ns, mk, "/cuarentena/enviar", {"ajax": "1", "ip": "r1|10.6.1.165", "score": "73"})
     reg = ns["cargar_enviados"](ns["MK_SENT"])
     check("el del sur va a SU router, no al del norte",
-          mk.add[-1:] == [("10.6.1.165", "cuar-sur", "r1")], mk.add)
+          mk.add[-1:] == [("10.6.1.165", "clientes-botnet", "r1")], mk.add)
     check("y conviven los dos en el registro", len(reg) == 2, list(reg.keys()))
 
     # --- 3) liberar uno no libera al otro ---
     v = llamar(ns, mk, "/cuarentena/quitar", {"ip": "r2|10.6.1.165"})
     check("quitar acepta la identidad (antes: 'IP invalida')",
           "invalida" not in v.get("redirect", ""), v)
-    check("se quita del router correcto y de su lista",
-          mk.rem[-1:] == [("10.6.1.165", "cuar-norte", "r2")], mk.rem)
+    check("se quita del router correcto y de la lista DONDE ESTA",
+          mk.rem[-1:] == [("10.6.1.165", "clientes-botnet", "r2")], mk.rem)
+    # importa: la lista se guarda al enviar. Si manana cambia la categoria del CPE o se
+    # renombra la lista, hay que sacarlo de donde esta, no de donde tocaria hoy
+    check("la lista usada queda guardada en el registro",
+          (ns["cargar_enviados"](ns["MK_SENT"]).get("r1|10.6.1.165") or {}).get("lista")
+          == "clientes-botnet",
+          ns["cargar_enviados"](ns["MK_SENT"]).get("r1|10.6.1.165"))
+    check("y tambien la categoria, para poder explicarlo despues",
+          (ns["cargar_enviados"](ns["MK_SENT"]).get("r1|10.6.1.165") or {}).get("categoria")
+          == "botnet")
     reg = ns["cargar_enviados"](ns["MK_SENT"])
     check("sale del registro el del norte", "r2|10.6.1.165" not in reg, list(reg.keys()))
     check("y el del sur sigue bloqueado", "r1|10.6.1.165" in reg, list(reg.keys()))
@@ -204,7 +216,7 @@ def main():
     check("con un solo nodo la clave sigue siendo la IP pelada",
           list(reg1.keys()) == ["10.6.4.61"], list(reg1.keys()))
     check("y se envia igual que siempre",
-          mk1.add == [("10.6.4.61", "suricata-cuarentena", "r1")], mk1.add)
+          mk1.add == [("10.6.4.61", "clientes-botnet", "r1")], mk1.add)
     llamar(ns1, mk1, "/cuarentena/quitar", {"ip": "10.6.4.61"})
     check("y se quita igual que siempre",
           ns1["cargar_enviados"](ns1["MK_SENT"]) == {}, ns1["cargar_enviados"](ns1["MK_SENT"]))

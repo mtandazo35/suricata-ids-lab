@@ -5417,6 +5417,93 @@ def excluir_destino(d):
     return liberados, f"Destino {d} marcado confiable; {liberados} CPE liberado(s) por falso positivo."
 
 # --- cuarentena explicable: por que se bloqueo y cuando se reviso por ultima vez ---
+# --- Una address-list por CATEGORIA de abuso ---------------------------------------
+# (clave, nombre visible, categorias de firma que la disparan, lista por defecto)
+# El orden MANDA: se clasifica por la primera que casa, de lo mas grave a lo mas leve.
+# Un CPE con botnet Y P2P es un CPE con botnet.
+CAT_CPE = [
+    ("botnet", "Botnet / CnC",
+     ["Botnet CnC", "Botnet", "Botnet Mirai", "Botnet Katana", "Troyano", "Ransomware",
+      "Trafico de malware"], "clientes-botnet"),
+    ("dns", "DNS de malware",
+     ["DNS sospechoso"], "clientes-dns-malware"),
+    ("escaneo", "Escaneo",
+     ["Escaneo de puertos", "Escaneo SSH", "Escaneo Telnet", "Escaneo TR-069",
+      "Escaneo saliente"], "clientes-escaneo"),
+    ("fuerza", "Fuerza bruta",
+     ["Fuerza bruta", "RDP/VNC"], "clientes-fuerza-bruta"),
+    ("spam", "Spam",
+     ["Spam"], "clientes-spam"),
+    ("minado", "Criptominado",
+     ["Criptomineria"], "clientes-minado"),
+    ("p2p", "P2P",
+     ["BitTorrent / P2P"], "clientes-p2p"),
+]
+CAT_OTROS = ("otros", "Otros", [], "clientes-otros")
+
+def lista_de_categoria(cat):
+    """Nombre de la address-list de esa categoria. Se puede cambiar en MK_CONF con
+    LISTA_<CATEGORIA>=nombre, por si el ISP ya tiene su propia nomenclatura."""
+    for c, _nom, _cats, por_defecto in CAT_CPE + [CAT_OTROS]:
+        if c == cat:
+            return (_mk_globales().get("LISTA_" + c.upper(), "") or por_defecto).strip()
+    return CAT_OTROS[3]
+
+def nombre_categoria(cat):
+    for c, nom, _cats, _l in CAT_CPE + [CAT_OTROS]:
+        if c == cat:
+            return nom
+    return CAT_OTROS[1]
+
+def categoria_cpe(clave):
+    """En que categoria cae ese CPE, segun el tipo de trafico que hace de verdad.
+
+    Se decide por la PRIMERA categoria que casa, y la tabla va de lo mas grave a lo mas
+    leve: quien tiene una botnet y ademas usa BitTorrent es, a efectos de que hacer con
+    el, un CPE con botnet."""
+    c = None
+    for x in _cpes_de_reporte(None):
+        if clave_cpe(x.get("ip", ""), x.get("router", "")) == clave:
+            c = x
+            break
+    if not c:
+        return CAT_OTROS[0]
+    suyas = set((c.get("cats_top") or {}).keys())
+    for cat, _nom, cats, _l in CAT_CPE:
+        if suyas & set(cats):
+            return cat
+    return CAT_OTROS[0]
+
+def listas_cpe_reglas():
+    """Las reglas de cada lista. No todas se tratan igual, que es el motivo de separarlas."""
+    def L(c):
+        return lista_de_categoria(c)
+    return "\n".join([
+        "/ip firewall filter",
+        "# Lo que hay que cortar: el equipo esta comprometido y ataca a terceros.",
+        'add chain=forward src-address-list=%s action=drop comment="Suricata: botnet"' % L("botnet"),
+        'add chain=forward src-address-list=%s action=drop comment="Suricata: escaneo"' % L("escaneo"),
+        'add chain=forward src-address-list=%s action=drop comment="Suricata: fuerza bruta"' % L("fuerza"),
+        "",
+        "# Spam: basta con cerrarle el correo saliente, no hace falta dejarlo sin internet.",
+        'add chain=forward src-address-list=%s protocol=tcp dst-port=25,465,587 '
+        'action=drop comment="Suricata: spam"' % L("spam"),
+        "",
+        "# DNS de malware: en vez de cortar, se le fuerza a TU resolutor, que ya filtra.",
+        "/ip firewall nat",
+        'add chain=dstnat src-address-list=%s protocol=udp dst-port=53 '
+        'action=redirect to-ports=53 comment="Suricata: DNS de malware al resolutor propio"' % L("dns"),
+        "",
+        "# P2P y minado: no son un ataque, son consumo. Encolar rinde mas que cortar.",
+        "# (ejemplo; ajusta el limite a tu plan)",
+        "/queue simple",
+        'add name=suricata-p2p target=\"\" max-limit=2M/2M comment="Suricata: P2P acotado"',
+        "# y marcar su trafico para esa cola:",
+        "/ip firewall mangle",
+        'add chain=forward src-address-list=%s action=mark-packet new-packet-mark=p2p '
+        'passthrough=no comment="Suricata: P2P"' % L("p2p"),
+    ])
+
 def _motivo_bloqueo(clave):
     """Busca por que un CPE es candidato (firma, banda, score, conteos) en cuarentena.json,
     para guardarlo AL bloquear y poder explicar el bloqueo aunque despues deje de atacar.
@@ -5833,15 +5920,16 @@ def barrido_alto_rapido(maxbytes=4_000_000):
         _FAST_LAST[src] = ahora
         try:
             _r = router_de_clave(src)
-            _dr = cargar_mk_de(_r)
-            lst = _dr.get("LIST", lst)          # la lista puede llamarse distinto en cada nodo
+            _cat = categoria_cpe(src)
+            lst = lista_de_categoria(_cat)      # cada categoria, a su lista
             ok, _err = mk_add(ip_de(src), comment=f"suricata ALTO inmediato {time.strftime('%Y-%m-%d %H:%M')}",
                               lista=lst, ttl="", router=_r)
         except Exception:
             ok = False
         if ok:
             env[src] = {"cuando": int(ahora), "score": "", "por": "politica-rapida", "manual": False,
-                        "pol": True, "router": _r.get("id", ""), "motivo": _motivo_bloqueo(src)}
+                        "pol": True, "router": _r.get("id", ""), "categoria": _cat, "lista": lst,
+                        "motivo": _motivo_bloqueo(src)}
             try: notificar_cuarentena(ip_de(src), "ALTO (envio inmediato)", lst, quien="politica-rapida")
             except Exception: pass
             mk_log("POLITICA-RAPIDA", ip_de(src), "politica",
@@ -9092,6 +9180,32 @@ propio MikroTik</b> (<code>filter-port</code>, <code>filter-protocol</code>): co
 banda.</li>
 </ul>
 
+<h2>Una lista por categoria de abuso</h2>
+<p>Meter en el mismo cajon al que tiene una <b>botnet</b> y al que usa <b>BitTorrent</b> obliga a
+darles el mismo trato en el firewall, y no es el mismo problema. Por eso cada CPE va a la
+address-list de <b>su categoria</b>, y cada lista se trata como corresponde:</p>
+<table>
+<tr><th>Categoria</th><th>Lista</th><th>Que se hace</th></tr>
+<tr><td>Botnet / CnC</td><td><code>clientes-botnet</code></td><td><b>Cortar.</b> El equipo esta
+comprometido y ataca a terceros.</td></tr>
+<tr><td>Escaneo</td><td><code>clientes-escaneo</code></td><td><b>Cortar.</b></td></tr>
+<tr><td>Fuerza bruta</td><td><code>clientes-fuerza-bruta</code></td><td><b>Cortar.</b></td></tr>
+<tr><td>Spam</td><td><code>clientes-spam</code></td><td>Cerrarle <b>solo el correo saliente</b>. No
+hace falta dejarlo sin internet.</td></tr>
+<tr><td>DNS de malware</td><td><code>clientes-dns-malware</code></td><td><b>Redirigir</b> su DNS a tu
+resolutor, que ya filtra. Ni se entera.</td></tr>
+<tr><td>Criptominado</td><td><code>clientes-minado</code></td><td>Consumo, no ataque.</td></tr>
+<tr><td>P2P</td><td><code>clientes-p2p</code></td><td><b>Encolar</b>, no cortar: es consumo.</td></tr>
+<tr><td>Otros</td><td><code>clientes-otros</code></td><td>Lo que no encaja en nada de lo anterior.</td></tr>
+</table>
+<p>La clasificacion va de <b>lo mas grave a lo mas leve</b> y manda la primera que casa: quien tiene
+una botnet <b>y ademas</b> usa BitTorrent es, a efectos de que hacer con el, un CPE con botnet
+&mdash; aunque el P2P tenga diez veces mas alertas.</p>
+<p>Los nombres se pueden cambiar en <code>/etc/suricata-mikrotik.conf</code> con
+<code>LISTA_BOTNET=</code>, <code>LISTA_P2P=</code> y demas, por si ya tienes tu propia
+nomenclatura. Y al enviar se <b>guarda en que lista quedo</b>: si manana cambia su categoria o
+renombras la lista, el panel lo saca de donde esta de verdad y no de donde tocaria hoy.</p>
+
 <h2>Las address-lists: cual es cual</h2>
 <p>Ya son cinco y conviene tenerlas claras, porque <b>no todas se usan igual</b>: tres miran el
 <b>origen</b> (a quien se corta) y dos el <b>destino</b> o la entrada. Confundir
@@ -12201,23 +12315,29 @@ class H(BaseHTTPRequestHandler):
                             for c in json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8")).get("candidatos", [])}
             except Exception:
                 cand_ips = set()
+            # a la lista de SU categoria: no es lo mismo una botnet que P2P, y cada
+            # lista se trata distinto en el firewall
+            _cat = categoria_cpe(clave)
+            _lst = lista_de_categoria(_cat)
             try:
-                ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}",
-                                 lista=m.get("LIST", ""), ttl=_ttl_efectivo(m, "TTL"), router=r)
+                ok, err = mk_add(ip, comment=f"suricata {_cat} riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}",
+                                 lista=_lst, ttl=_ttl_efectivo(m, "TTL"), router=r)
             except Exception as ex:
                 ok, err = False, str(ex)
             if ok:
                 env = cargar_enviados()
+                # se guarda la LISTA usada: si manana cambia la categoria del CPE o el
+                # nombre de la lista, hay que poder sacarlo de donde esta de verdad
                 env[clave] = {"cuando": int(time.time()), "score": score, "por": getattr(CTX, "user", "?"),
-                              "router": r.get("id", ""),
+                              "router": r.get("id", ""), "categoria": _cat, "lista": _lst,
                               "manual": clave not in cand_ips, "motivo": _motivo_bloqueo(clave)}
                 guardar_enviados(env)
-                mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={m.get('LIST')} ttl={m.get('TTL')}"
+                mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={_lst} ttl={m.get('TTL')}"
                        + (" (manual)" if clave not in cand_ips else "") + _suf_nodo(clave))
                 notificar_cuarentena(ip, "Infeccion CnC", m.get("LIST", ""), quien=getattr(CTX, "user", "?"))
                 globals()["FORCE_REGEN"] = True   # regenerar pronto para que el Top muestre 'En cuarentena'
                 nota = " (ya estaba en la lista)" if err else ""
-                return _fin(True, f"{ip} en la lista {m.get('LIST')}{nota}")
+                return _fin(True, f"{ip} en {_lst} ({nombre_categoria(_cat)}){nota}")
             mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), err)
             return _fin(False, f"No se pudo enviar {ip}: {err}")
         if ruta in ("/cuarentena/destino/bloquear", "/cuarentena/destino/quitar"):
@@ -12364,15 +12484,18 @@ class H(BaseHTTPRequestHandler):
                 r = router_de_clave(clave); dr = cargar_mk_de(r)
                 if not mk_listo(dr):
                     continue            # ese nodo esta en dry-run: no se le manda nada
+                _cat = categoria_cpe(clave)
+                _lst = lista_de_categoria(_cat)
                 try:
-                    ok, err = mk_add(ip, comment=f"suricata cuarentena riesgo {c.get('riesgo',0)} {time.strftime('%Y-%m-%d %H:%M')}",
-                                     lista=dr.get("LIST", ""), ttl=_ttl_efectivo(dr, "TTL"), router=r)
+                    ok, err = mk_add(ip, comment=f"suricata {_cat} riesgo {c.get('riesgo',0)} {time.strftime('%Y-%m-%d %H:%M')}",
+                                     lista=_lst, ttl=_ttl_efectivo(dr, "TTL"), router=r)
                 except Exception as ex:
                     ok, err = False, str(ex)
                 if ok:
                     env[clave] = {"cuando": int(time.time()), "score": c.get("riesgo", 0), "por": getattr(CTX, "user", "?"),
-                                  "router": r.get("id", ""), "motivo": _motivo_bloqueo(clave)}
-                    mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={dr.get('LIST')} (masivo)" + _suf_nodo(clave))
+                                  "router": r.get("id", ""), "categoria": _cat, "lista": _lst,
+                                  "motivo": _motivo_bloqueo(clave)}
+                    mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={_lst} (masivo)" + _suf_nodo(clave))
                     ok_n += 1
                 else:
                     mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), err); err_n += 1; ult_err = err
@@ -12395,8 +12518,11 @@ class H(BaseHTTPRequestHandler):
                 ipaddress.ip_address(ip)
             except Exception:
                 return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+            # de la lista donde esta DE VERDAD, no de la que toque hoy por categoria
+            _guardada = (cargar_enviados(MK_SENT).get(clave) or {}).get("lista", "")
             try:
-                ok, err = mk_remove(ip, lista=cargar_mk_de(rt).get("LIST", ""), router=rt)
+                ok, err = mk_remove(ip, lista=_guardada or cargar_mk_de(rt).get("LIST", ""),
+                                    router=rt)
             except Exception as ex:
                 ok, err = False, str(ex)
             # solo se saca del registro si el router confirmo: si falla y se borraba

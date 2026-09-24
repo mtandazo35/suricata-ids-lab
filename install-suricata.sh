@@ -3935,21 +3935,39 @@ def analisis_conducta(rid=None):
     grupos.sort(key=lambda g: g["alertas"], reverse=True)
     return grupos
 
+_CPES_CACHE = {"sello": None, "datos": []}
+
 def _cpes_de_reporte(rid=None):
-    """CPEs del reporte actual con su desglose de puertos, opcionalmente de un nodo."""
+    """CPEs del reporte actual con su desglose de puertos, opcionalmente de un nodo.
+
+    Con cache por mtime del archivo: la pagina de Abuso saliente lo pedia hasta SIETE
+    veces por render (analisis de salida, de conducta, de control, y otra vez para saber
+    si habia algo que mostrar), y cada una releia y reparseaba el JSON entero."""
+    f = f"{LOGDIR}/cuarentena.json"
     try:
-        cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8"))
-    except (OSError, ValueError):
+        st = os.stat(f)
+    except OSError:
         return []
-    vistos = {}
-    for k in ("top_riesgo", "candidatos", "dns_candidatos"):
-        for c in cq.get(k, []):
-            if rid is not None and (c.get("router") or "") != rid:
-                continue
-            clave = clave_cpe(c.get("ip", ""), c.get("router", ""))
-            if clave not in vistos or (c.get("puertos_top") and not vistos[clave].get("puertos_top")):
-                vistos[clave] = c
-    return list(vistos.values())
+    # nanosegundos + tamaño: con getmtime a secas, un archivo reescrito dentro del mismo
+    # tick se servia de cache VIEJA sin que nada lo delatara
+    sello = (st.st_mtime_ns, st.st_size)
+    if sello != _CPES_CACHE["sello"]:
+        try:
+            cq = json.load(open(f, encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        vistos = {}
+        for k in ("top_riesgo", "candidatos", "dns_candidatos"):
+            for c in cq.get(k, []):
+                clave = clave_cpe(c.get("ip", ""), c.get("router", ""))
+                if clave not in vistos or (c.get("puertos_top")
+                                           and not vistos[clave].get("puertos_top")):
+                    vistos[clave] = c
+        _CPES_CACHE["datos"] = list(vistos.values())
+        _CPES_CACHE["sello"] = sello
+    if rid is None:
+        return _CPES_CACHE["datos"]
+    return [c for c in _CPES_CACHE["datos"] if (c.get("router") or "") == rid]
 
 def analisis_salida(rid=None):
     """Cuanto abuso mataria cada regla de salida, con los datos REALES del sensor.
@@ -4818,6 +4836,40 @@ def _mk_print(s_, cmd, props):
                 d[k] = v
         filas.append(d)
     return filas
+
+DIAG_FILE = "/var/log/suricata-diagnostico.json"
+
+def guardar_diagnostico():
+    """Consulta a cada router y deja el resultado en disco.
+
+    Corre en el hilo de fondo A PROPOSITO: hacerlo dentro del render dejaba la pagina
+    esperando CUATRO consultas a la API por router, con su conexion TCP y su login. Con
+    el router al otro lado de una VPN eso son segundos, y si no responde, el timeout
+    entero."""
+    out = {}
+    for r in cargar_routers():
+        if not ((r.get("HOST") or "").strip() and r.get("ENABLED") == "1"):
+            continue
+        rid = r.get("id", "")
+        try:
+            out[rid] = {"ts": int(time.time()), "checks": mk_diagnostico(r)}
+        except Exception as ex:
+            out[rid] = {"ts": int(time.time()), "error": str(ex)[:140]}
+    try:
+        tmp = "%s.%d.tmp" % (DIAG_FILE, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(out, f)
+        os.replace(tmp, DIAG_FILE)
+    except OSError:
+        pass
+    return len(out)
+
+def diagnostico_de(rid):
+    """Lo ultimo que se midio de ese router, o None si aun no se midio."""
+    try:
+        return (json.load(open(DIAG_FILE, encoding="utf-8")) or {}).get(rid)
+    except (OSError, ValueError, AttributeError):
+        return None
 
 def mk_diagnostico(router=None):
     """Que le falta al router para poder cortar de verdad. [(estado, titulo, detalle, arreglo)]
@@ -7317,6 +7369,7 @@ def refrescador():
     ult_fin = 0.0       # cuando termino
     ult_aidb = 0.0
     ult_pub = 0.0
+    ult_diag = 0.0
     ult_forzado = 0.0   # ultima regeneracion pedida a mano/por cambios (ver REGEN_MIN_SECS)
     while True:
         global FORCE_REGEN
@@ -7342,6 +7395,10 @@ def refrescador():
             try: precargar_abuseipdb()
             except Exception as _e: sys.stderr.write("precarga abuseipdb: %s\n" % _e)
             ult_aidb = time.time()
+        if time.time() - ult_diag > 600:       # cada ~10 min: que le falta al router
+            try: guardar_diagnostico()
+            except Exception as _e: sys.stderr.write("diagnostico mikrotik: %s\n" % _e)
+            ult_diag = time.time()
         if time.time() - ult_pub > 6 * 3600:   # cada ~6 h: reputacion de TUS IPs publicas
             try: vigilar_publicas()
             except Exception as _e: sys.stderr.write("vigilancia de publicas: %s\n" % _e)
@@ -10326,13 +10383,19 @@ def historico_page(dias_n=30):
     # Con un espejo, Suricata no bloquea nunca: ve una copia y el paquete ya paso. El que
     # corta es el router, asi que lo primero es saber si esta en condiciones de hacerlo.
     def _diag_html(r, nom, multi):
-        try:
-            checks = mk_diagnostico(r)
-        except Exception as ex:
-            return ("<section class=card><h2 style='font-size:15px;margin:0 0 6px'>"
-                    + ("Proteccion en " + esc(nom) if multi else "Proteccion en el MikroTik")
-                    + "</h2><p class=hint>No se pudo consultar el router: "
-                    + esc(str(ex)[:120]) + "</p></section>")
+        # de la cache que llena el hilo de fondo: consultar el router aqui dejaba la
+        # pagina esperando 4 llamadas a su API
+        _d = diagnostico_de(r.get("id", ""))
+        cab = ("<section class=card><h2 style='font-size:15px;margin:0 0 6px'>"
+               + ("Proteccion en " + esc(nom) if multi else "Proteccion en el MikroTik")
+               + "</h2>")
+        if not _d:
+            return cab + ("<p class=hint>Todavia sin medir. El panel consulta el router "
+                          "cada 10 minutos en segundo plano.</p></section>")
+        if _d.get("error"):
+            return cab + ("<p class=hint>No se pudo consultar el router: "
+                          + esc(_d["error"]) + "</p></section>")
+        checks = _d.get("checks") or []
         col = {"ok": "#3a9d5d", "falta": "#e34948", "aviso": "#e58a00"}
         ico = {"ok": "&#10003;", "falta": "&#9888;", "aviso": "&#9679;"}
         faltan = sum(1 for e, _t, _d, _f in checks if e == "falta")
@@ -10362,11 +10425,14 @@ def historico_page(dias_n=30):
         rid = r.get("id", "") if r else None
         nom = (r.get("nombre") or r.get("HOST") or rid) if r else ""
         tot, n_cpes, grupos = analisis_salida(rid)
-        if not grupos and not analisis_conducta(rid) and not analisis_control(rid):
+        # se calculan UNA vez: antes se pedian dos veces cada uno (una para saber si
+        # habia algo que mostrar y otra para mostrarlo)
+        _conductas = analisis_conducta(rid)
+        _ctls = analisis_control(rid)
+        if not grupos and not _conductas and not _ctls:
             continue
         tarjetas_g = []
-        # trafico que no es abuso pero el operador quiere ver y controlar
-        for ctl in analisis_control(rid):
+        for ctl in _ctls:
             filas_c = "".join(
                 f"<tr><td class=mono>{esc(ip_de(k))}</td>"
                 f"<td class=num>{n:,}</td><td class=num>{rg}</td></tr>"
@@ -10385,7 +10451,7 @@ def historico_page(dias_n=30):
                 f"<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;"
                 f"padding:10px;overflow-x:auto;font-size:12px'>"
                 f"{esc(reglas_p2p_texto(ctl['puertos']))}</pre></details></div>")
-        conductas = analisis_conducta(rid)
+        conductas = _conductas
         for g in conductas:
             det = ", ".join("%s (%d)" % (c, n) for c, n in g["cats"][:3])
             tarjetas_g.append(

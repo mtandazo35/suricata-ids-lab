@@ -92,7 +92,8 @@ def main():
     d = piezas(DASH, ("ACCIONES_FILE", "ACCIONES_DIAS", "_ACC_LOCK", "cargar_acciones",
                       "contar_accion", "METRICAS_FILE", "cargar_metricas", "_serie",
                       "_media", "_grafico", "historico_page",
-                      "GRUPOS_SALIDA", "_cpes_de_reporte", "analisis_salida",
+                      "GRUPOS_SALIDA", "_CPES_CACHE", "_cpes_de_reporte", "analisis_salida",
+                      "DIAG_FILE", "diagnostico_de",
                       "regla_salida", "reglas_salida_texto",
                       "GRUPOS_CONDUCTA", "analisis_conducta", "reglas_conducta_texto",
                       "GRUPOS_CONTROL", "analisis_control", "reglas_p2p_texto",
@@ -220,6 +221,11 @@ def main():
     cond = d["analisis_conducta"](None)
     check("sin categorias no se propone ninguna conducta", cond == [], cond)
 
+    # el cache del reporte tiene que darse cuenta de que el archivo cambio, aunque se
+    # reescriba dentro del mismo tick del reloj: si no, la pagina muestra datos viejos
+    # sin que nada lo delate (paso con getmtime a secas)
+    _antes = len(d["_cpes_de_reporte"](None))
+
     json.dump({"top_riesgo": [
         {"ip": "10.0.0.1", "router": "", "puertos_top": {"25/tcp": 4000},
          "cats_top": {"Spam": 4000}},
@@ -229,6 +235,9 @@ def main():
          "cats_top": {"Anomalia TLS/SSL": 9000}},
     ], "candidatos": [], "dns_candidatos": []},
         open(os.path.join(tmp, "cuarentena.json"), "w", encoding="utf-8"))
+    check("el cache nota que el reporte cambio, aunque sea al instante",
+          len(d["_cpes_de_reporte"](None)) != _antes or _antes == 3,
+          (_antes, len(d["_cpes_de_reporte"](None))))
     cond = {g["clave"]: g for g in d["analisis_conducta"](None)}
     check("el escaneo se detecta como conducta", "escaneo" in cond, list(cond))
     check("sumando sus categorias", cond["escaneo"]["alertas"] == 1800, cond["escaneo"]["alertas"])

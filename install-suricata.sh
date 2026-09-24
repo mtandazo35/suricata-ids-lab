@@ -5683,6 +5683,8 @@ def barrido_alto_rapido(maxbytes=4_000_000):
             continue                             # ni firma de infeccion ni destino fichado
         if not src_ip or nunca_bloquear(src_ip) or dst in dest_ok:
             continue
+        if es_publica_declarada(src_ip):
+            continue                             # es tu propia salida NAT, no un abonado
         if not es_mi_cpe(src_ip):
             continue                             # atacante de internet: no va a la cuarentena de CPEs
         if _excluido(reglas, src_ip, dst, int(dp) if dp else None, sid):
@@ -6551,6 +6553,28 @@ def guardar_publicas(d):
         json.dump({"nodos": d}, f, ensure_ascii=False, indent=1)
     os.replace(tmp, PUBLICAS_CONF)
     return d
+
+def es_publica_declarada(ip):
+    """La IP es una de las publicas que declaraste (o cae en una de sus redes)?
+
+    Existe por el modo POST-NAT: si el sensor mira la WAN, HOME_NET son tus rangos
+    publicos y el panel las trata como CPEs. Mandar tu IP de NAT a la cuarentena dejaria
+    sin internet a TODOS los abonados que salen por ella."""
+    try:
+        o = ipaddress.ip_address(ip)
+    except ValueError:
+        return ""
+    for rid, entradas in cargar_publicas().items():
+        for e in entradas:
+            try:
+                if "/" in e:
+                    if o in ipaddress.ip_network(e, strict=False):
+                        return e
+                elif str(o) == e:
+                    return e
+            except ValueError:
+                continue
+    return ""
 
 def publicas_texto(rid):
     return "\n".join(cargar_publicas().get(rid, []))
@@ -8925,6 +8949,31 @@ todo es una pelea perdida y conviene saberlo antes de prometerselo a nadie.</li>
 abre cientos, y un limite alto no molesta a quien solo navega.</li>
 <li>Si lo que te molesta es <b>la banda</b> y no el trafico en si, sale mucho mejor
 <b>encolarlo</b> con <code>/queue</code> que intentar cortarlo.</li>
+</ul>
+
+<h2>Sensor POST-NAT: analizar lo que hacen tus IPs publicas</h2>
+<p>Lo normal es espejar el <b>bridge</b> del MikroTik: ahi se ve quien es cada abonado (<code>10.x</code>)
+pero <b>nunca</b> la IP publica por la que salio. Hay un montaje distinto para lo contrario: espejar
+la <b>WAN</b>. Entonces el sensor ve el trafico <b>ya traducido</b> y el origen es tu IP publica, que
+es exactamente lo que ve -y denuncia- el resto de internet.</p>
+<p>Los dos se complementan: el de la LAN dice <b>quien</b>, el de la WAN dice <b>que sale por cada
+publica</b>. En el de la WAN, <b>HOME_NET son tus rangos PUBLICOS</b>, no los privados.</p>
+<pre><code>curl -fsSL .../install-suricata.sh | sudo bash -s --   -t -m IP_DEL_ROUTER_EN_EL_TUNEL   -n TUS_RANGOS_PUBLICOS</code></pre>
+<p>Y en el MikroTik, <code>filter-interface</code> apuntando a la <b>WAN</b>, no al bridge.</p>
+<h3>Tres avisos que hay que leer antes</h3>
+<ul>
+<li><b>Tu propia publica NO puede ir a la cuarentena.</b> Como HOME_NET son las publicas, el panel
+las trata como si fueran CPEs; mandar tu IP de NAT a la address-list dejaria <b>sin internet a todos
+los abonados que salen por ella</b>. El panel lo <b>impide</b> si esas IPs estan declaradas en
+<b>Consultar IP &rarr; Tus IPs publicas</b>. Declararlas ahi no es opcional en este modo.</li>
+<li><b>Por VPN, el origen es la IP del TUNEL</b>, no la LAN del router. Si en <code>-m</code> pones la
+LAN, el receptor descarta todos los paquetes y solo se ve en su contador
+<code>rechazados_origen</code>: un fallo perfectamente silencioso.</li>
+<li><b>El espejo duplica el trafico dentro del tunel</b> y va por UDP sin retransmision: con perdida
+el IDS ve trafico incompleto <b>y no avisa</b>. Para un sensor remoto conviene <b>filtrar en el
+propio MikroTik</b> (<code>filter-port</code>, <code>filter-protocol</code>): con 25, 22, 23, 445,
+3389 y 7547 se caza casi todo el abuso que ensucia las publicas, a una fraccion del ancho de
+banda.</li>
 </ul>
 
 <h2>Las address-lists: cual es cual</h2>
@@ -11966,6 +12015,11 @@ class H(BaseHTTPRequestHandler):
                                    f"se corta en el firewall de borde, no en la cuarentena de CPEs")
             if nunca_bloquear(ip):
                 return _fin(False, f"{ip} esta en la lista 'Nunca bloquear' (no se envia)")
+            _pub = es_publica_declarada(ip)
+            if _pub:
+                return _fin(False, f"{ip} es una de TUS publicas ({_pub}): mandarla a la "
+                                   f"cuarentena dejaria sin internet a todos los abonados "
+                                   f"que salen por ahi")
             r = router_de_clave(clave); m = cargar_mk_de(r)
             if not mk_listo(m):
                 return _fin(False, f"Configura y HABILITA el MikroTik "
@@ -12063,6 +12117,10 @@ class H(BaseHTTPRequestHandler):
                 return _fin_g(False, f"{ip} no es de tus redes")
             if nunca_bloquear(ip):
                 return _fin_g(False, f"{ip} esta en la lista 'Nunca bloquear'")
+            _pub = es_publica_declarada(ip)
+            if _pub:
+                return _fin_g(False, f"{ip} es una de TUS publicas ({_pub}): cortarla "
+                                     f"dejaria sin servicio a todos los abonados de ese NAT")
             r = router_de_clave(clave); m = cargar_mk_de(r)
             if not mk_listo(m):
                 return _fin_g(False, "Configura y HABILITA el MikroTik en Ajustes primero")

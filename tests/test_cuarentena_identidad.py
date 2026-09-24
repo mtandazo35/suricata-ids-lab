@@ -119,6 +119,7 @@ def llamar(ns, mk, ruta, campos, operador=True):
                 "enviar_telegram": lambda *a, **k: None,
                 "pedir_regen": lambda *a, **k: None,
                 "es_mi_cpe": lambda ip: ip.startswith("10."),
+                "es_publica_declarada": lambda ip: "",
                 "nunca_bloquear": lambda ip: False})
     exec(compile("def _f():\n" + textwrap.indent(cuerpo_ruta(ruta), "    "), "<r>", "exec"), ns2)
     ns2["_f"]()

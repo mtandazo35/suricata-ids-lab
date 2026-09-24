@@ -38,7 +38,7 @@ PIEZAS = ("PUBLICAS_CONF", "PUB_HIST", "PUB_HIST_DIAS", "PUB_UMBRAL_AVISO", "_PU
           "aidb_consultar", "_aidb_pedir_red", "_aidb_resumen_red", "aidb_consultar_red",
           "cargar_publicas", "guardar_publicas", "publicas_texto", "guardar_publicas_de",
           "_pub_hist", "_guardar_pub_hist", "_peor_de", "_cats_de", "vigilar_publicas",
-          "senal_de_categorias", "_cpes_del_nodo", "culpables_de",
+          "senal_de_categorias", "_cpes_del_nodo", "culpables_de", "es_publica_declarada",
           "DNSBL", "DNSBL_HIST", "DNSBL_MAX_IPS", "DNSBL_HILOS", "DNSBL_DIAS",
           "ZEN_COD", "_PBL", "_invertida", "dnsbl_una", "dnsbl_revisar",
           "_dnsbl_hist", "vigilar_dnsbl")
@@ -202,6 +202,25 @@ def main():
     antes = len(ns["_avisos"])
     ns["vigilar_publicas"]()
     check("no repite el aviso en cada vuelta", len(ns["_avisos"]) == antes, ns["_avisos"])
+
+    # --- 4b) EL FRENO: tu propia publica no puede ir a cuarentena ---------------
+    # Con un sensor POST-NAT (espejo de la WAN), HOME_NET son los rangos PUBLICOS y el
+    # panel ve las publicas como si fueran CPEs. Mandar tu IP de NAT a la address-list
+    # de cuarentena deja SIN INTERNET a todos los abonados que salen por ella.
+    check("una IP dentro de una red publica declarada se reconoce como TUYA",
+          ns["es_publica_declarada"]("200.0.0.7") == "200.0.0.0/24",
+          ns["es_publica_declarada"]("200.0.0.7"))
+    check("y una IP suelta declarada tambien",
+          ns["es_publica_declarada"]("190.0.2.7") == "190.0.2.7",
+          ns["es_publica_declarada"]("190.0.2.7"))
+    check("una publica ajena NO se confunde con las tuyas",
+          ns["es_publica_declarada"]("1.1.1.1") == "", ns["es_publica_declarada"]("1.1.1.1"))
+    check("ni una privada", ns["es_publica_declarada"]("10.6.1.10") == "")
+    check("ni una cadena que no es IP", ns["es_publica_declarada"]("basura") == "")
+    check("el borde de la red tambien cuenta (la .255)",
+          ns["es_publica_declarada"]("200.0.0.255") == "200.0.0.0/24")
+    check("pero la red de al lado no",
+          ns["es_publica_declarada"]("200.0.1.7") == "", ns["es_publica_declarada"]("200.0.1.7"))
 
     # --- 5) listas negras: lo que de verdad banea -------------------------------
     # Se sustituye la resolucion DNS por una tabla, asi la prueba no depende de internet.

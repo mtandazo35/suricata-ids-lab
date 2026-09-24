@@ -539,6 +539,22 @@ solo unos clientes concretos:
 /tool sniffer set filter-port=53,80,443
 ```
 
+> **Los filtros del sniffer se combinan con `or`, no con `and`.** Es la causa mas comun
+> de que "el filtro no filtro nada": `filter-interface=bridge` mas `filter-port=53` **no**
+> espeja el DNS del bridge, espeja *todo* el bridge **mas** *todo* el puerto 53 de
+> cualquier interfaz, o sea mas trafico que antes de poner el filtro. El valor por
+> defecto de `filter-operator-between-entries` es `or` y hay que cambiarlo a mano:
+>
+> ```routeros
+> # sin esto cada filtro SUMA trafico en vez de restarlo
+> /tool sniffer set filter-operator-between-entries=and
+> /tool sniffer set filter-interface=bridge filter-port=53
+> ```
+>
+> Con `and` el sniffer espeja solo lo que cumple **todas** las condiciones. Comprueba
+> siempre el resultado en el servidor (`journalctl -u tzsp-decap -f`): si `rx` sube en
+> vez de bajar, sigues en `or`.
+
 **Opcion B: selectivo por LISTA DE IPs** (`address-list` + `action=sniff-tzsp` en
 mangle). Es la forma recomendada en un ISP: mantienes una lista con los CPE que
 quieres vigilar y una sola regla los espeja a todos. Anadir o quitar un cliente es
@@ -610,6 +626,9 @@ router o en el firewall (UDP 37008).
 > CPU del MikroTik (`/system resource monitor`) y `kernel_drops` en `stats.log`.
 > El desencapsulador en Python aguanto ~32k pps (~100-150 Mbps) sin descartes en la
 > prueba real; para varios cientos de Mbps conviene el espejo por hardware.
+>
+> Si el sensor **no** esta en la misma red que el router (VPN, tunel, enlace de ultimo
+> milla), ese volumen se lo come el enlace: ver [Sensor remoto](#3-sensor-remoto-espejar-sin-comerse-el-enlace).
 
 **Opcion C: mirror por hardware** (switch-chip, sin CPU del router). Requiere un
 puerto libre en el MikroTik cableado a una NIC dedicada del servidor (en Proxmox,
@@ -623,5 +642,94 @@ sino del chip switch del equipo:
 # CRS3xx / RB5009 (por puerto)
 /interface ethernet switch port set ether2 mirror-ingress=yes mirror-egress=yes mirror-ingress-target=ether5 mirror-egress-target=ether5
 ```
+
+### 3. Sensor remoto: espejar sin comerse el enlace
+
+El espejo pensado para un cable de 1 Gbps no cabe en un tunel. Caso medido: un sensor al
+otro lado de una VPN con el espejo completo de un bridge = **~300 Mbps** permanentes por
+el tunel, para un trafico de clientes que era una fraccion de eso (TZSP **duplica** todo
+lo que espejas y ademas lo encapsula). El enlace se saturo antes que el sensor.
+
+La salida no es comprimir ni encolar: es **espejar menos, y espejar lo que sirve**.
+
+#### El filtro que de verdad importa: `connection-bytes`
+
+Suricata detecta casi todo en el **arranque** de cada conexion: el SYN (escaneo,
+fuerza bruta), el handshake TLS con el SNI y el JA3 (C2, botnet), la cabecera HTTP
+(user-agent, host, URI) y las consultas DNS. Lo que viene despues es **payload**, y si la
+conexion es TLS ni siquiera se puede inspeccionar: son megabytes que cruzan el tunel para
+que Suricata los descarte.
+
+Espejar solo los primeros ~10 kB de cada conexion baja el trafico **un orden de magnitud**
+sin perder deteccion de escaneo, botnet, fuerza bruta, C2 ni DNS:
+
+```routeros
+/ip firewall mangle
+add chain=prerouting src-address-list=ids-vigilados connection-bytes=0-10000 \
+    action=sniff-tzsp sniff-target=IP_SURICATA sniff-target-port=37008 \
+    passthrough=yes comment="espejo IDS: solo el arranque de cada conexion"
+```
+
+`connection-bytes=0-10000` cuenta los bytes **acumulados de la conexion**: la regla deja
+de hacer match cuando esa conexion pasa de 10 kB, y el resto de la descarga ya no se
+espeja. Sube el limite si quieres mas margen; bajarlo de ~4 kB empieza a cortar handshakes
+TLS largos (cadenas de certificados).
+
+El **DNS va aparte, con su propia regla y sin `connection-bytes`**: es diminuto y es donde
+mas se detecta (dominios de C2, DGA, tunneling), asi que se espeja entero:
+
+```routeros
+/ip firewall mangle
+add chain=prerouting src-address-list=ids-vigilados protocol=udp dst-port=53 \
+    action=sniff-tzsp sniff-target=IP_SURICATA sniff-target-port=37008 \
+    passthrough=yes comment="espejo IDS: DNS completo, pesa nada y detecta mucho"
+```
+
+**Lo que se pierde** con esto es la inspeccion de contenido a mitad de una transferencia:
+el ejecutable que baja en el byte 900000 de un HTTP sin cifrar, la firma que dispara
+dentro del cuerpo de una respuesta larga. En un ISP con TLS en casi todo eso ya era ciego;
+en un enlace remoto, cambiarlo por poder ver **todas** las conexiones es el trato bueno.
+
+#### Fragmentacion sobre el tunel
+
+TZSP encapsula la **trama entera** y le suma su cabecera. Sobre un tunel con MTU 1400 una
+trama de 1514 bytes no cabe: se fragmenta, y lo que era un paquete pasan a ser dos. El
+conteo de paquetes se duplica, el CPU del router sube y cualquier fragmento que se pierda
+invalida la trama completa (el receptor la cuenta pero Suricata ya no la reensambla).
+
+Con `connection-bytes` el problema casi desaparece solo, porque **los paquetes grandes son
+justo los de payload**: lo que queda del espejo son SYN, handshakes y consultas DNS, que
+son paquetes pequenos y caben sin fragmentar.
+
+#### El TZSP es UDP: lo que no cabe no se encola, se pierde
+
+Esto es lo que hace peligroso el espejo remoto. TZSP va sobre UDP sin retransmision ni
+control de flujo: cuando el enlace se congestiona el espejo **no se retrasa, desaparece**.
+Y desaparece en silencio: Suricata ve medio handshake, no reensambla la sesion y
+simplemente **no alerta**. Un IDS que no alerta se parece mucho a una red limpia.
+
+Por eso la regla es **reducir en origen** (en el MikroTik, con `connection-bytes` y las
+listas) y **no poner una cola que limite el espejo**. Una `queue` sobre el trafico TZSP no
+arregla nada: convierte el exceso de trafico en **puntos ciegos silenciosos**, que es
+exactamente el fallo que no se detecta mirando graficas. Si hay que elegir, es mejor
+vigilar menos IPs bien que todas a medias: quita CPE de `ids-vigilados` hasta que el
+espejo entre holgado en el enlace.
+
+Senales de que ya te estas pasando: `rx` en `journalctl -u tzsp-decap` mucho menor que los
+paquetes que el router dice espejar, alertas que aparecen a rachas, o Suricata sin registrar
+casi ninguna sesion TLS completa.
+
+#### La opcion de fondo: llevar el sensor, no los paquetes
+
+Si el sitio remoto es un nodo estable, lo correcto no es afinar el espejo: es **poner un
+sensor en el sitio del cliente** y que por el enlace viaje **solo el reporte**, no los
+paquetes. El instalador es el mismo one-liner, y el nodo remoto puede espejar a su propio
+sensor por la LAN local, sin tunel de por medio.
+
+Lo que cambia en numeros: en vez de cientos de Mbps constantes, el enlace lleva **kilobytes
+por hora** (las alertas, el informe diario por Telegram, el HTML si lo quieres fuera). Y lo
+que cambia en fiabilidad es mas importante: si el enlace se cae un rato, el sensor local
+sigue capturando y detectando; con espejo remoto, un enlace caido es un IDS ciego con el
+servicio en verde.
 
 > El envio a Loki/Grafana se agrega como modulo cuando se necesite.

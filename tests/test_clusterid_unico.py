@@ -29,6 +29,15 @@ def check(d, c, e=""):
         fallos += 1
 
 
+def purgador():
+    """El trozo REAL que quita de af-packet los espejos que ya no existen."""
+    ini = SRC.index("# --- PURGA:")
+    fin = SRC.index("# PURGA-FIN", ini)
+    m = re.search(r"<<'PY'\n(.*?)\nPY\n", SRC[ini:fin], re.S)
+    assert m, "no encontre la purga de espejos en el instalador"
+    return m.group(1)
+
+
 def renumerador():
     """El trozo REAL del instalador, no una copia: si alguien lo cambia, esto lo corre."""
     ini = SRC.index("# --- CLUSTERID:")
@@ -96,6 +105,30 @@ def main():
     # --- idempotente: correrlo dos veces no reasigna nada ---
     uno = correr(yaml_con([("ids-mon", 98), ("ids-mon2", 98)]))
     check("pasarlo dos veces deja el mismo resultado", ids(correr(uno)) == ids(uno))
+
+    # --- purga: un espejo que ya no existe no puede quedarse en el yaml ---------
+    # Si -m baja de dos origenes a uno, tzsp-decap deja de crear esa veth. Con el
+    # bloque huerfano Suricata no arranca y la caja se queda sin analizar NADA,
+    # mientras el espejo bueno sigue entrando: parece viva y esta ciega.
+    d = tempfile.mkdtemp()
+    ruta = os.path.join(d, 'suricata.yaml')
+    def purgar(vivos, contenido=None):
+        with open(ruta, 'w', encoding='utf-8') as f:
+            f.write(contenido or yaml_con([('ids-mon', 98), ('ids-mon2', 99)]))
+        subprocess.run([sys.executable, '-c', purgador(), ruta, vivos], check=True,
+                       stdout=subprocess.DEVNULL)
+        return open(ruta, encoding='utf-8').read()
+
+    txt = purgar('ids-mon')
+    check('el espejo que ya no existe sale del yaml', 'ids-mon2' not in txt, txt)
+    check('el que sigue vivo se queda', '- interface: ids-mon\n' in txt, txt)
+    check('la interfaz default no se toca', '- interface: default' in txt, txt)
+    check('se lleva las propiedades del bloque, no solo la cabecera',
+          txt.count('cluster-type') == 1, txt)
+
+    antes = yaml_con([('ids-mon', 98), ('ids-mon2', 99)])
+    check('si los dos siguen vivos no se toca nada',
+          purgar('ids-mon ids-mon2', antes) == antes)
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

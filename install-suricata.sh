@@ -13599,6 +13599,35 @@ if cambios:
 PY
   # CLUSTERID-FIN
 
+  # --- PURGA: fuera los espejos que ya no existen ---------------------------------
+  # Al bajar el numero de origenes de -m, tzsp-decap deja de crear esas veth pero su
+  # bloque af-packet segui­a en el yaml. Suricata intenta abrir una interfaz que no
+  # existe, falla al arrancar y la caja se queda sin analizar NADA, con el espejo
+  # bueno entrando igual: el sensor parece vivo y esta ciego. Paso en produccion.
+  python3 - "$CFG" "$TZSP_MONS" <<'PY'
+import re, sys
+cfg, vivos = sys.argv[1], set(sys.argv[2].split())
+lineas = open(cfg, encoding="utf-8").read().split("\n")
+salida, borrando, fuera = [], None, []
+for l in lineas:
+    m = re.match(r"\s*-\s*interface:\s*(\S+)", l)
+    if m:
+        nombre = m.group(1)
+        borrando = nombre if (nombre.startswith("ids-mon") and nombre not in vivos) else None
+        if borrando:
+            fuera.append(borrando)
+    elif borrando and not re.match(r"\s*-\s", l) and l.strip():
+        continue          # las propiedades del bloque que se va
+    elif borrando:
+        borrando = None   # empieza otra entrada o una linea en blanco
+    if not borrando:
+        salida.append(l)
+if fuera:
+    open(cfg, "w", encoding="utf-8").write("\n".join(salida))
+    print("af-packet: fuera los espejos que ya no existen: " + ", ".join(fuera))
+PY
+  # PURGA-FIN
+
   # En modo espejo, Suricata captura SOLO ${TZSP_MON} (veth estable que crea tzsp-decap).
   # El bloque af-packet de la NIC fisica (${IFACE}) se ELIMINA: su unico valor era el
   # trafico de gestion del propio sensor, y ademas ataba a Suricata al NOMBRE de la NIC.

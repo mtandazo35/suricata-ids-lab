@@ -6128,7 +6128,18 @@ def barrido_alto_rapido(maxbytes=4_000_000):
     for k in [k for k, v in _FAST_LAST.items() if ahora - v > 3600]:
         _FAST_LAST.pop(k, None)
 
-# --- log de actividad unificado (accesos + acciones de cuarentena) + retencion ---
+# --- registro de accesos al panel + retencion -------------------------------------
+#
+# Antes esto juntaba los accesos con las acciones de cuarentena, y la pagina se llamaba
+# "Log de actividad". El problema: mk_log() ya escribe cada cuarentena TAMBIEN en la
+# bitacora, y los logins correctos tambien van a las dos. Resultado: dos pestanas que
+# ensenaban casi lo mismo y nadie sabia cual mirar.
+#
+# Ahora cada una responde una sola pregunta:
+#   Accesos  -> quien intento entrar al panel (incluidos los fallos y los bloqueos)
+#   Bitacora -> que se hizo una vez dentro
+# El unico dato que solo vive aqui son los intentos FALLIDOS: la bitacora solo anota
+# los logins que entraron, asi que una fuerza bruta contra el panel no se ve ahi.
 LOG_RETENCION_DIAS = 15   # los registros mas viejos que esto se borran solos
 
 def _ev_ts(s):
@@ -6145,25 +6156,13 @@ def _cola_lineas(path, nbytes=200000):
     except OSError:
         return []
 
-def actividad_reciente(n=800):
-    """Eventos recientes (mas nuevo primero): accesos al panel + acciones de cuarentena.
-    Devuelve tuplas (ts, tipo, ip, usuario, accion, detalle)."""
+def accesos_recientes(n=800):
+    """Intentos de entrar al panel, mas nuevo primero: (ts, ip, usuario, estado)."""
     evs = []
-    for l in _cola_lineas(LOGIN_LOG):                      # accesos (TAB separado)
+    for l in _cola_lineas(LOGIN_LOG):                      # TAB separado
         p = l.split("\t")
         if len(p) >= 4:
-            evs.append((p[0], "Acceso", p[1], p[2], p[3], ""))
-    for l in _cola_lineas(MK_LOG):                         # cuarentena (espacio separado)
-        t = l.split(" ")
-        if len(t) >= 5:
-            ts = t[0] + " " + t[1]; accion = t[2]; ip = t[3]
-            quien = ""; det = []
-            for x in t[4:]:
-                if x.startswith("por="):
-                    quien = x[4:]
-                else:
-                    det.append(x)
-            evs.append((ts, "Cuarentena", ip, quien, accion, " ".join(det)))
+            evs.append((p[0], p[1], p[2], p[3]))
     evs.sort(key=lambda e: e[0], reverse=True)
     return evs[:n]
 
@@ -8713,8 +8712,8 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "Agregala (o un rango que la incluya) antes de restringir, o quedarias fuera.</p>")
         card_acceso = (
             "<section class=card><h2>Accesos y seguridad</h2>"
-            "<p class=sub2>Controla quien puede entrar al panel. El historial de intentos esta en la pestana "
-            "<b>Log</b>.</p>"
+            "<p class=sub2>Controla quien puede entrar al panel. El historial de intentos esta en "
+            "<b>Accesos</b>.</p>"
             "<h3 class=ch>IPs de confianza</h3>" + ctab + addc +
             "<h3 class=ch>IPs bloqueadas ahora</h3>" + blq +
             "</section>")
@@ -8823,7 +8822,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
              + _tile("mikrotik", "MikroTik", _IC_RTR, bool(card_mk))
              + _tile("feeds", "Reputacion", _IC_FEED, bool(card_feeds))
              + _tile("update", "Actualizaciones", _IC_DL, bool(card_update))
-             + _tile("log", "Log", _IC_LOG, es_admin)
+             + _tile("log", "Accesos", _IC_LOG, es_admin)
              + _tile("bitacora", "Bitacora", _IC_AUDIT, es_admin)
              + _tile("doc", "Documentacion", _IC_BOOK, True))
     hub = f"<div class=hubgrid>{tiles}</div>"
@@ -10024,10 +10023,18 @@ como <i>SSH</i> y <i>Escaneo de puertos</i>, no como fuerza bruta.</li>
 categorias.</li>
 </ul>
 
-<h2>Bitacora (auditoria)</h2>
-<p>Toda accion sensible queda registrada: accesos, envios/quitados de cuarentena, cambios de
-configuracion, usuarios y actualizaciones, con <b>quien, que, cuando y desde que IP</b>. Se ve en
-<b>Ajustes &rarr; Bitacora</b> (admin), con buscador y paginacion.</p>
+<h2>Accesos y Bitacora: que mira cada una</h2>
+<p>Son dos preguntas distintas y cada pestana responde una sola:</p>
+<ul>
+<li><b>Ajustes &rarr; Accesos</b>: <b>quien intento entrar</b> al panel. Los que entraron, los que
+fallaron la clave y las IPs bloqueadas por insistir. Es el unico sitio donde se ven los intentos
+<b>fallidos</b>, asi que es la pestana que hay que mirar ante una sospecha de fuerza bruta.</li>
+<li><b>Ajustes &rarr; Bitacora</b>: <b>que se hizo</b> una vez dentro. Envios y quitados de
+cuarentena, cambios de configuracion, altas y bajas de usuarios, actualizaciones y denuncias, con
+<b>quien, que, cuando y desde que IP</b>. Incluye las acciones automaticas (<code>por=auto</code>).</li>
+</ul>
+<p>Las dos tienen buscador y paginacion, y las dos se podan a los
+<b>15 dias</b> (<code>LOG_RETENCION_DIAS</code>).</p>
 
 <h2>Avisos por Telegram</h2>
 <p>Cuando un CPE va a cuarentena (a mano, por politica o por el barrido rapido) se manda un aviso por
@@ -10250,10 +10257,9 @@ re-ejecutando el instalador. Necesita salida a internet la primera vez.</li>
     return body
 
 def log_page(embed=False):
-    """Pestana Log: actividad del panel (accesos + acciones de cuarentena). Solo admin."""
+    """Pestana Accesos: quien intento entrar al panel. Solo admin."""
     esc = html.escape
-    _col = {"OK": "#12b886", "FAIL": "#e34948", "BLOQUEADO": "#eb6834",
-            "ENVIADO": "#b52a2a", "QUITADO": "#6b6a66"}
+    _col = {"OK": "#12b886", "FAIL": "#e34948", "BLOQUEADO": "#eb6834"}
     def estb(e):
         if e in _col:
             c = _col[e]
@@ -10265,25 +10271,21 @@ def log_page(embed=False):
             c = "#8a8a86"
         return (f'<span style="background:{c};color:#fff;font-size:10px;font-weight:700;'
                 f'padding:2px 8px;border-radius:20px">{esc(e)}</span>')
-    def tipob(t):
-        c = "#7048e8" if t == "Cuarentena" else "#2a78d6"
-        return (f'<span style="background:{c}1a;color:{c};font-size:10px;font-weight:700;'
-                f'padding:2px 8px;border-radius:20px">{esc(t)}</span>')
-    rec = actividad_reciente(800)
+    rec = accesos_recientes(800)
     if rec:
         rows = "".join(
-            f"<tr data-f=\"{esc((ts + ' ' + tipo + ' ' + ip + ' ' + us + ' ' + acc + ' ' + det).lower())}\">"
-            f"<td class=mono>{esc(ts)}</td><td>{tipob(tipo)}</td><td class=mono>{esc(ip)}</td>"
-            f"<td>{esc(us) or '<span style=color:#c3c2be>&mdash;</span>'}</td><td>{estb(acc)}</td>"
-            f"<td class=det>{esc(det)}</td></tr>"
-            for ts, tipo, ip, us, acc, det in rec)
-        cuerpo = ("<div class=twrap><table class=ut><thead><tr><th>Fecha (Ecuador)</th><th>Tipo</th><th>IP</th>"
-                  f"<th>Usuario</th><th>Accion</th><th>Detalle</th></tr></thead><tbody id=logbody>{rows}</tbody></table></div>"
+            f"<tr data-f=\"{esc((ts + ' ' + ip + ' ' + us + ' ' + est).lower())}\">"
+            f"<td class=mono>{esc(ts)}</td><td class=mono>{esc(ip)}</td>"
+            f"<td>{esc(us) or '<span style=color:#c3c2be>&mdash;</span>'}</td>"
+            f"<td>{estb(est)}</td></tr>"
+            for ts, ip, us, est in rec)
+        cuerpo = ("<div class=twrap><table class=ut><thead><tr><th>Fecha (Ecuador)</th><th>IP</th>"
+                  f"<th>Usuario</th><th>Resultado</th></tr></thead><tbody id=logbody>{rows}</tbody></table></div>"
                   "<div class=pager><button id=lprev type=button onclick=lprev()>&larr; Anterior</button>"
                   "<span id=lpi></span>"
                   "<button id=lnext type=button onclick=lnext()>Siguiente &rarr;</button></div>")
     else:
-        cuerpo = "<p class=sub2>Sin actividad registrada todavia.</p>"
+        cuerpo = "<p class=sub2>Todavia no hay ningun intento de acceso registrado.</p>"
     css = (
         BASE_CSS +
         "body{background:#f6f6f4}main{max-width:1000px;padding:22px 22px 40px}"
@@ -10317,11 +10319,13 @@ def log_page(embed=False):
     return ("<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>"
             "<meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>"
             f"<style>{css}</style></head><body>" + ("" if embed else nav("/log")) +
-            "<main><h1>Log de actividad</h1>"
-            "<p class=sub2>Accesos al panel y acciones de cuarentena (quien envio o quito una IP). "
+            "<main><h1>Accesos al panel</h1>"
+            "<p class=sub2>Cada intento de entrar: los que entraron, los que fallaron la clave y "
+            "las IPs bloqueadas por insistir. Lo que se <b>hace</b> dentro del panel (cuarentenas, "
+            "configuracion, usuarios) esta en <b>Bitacora</b>. "
             f"Los registros de mas de {LOG_RETENCION_DIAS} dias se borran solos.</p>"
-            "<section class=card><div class=uhead><h2 style='font-size:15px;margin:0'>Ultima actividad</h2>"
-            "<input class=search id=lsearch placeholder='Buscar IP, usuario, accion...' oninput='lfiltrar()'></div>"
+            "<section class=card><div class=uhead><h2 style='font-size:15px;margin:0'>Ultimos intentos</h2>"
+            "<input class=search id=lsearch placeholder='Buscar IP o usuario...' oninput='lfiltrar()'></div>"
             + cuerpo + "</section></main>" + script + "</body></html>")
 
 def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver=""):

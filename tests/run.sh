@@ -85,6 +85,7 @@ correr "abuso saliente: contadores por dia y tendencia" "$PY" tests/test_abuso_s
 correr "publicas del cliente: vigilancia y cruce con el abonado" "$PY" tests/test_publicas_mitigacion.py
 correr "ninguna ruta del panel revienta por un nombre sin definir" "$PY" tests/test_rutas_get.py
 correr "una pagina que revienta da 500 explicado, no 502 mudo" "$PY" tests/test_error_500.py
+correr "Accesos y Bitacora: cada una responde una pregunta" "$PY" tests/test_accesos_bitacora.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

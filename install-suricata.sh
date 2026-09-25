@@ -7545,6 +7545,7 @@ def refrescador():
     ult_diag = 0.0
     ult_forzado = 0.0   # ultima regeneracion pedida a mano/por cambios (ver REGEN_MIN_SECS)
     ult_cond = 0.0      # ultimo reporte de conducta (varios dias)
+    ult_hist = 0.0      # ultima ingesta al historial persistente
     while True:
         global FORCE_REGEN
         if time.time() - ult_fast > 60:        # cada ~60s: enviar YA los ALTO/infeccion confirmada
@@ -7579,6 +7580,14 @@ def refrescador():
             try: vigilar_dnsbl()     # y las listas negras, que son las que de verdad banean
             except Exception as _e: sys.stderr.write("vigilancia dnsbl: %s\n" % _e)
             ult_pub = time.time()
+        # historial: barato porque es incremental (solo lo nuevo desde la marca).
+        # Va ANTES del informe para que el informe lea una base ya al dia.
+        if time.time() - ult_hist > HIST_CADA:
+            ult_hist = time.time()
+            try:
+                hist_ingerir()
+            except Exception as _e:
+                sys.stderr.write("historial: %s\n" % _e)
         # reporte de varios dias: caro (recorre los rotados), asi que espaciado y
         # con nice; el boton de la pestana lo adelanta poniendo FORCE_CONDUCTA
         if FORCE_CONDUCTA or (time.time() - ult_cond > CONDUCTA_CADA):
@@ -7589,7 +7598,10 @@ def refrescador():
             except (OSError, AttributeError):
                 pass
             try:
-                guardar_conducta(conducta_recolectar())
+                rep_ = hist_conducta()
+                if not rep_.get("filas"):
+                    rep_ = conducta_recolectar()   # base aun vacia: primera vez
+                guardar_conducta(rep_)
             except Exception as _e:
                 sys.stderr.write("reporte de conducta: %s\n" % _e)
         nr = newest_report()
@@ -10647,6 +10659,194 @@ def _cd_podar(d, tope):
         c = d[k]
         if len(c) > tope:
             d[k] = dict(sorted(c.items(), key=lambda kv: -kv[1])[:tope])
+
+# --- Historial persistente ---------------------------------------------------------
+# Hasta aqui todo el historico dependia de los logs crudos: eve.json y dns.json. Eso
+# tiene dos agujeros. logrotate los parte y borra los viejos, asi que la historia dura
+# lo que dure el disco; y el informe de varios dias tenia que releerlos ENTEROS en cada
+# generacion, gigabytes cada vez. Con los acumulados en una base, el reinicio y la
+# rotacion dejan de importar: lo ya contado esta contado.
+#
+# Dos granularidades a proposito: el resumen por HORA (barato, 1 fila por CPE y hora)
+# da el detalle fino de las ultimas 24 h; el detalle por DIA (firmas, destinos, puertos,
+# dominios) guarda solo el top de cada CPE, que es lo unico que se mira, y evita que la
+# base crezca con la cola larga de destinos que nadie va a leer.
+HIST_DB = "/var/lib/suricata-panel/historial.db"
+HIST_DIAS = 30        # cuanto se conserva (el informe pide 3; sobra margen)
+HIST_TOP = 8          # cuantas claves por tipo y dia se guardan de cada CPE
+HIST_CADA = 300       # cada cuanto se ingiere lo nuevo, en segundos
+
+def _hist_con():
+    """Abre la base creando el esquema si hace falta. WAL para que ingerir no bloquee
+    la lectura del panel."""
+    import sqlite3
+    os.makedirs(os.path.dirname(HIST_DB), exist_ok=True)
+    c = sqlite3.connect(HIST_DB, timeout=20)
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA synchronous=NORMAL")
+    c.executescript("""
+      CREATE TABLE IF NOT EXISTS resumen(
+        hora INTEGER NOT NULL,          -- epoch truncado a la hora
+        cpe  TEXT    NOT NULL,
+        alertas INTEGER NOT NULL DEFAULT 0,
+        eventos INTEGER NOT NULL DEFAULT 0,
+        bytes   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(hora, cpe));
+      CREATE TABLE IF NOT EXISTS detalle(
+        dia  TEXT NOT NULL,             -- AAAA-MM-DD
+        cpe  TEXT NOT NULL,
+        tipo TEXT NOT NULL,             -- firma | destino | puerto | dominio
+        clave TEXT NOT NULL,
+        n INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(dia, cpe, tipo, clave));
+      CREATE TABLE IF NOT EXISTS estado(clave TEXT PRIMARY KEY, valor TEXT);
+      CREATE INDEX IF NOT EXISTS i_resumen_hora ON resumen(hora);
+      CREATE INDEX IF NOT EXISTS i_detalle_dia  ON detalle(dia);
+    """)
+    return c
+
+def hist_marca(c, nueva=None):
+    """Hasta que instante se ha ingerido ya. Es lo que hace que un reinicio no
+    reprocese ni pierda: se sigue desde donde quedo."""
+    if nueva is None:
+        f = c.execute("SELECT valor FROM estado WHERE clave='ultimo_ts'").fetchone()
+        return float(f[0]) if f else 0.0
+    c.execute("INSERT INTO estado(clave,valor) VALUES('ultimo_ts',?) "
+              "ON CONFLICT(clave) DO UPDATE SET valor=excluded.valor", (str(nueva),))
+    return nueva
+
+def hist_ingerir(limite_lineas=4000000):
+    """Mete en la base lo ocurrido desde la ultima marca. Incremental: solo lee las
+    lineas nuevas, asi que cuesta lo mismo lo lleve corriendo un dia o un mes."""
+    c = _hist_con()
+    try:
+        desde = hist_marca(c)
+        if not desde:
+            desde = time.time() - HIST_DIAS * 86400
+        res, det, tope, leidos = {}, {}, desde, 0
+        archivos = sorted(set(glob.glob(f"{LOGDIR}/eve.json*") + glob.glob(f"{LOGDIR}/dns.json*")))
+        for ruta in archivos:
+            try:
+                if os.path.getmtime(ruta) < desde:
+                    continue
+                fh = _cd_abrir(ruta)
+            except OSError:
+                continue
+            with fh:
+                for linea in fh:
+                    if leidos >= limite_lineas:
+                        break
+                    leidos += 1
+                    try:
+                        ev = json.loads(linea)
+                    except ValueError:
+                        continue
+                    ip = ev.get("src_ip") or ""
+                    if not ip or not es_mi_cpe(ip):
+                        continue
+                    ts = _cd_ts(ev.get("timestamp", ""))
+                    if not ts or ts <= desde:
+                        continue
+                    tope = max(tope, ts)
+                    hora = int(ts - (ts % 3600))
+                    dia = time.strftime("%Y-%m-%d", time.localtime(ts))
+                    r = res.setdefault((hora, ip), [0, 0, 0])
+                    r[1] += 1
+                    tipo = ev.get("event_type")
+                    if tipo == "alert":
+                        r[0] += 1
+                        fir = ((ev.get("alert") or {}).get("signature") or "")[:90]
+                        if fir:
+                            det[(dia, ip, "firma", fir)] = det.get((dia, ip, "firma", fir), 0) + 1
+                    elif tipo == "dns":
+                        dom = ((ev.get("dns") or {}).get("rrname") or "")[:80]
+                        if dom:
+                            det[(dia, ip, "dominio", dom)] = det.get((dia, ip, "dominio", dom), 0) + 1
+                    r[2] += int((ev.get("flow") or {}).get("bytes_toserver") or 0)
+                    dst = ev.get("dest_ip")
+                    if dst:
+                        det[(dia, ip, "destino", dst)] = det.get((dia, ip, "destino", dst), 0) + 1
+                    dp = ev.get("dest_port")
+                    if dp:
+                        k = (dia, ip, "puerto", str(dp))
+                        det[k] = det.get(k, 0) + 1
+        if not res and not det:
+            hist_marca(c, tope)
+            c.commit()
+            return 0
+        # se ACUMULA sobre lo que ya hubiera: una hora puede ingerirse en varios trozos
+        c.executemany(
+            "INSERT INTO resumen(hora,cpe,alertas,eventos,bytes) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(hora,cpe) DO UPDATE SET alertas=alertas+excluded.alertas,"
+            "eventos=eventos+excluded.eventos, bytes=bytes+excluded.bytes",
+            [(h, ip, v[0], v[1], v[2]) for (h, ip), v in res.items()])
+        c.executemany(
+            "INSERT INTO detalle(dia,cpe,tipo,clave,n) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(dia,cpe,tipo,clave) DO UPDATE SET n=n+excluded.n",
+            [(d, ip, t, k, n) for (d, ip, t, k), n in det.items()])
+        hist_marca(c, tope)
+        c.commit()
+        hist_podar(c)
+        return len(res)
+    finally:
+        c.close()
+
+def hist_podar(c=None):
+    """Borra lo viejo y recorta la cola larga del detalle: de cada CPE, dia y tipo se
+    queda el top. Sin esto, un CPE que habla con 200.000 destinos llena la base."""
+    propia = c is None
+    c = c or _hist_con()
+    try:
+        corte_h = time.time() - HIST_DIAS * 86400
+        corte_d = time.strftime("%Y-%m-%d", time.localtime(corte_h))
+        c.execute("DELETE FROM resumen WHERE hora < ?", (corte_h,))
+        c.execute("DELETE FROM detalle WHERE dia < ?", (corte_d,))
+        c.execute("""DELETE FROM detalle WHERE rowid NOT IN (
+                       SELECT rowid FROM detalle d2 WHERE d2.dia=detalle.dia
+                         AND d2.cpe=detalle.cpe AND d2.tipo=detalle.tipo
+                       ORDER BY n DESC LIMIT ?)""", (HIST_TOP,))
+        c.commit()
+    finally:
+        if propia:
+            c.close()
+
+def hist_conducta(dias=None):
+    """El informe, leido de la base en vez de releer gigabytes de log."""
+    dias = dias or CONDUCTA_DIAS
+    c = _hist_con()
+    try:
+        corte = time.time() - dias * 86400
+        filas = {}
+        for cpe, al, ev_, by, pri, ult, hs in c.execute(
+                "SELECT cpe, SUM(alertas), SUM(eventos), SUM(bytes), MIN(hora), MAX(hora),"
+                " COUNT(DISTINCT date(hora,'unixepoch','localtime')) FROM resumen "
+                "WHERE hora >= ? GROUP BY cpe", (corte,)):
+            filas[cpe] = {"ip": cpe, "alertas": al or 0, "eventos": ev_ or 0,
+                          "bytes": by or 0, "dias": hs or 0,
+                          "primera": int(pri or 0), "ultima": int((ult or 0) + 3599),
+                          "destinos": [], "puertos": [], "firmas": [], "dominios": [],
+                          "destinos_n": 0, "puertos_n": 0}
+        corte_d = time.strftime("%Y-%m-%d", time.localtime(corte))
+        acc = {}
+        for cpe, tipo, clave, n in c.execute(
+                "SELECT cpe, tipo, clave, SUM(n) FROM detalle WHERE dia >= ? "
+                "GROUP BY cpe, tipo, clave", (corte_d,)):
+            acc.setdefault(cpe, {}).setdefault(tipo, {})[clave] = n
+        for cpe, f in filas.items():
+            t = acc.get(cpe, {})
+            f["firmas"] = _cd_top(t.get("firma", {}))
+            f["destinos"] = _cd_top(t.get("destino", {}))
+            f["puertos"] = _cd_top(t.get("puerto", {}))
+            f["dominios"] = _cd_top(t.get("dominio", {}))
+            f["destinos_n"] = len(t.get("destino", {}))
+            f["puertos_n"] = len(t.get("puerto", {}))
+        out = sorted(filas.values(), key=lambda f: (-f["alertas"], -f["eventos"]))
+        lineas = c.execute("SELECT COUNT(*) FROM resumen WHERE hora >= ?",
+                           (corte,)).fetchone()[0]
+        return {"generado": int(time.time()), "dias": dias, "lineas": lineas,
+                "cpes": len(out), "filas": out, "fuente": "base"}
+    finally:
+        c.close()
 
 def conducta_recolectar(dias=CONDUCTA_DIAS):
     """Recorre eve.json/dns.json y sus rotados y resume lo que hizo cada CPE.

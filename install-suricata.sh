@@ -11291,6 +11291,17 @@ _CD_CSS = """<style>
 .mini .vl{flex:0 0 62px;font-size:12px}
 .bars .vl,.mini .vl{color:var(--tinta2);font-variant-numeric:tabular-nums}
 
+.pager{display:flex;flex-wrap:wrap;align-items:center;gap:10px;justify-content:space-between;
+       margin:16px 0;padding:10px 14px;background:var(--fondo);border:1px solid var(--linea);
+       border-radius:11px}
+.pgc{color:var(--suave);font-size:13px;font-variant-numeric:tabular-nums}
+.pgn{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.pg{display:inline-block;min-width:32px;text-align:center;padding:5px 9px;border-radius:8px;
+    font-size:13px;font-weight:600;color:var(--tinta2);text-decoration:none;
+    border:1px solid transparent;font-variant-numeric:tabular-nums}
+a.pg:hover{border-color:var(--linea);background:color-mix(in srgb,var(--azul) 7%, transparent)}
+.pg.act{background:var(--azul);color:#fff}
+.pgsep{color:var(--suave);padding:0 2px}
 .tecnico{margin-top:12px;border-top:1px dashed var(--linea);padding-top:9px}
 .tecnico summary{color:var(--suave);font-size:12px;font-weight:500}
 .tecnico .kv{font-size:12px;color:var(--suave);line-height:1.75;word-break:break-all;
@@ -11309,7 +11320,7 @@ _CD_CSS = """<style>
 @media print{
   /* El PDF lo pagina el navegador; aqui solo se le dice que es cada cosa en papel. */
   @page{size:A4;margin:14mm 12mm}
-  .nav,.acciones,.chips,.tecnico{display:none !important}
+  .nav,.acciones,.chips,.tecnico,.pager{display:none !important}
   body{background:#fff !important}
   .inf summary{display:none !important}
   /* overflow:hidden recorta el contenido al alto de la pagina y lo que sobra
@@ -11604,7 +11615,36 @@ def _cd_doc(cuerpo):
             + "</head><body>" + nav("/conducta") + "<main>" + cuerpo + "</main>"
             + _CD_JS + "</body></html>")
 
-def conducta_page(q="", msg=""):
+CONDUCTA_POR_PAGINA = 50
+
+def conducta_paginador(pag, paginas, q, total, desde, hasta):
+    """Navegacion entre paginas. Muestra los extremos y una ventana alrededor de la
+    actual: con 13 paginas caben todas, con 200 no, y una tira de 200 numeros es tan
+    inutil como no tener paginador."""
+    if paginas <= 1:
+        return ""
+    qs = ("&q=" + _up.quote(q)) if q else ""
+    def enlace(n, txt=None, cls=""):
+        if n == pag:
+            return "<span class='pg act'>%s</span>" % (txt or n)
+        return "<a class='pg %s' href='/conducta?p=%d%s'>%s</a>" % (cls, n, qs, txt or n)
+    nums, ultimo = [], 0
+    for n in range(1, paginas + 1):
+        if n <= 2 or n > paginas - 2 or abs(n - pag) <= 2:
+            if ultimo and n > ultimo + 1:
+                nums.append("<span class='pgsep'>&hellip;</span>")
+            nums.append(enlace(n))
+            ultimo = n
+    return ("<div class=pager><span class=pgc>%s&ndash;%s de %s abonados</span>"
+            "<span class=pgn>%s%s%s</span></div>"
+            % ("{:,}".format(desde).replace(",", "."),
+               "{:,}".format(hasta).replace(",", "."),
+               "{:,}".format(total).replace(",", "."),
+               enlace(max(1, pag - 1), "&lsaquo; anterior") if pag > 1 else "",
+               "".join(nums),
+               enlace(min(paginas, pag + 1), "siguiente &rsaquo;") if pag < paginas else ""))
+
+def conducta_page(q="", msg="", pag=1):
     """Informe por categoria de abuso: primero lo que hay que cortar, al final el ruido."""
     esc = html.escape
     rep_ = cargar_conducta()
@@ -11627,6 +11667,15 @@ def conducta_page(q="", msg=""):
         f["_cat"] = conducta_categoria(f)
     orden = [c for c, _n, _cs, _l in CAT_CPE] + [CAT_OTROS[0]]
     porcat = {c: [f for f in filas if f["_cat"] == c] for c in orden}
+    # el informe ya va de lo mas grave a lo mas leve: se aplana en ese orden y se
+    # corta, asi la primera pagina es SIEMPRE lo que hay que mirar primero
+    plano = [f for c in orden for f in porcat[c]]
+    total_n = len(plano)
+    paginas = max(1, (total_n + CONDUCTA_POR_PAGINA - 1) // CONDUCTA_POR_PAGINA)
+    pag = max(1, min(int(pag or 1), paginas))
+    ini_i = (pag - 1) * CONDUCTA_POR_PAGINA
+    trozo = plano[ini_i:ini_i + CONDUCTA_POR_PAGINA]
+    enpag = {c: [f for f in trozo if f["_cat"] == c] for c in orden}
 
     dias = rep_.get("dias", CONDUCTA_DIAS)
     desde = time.strftime("%d/%m/%Y", time.localtime(time.time() - dias * 86400))
@@ -11666,12 +11715,13 @@ def conducta_page(q="", msg=""):
     fmt = lambda t: time.strftime("%d/%m %H:%M", time.localtime(t))
     secciones = []
     for c in orden:
-        grupo = porcat[c]
+        grupo = enpag[c]
         if not grupo:
             continue
+        total_cat = len(porcat[c])
         que, hacer, color, nivel = CONDUCTA_GUIA[c]
         tarjetas = []
-        for f in grupo[:120]:
+        for f in grupo:
             acts = _cd_agrupa(f.get("firmas"), traducir)
             puertos = _cd_agrupa(f.get("puertos"), nombre_puerto)
             doms = _cd_agrupa(f.get("dominios"))
@@ -11708,21 +11758,21 @@ def conducta_page(q="", msg=""):
             "<h3>%s <span class=nivel>%s</span> <span class=pill>%s</span></h3>"
             "<p class=qes>%s</p><p class=qhacer><b>Que hacer:</b> %s</p>%s%s%s</div>"
             % (c, color, esc(nombre_categoria(c)), esc(nivel),
-               "1 abonado" if len(grupo) == 1 else "%d abonados" % len(grupo),
+               ("1 abonado" if total_cat == 1 else "%d abonados" % total_cat)
+               + ("" if len(grupo) == total_cat else " &middot; %d en esta pagina" % len(grupo)),
                esc(que), esc(hacer), glosario_html(c, esc),
-               "".join(tarjetas),
-               ("<p class=sub2>Se muestran los primeros 120 de %d; el CSV los trae todos.</p>"
-                % len(grupo)) if len(grupo) > 120 else ""))
+               "".join(tarjetas), ""))
 
     if not secciones:
         secciones = ["<div class=card><p class=sub2>Ningun abonado coincide con el filtro.</p></div>"]
+    pgr = conducta_paginador(pag, paginas, q, total_n, ini_i + 1, ini_i + len(trozo))
     barras = conducta_barras(
         sorted(filas, key=lambda f: -f["alertas"]),
         "Abonados con mas actividad sospechosa",
         sub="Los %d primeros de los ultimos %d dias. Pasa el raton por una barra para "
             "ver de que tipo es." % (min(10, len(filas)), dias))
-    return _cd_doc("<div class=inf id=informe>" + cab + barras
-                   + "".join(secciones) + "</div>")
+    return _cd_doc("<div class=inf id=informe>" + cab + barras + pgr
+                   + "".join(secciones) + pgr + "</div>")
 
 def historico_page(dias_n=30):
     esc = html.escape
@@ -12998,8 +13048,12 @@ class H(BaseHTTPRequestHandler):
             return
         if path == "/conducta":
             _qc = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            try:
+                _pg = int(_qc.get("p", ["1"])[0])
+            except (ValueError, TypeError):
+                _pg = 1
             return self._html(conducta_page(q=_qc.get("q", [""])[0],
-                                            msg=_qc.get("msg", [""])[0]))
+                                            msg=_qc.get("msg", [""])[0], pag=_pg))
         if path == "/historico":
             _qh = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             try:

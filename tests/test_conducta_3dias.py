@@ -34,6 +34,7 @@ PIEZAS = ("CONDUCTA_FILE", "CONDUCTA_DIAS", "CONDUCTA_TOPE", "CONDUCTA_MAX",
           "CONDUCTA_GUIA", "conducta_categoria", "_CD_COLORES", "conducta_barras",
           "PUERTO_NOMBRE", "nombre_puerto", "_cd_agrupa", "_cd_minibarras",
           "_CD_CSS", "_CD_JS", "_CD_AZUL", "conducta_page", "_cd_doc",
+          "CONDUCTA_POR_PAGINA", "conducta_paginador",
           "GLOSARIO", "glosario_html", "CPE_INDICIOS", "CONFIANZA",
           "indicios_cpe", "confianza_cpe", "indicios_html")
 
@@ -241,6 +242,7 @@ def main():
     # numero, y ningun grafico en medio. Se ve raro pero no da ningun error.
     ns["BASE_CSS"] = "/*base*/"
     ns["nav"] = lambda activo="": "<div class=nav><a href=/conducta>Reporte</a></div>"
+    ns["_up"] = __import__("urllib.parse", fromlist=["parse"])
     ns["CONDUCTA_FILE"] = os.path.join(tmp, "conducta.json")
     ns["guardar_conducta"](r)
     pag = ns["conducta_page"]()
@@ -380,6 +382,62 @@ def main():
     check("la tabla dice que indicios se cumplen y cuales no",
           "Si" in tabla and "No" in tabla, "")
     check("y cierra con el nivel de confianza", "Nivel de confianza" in tabla)
+
+    # --- paginacion ------------------------------------------------------------------
+    # Con 600 abonados la pagina era inmanejable y el navegador se arrastraba.
+    check("se pagina de 50 en 50", ns["CONDUCTA_POR_PAGINA"] == 50,
+          ns["CONDUCTA_POR_PAGINA"])
+
+    check("con una sola pagina no se pinta paginador",
+          ns["conducta_paginador"](1, 1, "", 12, 1, 12) == "")
+
+    pg = ns["conducta_paginador"](3, 9, "", 450, 101, 150)
+    check("la pagina actual no es un enlace", "class='pg act'>3<" in pg, pg[:200])
+    check("se dice que rango se esta viendo", "101" in pg and "450" in pg, pg[:160])
+    check("hay anterior y siguiente en una pagina del medio",
+          "anterior" in pg and "siguiente" in pg)
+
+    p1 = ns["conducta_paginador"](1, 9, "", 450, 1, 50)
+    check("en la primera no se ofrece 'anterior'", "anterior" not in p1)
+    p9 = ns["conducta_paginador"](9, 9, "", 450, 401, 450)
+    check("ni 'siguiente' en la ultima", "siguiente" not in p9)
+
+    # con muchas paginas no se puede escupir la tira entera
+    muchas = ns["conducta_paginador"](50, 200, "", 10000, 2451, 2500)
+    check("con 200 paginas no se listan las 200", muchas.count("class='pg") < 20,
+          muchas.count("class='pg"))
+    check("se usan puntos suspensivos para saltar", "pgsep" in muchas)
+    check("los extremos siguen accesibles", ">1<" in muchas and ">200<" in muchas)
+
+    check("el filtro se conserva al cambiar de pagina",
+          "q=malo" in ns["conducta_paginador"](2, 5, "malo", 250, 51, 100))
+
+    # --- el corte real de la pagina ---------------------------------------------------
+    grande = {"generado": int(time.time()), "dias": 3, "lineas": 1, "cpes": 120,
+              "filas": [{"ip": "192.168.%d.%d" % (i // 250, i % 250), "alertas": 500 - i,
+                         "eventos": 500 - i, "bytes": 0, "dias": 1,
+                         "primera": int(time.time()), "ultima": int(time.time()),
+                         "destinos": [], "puertos": [], "firmas": [["ET SCAN x", 3]],
+                         "dominios": [], "destinos_n": 1, "puertos_n": 1}
+                        for i in range(120)]}
+    ns["guardar_conducta"](grande)
+    pg1 = ns["conducta_page"](pag=1)
+    pg3 = ns["conducta_page"](pag=3)
+    check("la primera pagina trae 50 fichas, no las 120",
+          pg1.count("<div class=cpe") == 50, pg1.count("<div class=cpe"))
+    check("la ultima trae el resto", pg3.count("<div class=cpe") == 20,
+          pg3.count("<div class=cpe"))
+    check("una pagina fuera de rango no revienta: se acota",
+          ns["conducta_page"](pag=999).count("<div class=cpe") == 20)
+    # el ranking de arriba es global y sale en todas las paginas, asi que hay que
+    # mirar las FICHAS, no la pagina entera
+    _ficha = "<span class=ip>192.168.0.0</span>"
+    check("la ficha de la mas ruidosa esta en la primera pagina, no en la ultima",
+          _ficha in pg1 and _ficha not in pg3, (_ficha in pg1, _ficha in pg3))
+    check("y el ranking general se ve desde cualquier pagina",
+          "192.168.0.0" in pg3)
+    check("el encabezado de categoria dice el total, no solo lo de la pagina",
+          "120 abonados" in pg1, "")
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

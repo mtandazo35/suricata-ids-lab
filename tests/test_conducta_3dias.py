@@ -35,7 +35,8 @@ PIEZAS = ("CONDUCTA_FILE", "CONDUCTA_DIAS", "CONDUCTA_TOPE", "CONDUCTA_MAX",
           "PUERTO_NOMBRE", "nombre_puerto", "_cd_agrupa", "_cd_minibarras",
           "_CD_CSS", "_CD_JS", "_CD_AZUL", "conducta_page", "_cd_doc",
           "CONDUCTA_POR_PAGINA", "conducta_paginador",
-          "VEREDICTOS", "veredicto_botones", "ruidosas_html",
+          "RUIDO_ALTO", "RUIDO_MEDIO", "RUIDO_MIN_CPES",
+          "firmas_ruidosas", "ruidosas_html",
           "GLOSARIO", "glosario_html", "CPE_INDICIOS", "CONFIANZA",
           "indicios_cpe", "confianza_cpe", "indicios_html")
 
@@ -251,10 +252,6 @@ def main():
     ns["BASE_CSS"] = "/*base*/"
     ns["nav"] = lambda activo="": "<div class=nav><a href=/conducta>Reporte</a></div>"
     ns["_up"] = __import__("urllib.parse", fromlist=["parse"])
-    # la base de veredictos vive en sqlite y tiene su propia prueba; aqui solo hace
-    # falta que la pagina se arme, asi que se devuelve "nada votado todavia"
-    ns["veredictos_de"] = lambda cpe: {}
-    ns["firmas_ruidosas"] = lambda minimo=3: []
     ns["CONDUCTA_FILE"] = os.path.join(tmp, "conducta.json")
     ns["guardar_conducta"](r)
     pag = ns["conducta_page"]()
@@ -455,6 +452,44 @@ def main():
           "192.168.0.0" in pg3)
     check("el encabezado de categoria dice el total, no solo lo de la pagina",
           "120 abonados" in pg1, "")
+
+    # --- ruido deducido, sin preguntarle a nadie ------------------------------------
+    # Una infeccion real no le pasa a la mitad de tus abonados el mismo dia; una regla
+    # mal afinada si. La fraccion de CPEs en los que dispara una firma mide eso sin que
+    # nadie tenga que ir marcando casillas.
+    def cpes(n, firma, desde=0):
+        return [{"ip": "192.168.9.%d" % (i + desde), "firmas": [[firma, 5]]}
+                for i in range(n)]
+
+    todos = cpes(20, "ET INFO dominio .top") + cpes(4, "ET MALWARE Botnet CnC", 100)
+    rs = {x["firma"]: x for x in ns["firmas_ruidosas"](todos)}
+    check("la firma que dispara en casi todos sale marcada",
+          rs["ET INFO dominio .top"]["nivel"] == "alto", rs.get("ET INFO dominio .top"))
+    check("con su porcentaje real de abonados",
+          rs["ET INFO dominio .top"]["pct"] == 83.3, rs["ET INFO dominio .top"]["pct"])
+    check("la que solo afecta a unos pocos NO se marca",
+          "ET MALWARE Botnet CnC" not in rs, list(rs))
+
+    medio = cpes(9, "ET SCAN generico") + cpes(21, "ET OTRA", 100)
+    rm = {x["firma"]: x for x in ns["firmas_ruidosas"](medio)}
+    check("entre el 25% y el 50% se marca para revisar, no como ruido seguro",
+          rm["ET SCAN generico"]["nivel"] == "medio", rm.get("ET SCAN generico"))
+
+    check("con pocos abonados el porcentaje no significa nada y no se publica",
+          ns["firmas_ruidosas"](cpes(3, "ET INFO x")) == [])
+    check("el umbral de 'pocos' es explicito", ns["RUIDO_MIN_CPES"] >= 5)
+    check("ruido seguro exige mas de la mitad", ns["RUIDO_ALTO"] >= 50)
+
+    h = ns["ruidosas_html"](todos)
+    check("el bloque dice cuantos abonados de cuantos", "de 24" in h, h[:220])
+    check("y no promete que sea un falso positivo: dice que hay que mirarlo",
+          "falso positivo" not in h.lower(), "")
+    check("sin firmas ruidosas no se pinta el bloque",
+          ns["ruidosas_html"](cpes(30, "ET UNICA")[:2]) == "")
+
+    # y lo que se quito: el sistema no pide confirmacion humana
+    check("no quedan botones de voto en la ficha",
+          "Falso positivo" not in pag and "Amenaza real" not in pag, "")
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

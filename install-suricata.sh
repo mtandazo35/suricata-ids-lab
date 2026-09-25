@@ -10884,19 +10884,8 @@ def _hist_con():
         n INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(dia, cpe, tipo, clave));
       CREATE TABLE IF NOT EXISTS estado(clave TEXT PRIMARY KEY, valor TEXT);
-      -- veredicto del operador sobre lo que el IDS dijo. La clave es (cpe, firma) para
-      -- que votar otra vez CORRIJA en vez de acumular: si alguien se equivoco, el dato
-      -- malo no puede quedarse contando para siempre.
-      CREATE TABLE IF NOT EXISTS veredicto(
-        cpe   TEXT NOT NULL,
-        firma TEXT NOT NULL,
-        valor TEXT NOT NULL,          -- amenaza | falso | permitido
-        quien TEXT NOT NULL DEFAULT '',
-        ts    INTEGER NOT NULL,
-        PRIMARY KEY(cpe, firma));
       CREATE INDEX IF NOT EXISTS i_resumen_hora ON resumen(hora);
       CREATE INDEX IF NOT EXISTS i_detalle_dia  ON detalle(dia);
-      CREATE INDEX IF NOT EXISTS i_veredicto_firma ON veredicto(firma);
     """)
     return c
 
@@ -11350,26 +11339,6 @@ a.pg:hover{border-color:var(--linea);background:color-mix(in srgb,var(--azul) 7%
 .fp.alto{background:color-mix(in srgb,#d03b3b 14%, transparent);color:#d03b3b}
 .fp.medio{background:color-mix(in srgb,#ec835a 16%, transparent);color:#b9591f}
 .fp.bajo{background:color-mix(in srgb,#0ca30c 14%, transparent);color:#0a7d0a}
-.vrow{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:7px 0;
-      border-top:1px solid var(--linea)}
-.vrow:first-child{border-top:0}
-.vfirma{flex:1 1 220px;min-width:0;font-size:13px;color:var(--tinta2);
-        overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.veredicto{display:flex;gap:6px;flex:0 0 auto}
-.veredicto .vf{margin:0}
-.vb{padding:5px 11px;border-radius:8px;border:1px solid var(--linea);background:var(--fondo);
-    color:var(--suave);font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;
-    transition:border-color .15s,color .15s,background .15s}
-.vb:hover{border-color:var(--v);color:var(--v)}
-.vb:focus-visible{outline:2px solid var(--v);outline-offset:2px}
-/* el ya votado se queda relleno: de un vistazo se ve que firmas estan calificadas y
-   cuales no, sin tener que abrir cada una */
-.vb.act{background:var(--v);border-color:var(--v);color:#fff}
-@media(max-width:700px){
-  .vrow{gap:6px}
-  .vfirma{flex-basis:100%}
-  .vb{padding:5px 9px;font-size:11.5px}
-}
 .tecnico{margin-top:12px;border-top:1px dashed var(--linea);padding-top:9px}
 .tecnico summary{color:var(--suave);font-size:12px;font-weight:500}
 .tecnico .kv{font-size:12px;color:var(--suave);line-height:1.75;word-break:break-all;
@@ -11389,8 +11358,7 @@ a.pg:hover{border-color:var(--linea);background:color-mix(in srgb,var(--azul) 7%
   /* El PDF lo pagina el navegador; aqui solo se le dice que es cada cosa en papel. */
   @page{size:A4;margin:14mm 12mm}
   /* en papel no hay nada que pulsar: navegacion, filtros y votos fuera */
-  .nav,.acciones,.chips,.tecnico,.pager,.veredicto{display:none !important}
-  .vrow{border-top:1px solid #e4e8ee}
+  .nav,.acciones,.chips,.tecnico,.pager{display:none !important}
   body{background:#fff !important}
   .inf summary{display:none !important}
   /* overflow:hidden recorta el contenido al alto de la pagina y lo que sobra
@@ -11714,109 +11682,57 @@ def conducta_paginador(pag, paginas, q, total, desde, hasta):
                "".join(nums),
                enlace(min(paginas, pag + 1), "siguiente &rsaquo;") if pag < paginas else ""))
 
-VEREDICTOS = (("amenaza", "Amenaza real", "#d03b3b"),
-              ("falso", "Falso positivo", "#6b7684"),
-              ("permitido", "Actividad permitida", "#0ca30c"))
+RUIDO_ALTO = 50    # % de abonados afectados a partir del cual la firma es ruido casi seguro
+RUIDO_MEDIO = 25   # a partir de aqui, conviene mirarla
+RUIDO_MIN_CPES = 8 # con menos abonados en el informe, el porcentaje no dice nada
 
-def veredicto_guardar(cpe, firma, valor, quien=""):
-    """Anota que opina el operador de una firma en un CPE concreto.
+def firmas_ruidosas(filas, minimo_cpes=RUIDO_MIN_CPES):
+    """Que firmas son ruido, deducido del propio reporte y sin preguntarle a nadie.
 
-    Por (cpe, firma) y no por firma a secas: la misma firma puede ser un ataque real en
-    un abonado y un falso positivo en otro, y mezclarlos daria un porcentaje que no
-    significa nada."""
-    if valor not in [v for v, _t, _c in VEREDICTOS] or not cpe or not firma:
-        return False
-    c = _hist_con()
-    try:
-        c.execute("INSERT INTO veredicto(cpe,firma,valor,quien,ts) VALUES(?,?,?,?,?) "
-                  "ON CONFLICT(cpe,firma) DO UPDATE SET valor=excluded.valor,"
-                  "quien=excluded.quien, ts=excluded.ts",
-                  (cpe[:80], firma[:120], valor, (quien or "")[:40], int(time.time())))
-        c.commit()
-        return True
-    finally:
-        c.close()
+    El razonamiento: una infeccion real no aparece en la mitad de tus abonados el mismo
+    dia. Una regla mal afinada, si. Asi que la fraccion de CPEs distintos en los que
+    dispara una firma es una medida directa de cuanto ruido mete, y no hace falta que
+    un humano vaya marcando casilla por casilla.
 
-def veredictos_de(cpe):
-    """Lo ya votado para ese CPE: {firma: valor}."""
-    c = _hist_con()
-    try:
-        return {f: v for f, v in c.execute(
-            "SELECT firma, valor FROM veredicto WHERE cpe=?", (cpe,))}
-    finally:
-        c.close()
-
-def firmas_ruidosas(minimo=3):
-    """Firmas ordenadas por cuanto se equivocan, con su porcentaje de falso positivo.
-
-    Es lo que convierte el feedback en algo accionable: una firma con 99% de FP no
-    deberia seguir subiendo el riesgo de nadie. Solo se listan las que tienen al menos
-    unos pocos votos; con uno o dos, el porcentaje es ruido."""
-    c = _hist_con()
-    try:
-        agg = {}
-        for firma, valor, n in c.execute(
-                "SELECT firma, valor, COUNT(*) FROM veredicto GROUP BY firma, valor"):
-            d = agg.setdefault(firma, {"amenaza": 0, "falso": 0, "permitido": 0})
-            d[valor] = n
-        out = []
-        for firma, d in agg.items():
-            total = sum(d.values())
-            if total < minimo:
-                continue
-            malos = d["falso"] + d["permitido"]
-            out.append({"firma": firma, "total": total, "amenaza": d["amenaza"],
-                        "falso": d["falso"], "permitido": d["permitido"],
-                        "fp_pct": round(100.0 * malos / total, 1)})
-        out.sort(key=lambda r: (-r["fp_pct"], -r["total"]))
-        return out
-    finally:
-        c.close()
-
-def veredicto_botones(clave, firma, ya, pag=1, q="", esc=None):
-    """Los tres botones de una firma, con el ya votado marcado."""
-    esc = esc or html.escape
+    No dice "esto es un falso positivo": dice "esto le pasa a tantos que, o tienes una
+    epidemia, o la regla es demasiado general". Las dos cosas hay que mirarlas."""
+    total = len(filas)
+    if total < minimo_cpes:
+        return []
+    cuenta = {}
+    for f in filas:
+        for fir, _n in (f.get("firmas") or []):
+            cuenta[fir] = cuenta.get(fir, 0) + 1
     out = []
-    for valor, texto, color in VEREDICTOS:
-        act = " act" if ya == valor else ""
-        out.append(
-            "<form method=post action='/conducta/veredicto' class=vf>"
-            "<input type=hidden name=cpe value='%s'><input type=hidden name=firma value='%s'>"
-            "<input type=hidden name=valor value='%s'><input type=hidden name=p value='%d'>"
-            "<input type=hidden name=q value='%s'>"
-            "<button class='vb%s' style='--v:%s' title='%s'>%s</button></form>"
-            % (esc(clave), esc(firma), valor, pag, esc(q), act, color,
-               esc(texto), esc(texto)))
-    return "<div class=veredicto>" + "".join(out) + "</div>"
+    for fir, cpes in cuenta.items():
+        pct = round(100.0 * cpes / total, 1)
+        if pct < RUIDO_MEDIO:
+            continue
+        out.append({"firma": fir, "cpes": cpes, "total": total, "pct": pct,
+                    "nivel": "alto" if pct >= RUIDO_ALTO else "medio"})
+    out.sort(key=lambda r: -r["pct"])
+    return out
 
-def ruidosas_html(esc=None, tope=8):
-    """Las firmas que mas se equivocan, segun lo que ha votado el operador.
-
-    Es lo que convierte el feedback en algo accionable: una firma con 95% de falsos
-    positivos no deberia seguir subiendo el riesgo de nadie, y hasta que no se mide no
-    hay forma de saber cual es."""
+def ruidosas_html(filas, esc=None, tope=8):
+    """Las firmas que disparan en demasiados abonados a la vez."""
     esc = esc or html.escape
-    try:
-        filas = firmas_ruidosas()[:tope]
-    except Exception:
-        return ""
-    if not filas:
+    rs = firmas_ruidosas(filas)[:tope]
+    if not rs:
         return ""
     cuerpo = "".join(
-        "<tr><td class=rf>%s</td><td class=num>%d</td><td class=num>%d</td>"
+        "<tr><td class=rf>%s</td><td class=num>%d de %d</td>"
         "<td class=num><span class='fp %s'>%s%%</span></td></tr>"
-        % (esc(traducir(r["firma"])), r["amenaza"], r["falso"] + r["permitido"],
-           "alto" if r["fp_pct"] >= 50 else ("medio" if r["fp_pct"] >= 20 else "bajo"),
-           ("%g" % r["fp_pct"]))
-        for r in filas)
-    return ("<div class='card bloque'><h3>Firmas que mas se equivocan</h3>"
-            "<p class=sub>Segun lo que habeis marcado en las fichas. Una firma con "
-            "muchos falsos positivos ensucia el riesgo de todos los abonados que la "
-            "disparan.</p>"
+        % (esc(traducir(r["firma"])), r["cpes"], r["total"],
+           "alto" if r["nivel"] == "alto" else "medio", ("%g" % r["pct"]))
+        for r in rs)
+    return ("<div class='card bloque'><h3>Firmas que aparecen en demasiados abonados</h3>"
+            "<p class=sub>Una infeccion real no le pasa a la mitad de tus clientes el "
+            "mismo dia. Cuando una firma dispara en tantos, o hay una epidemia o la "
+            "regla es demasiado general: en los dos casos hay que mirarla antes de "
+            "cortarle a nadie.</p>"
             "<div class=tablewrap><table class=ruid><thead><tr><th>Firma</th>"
-            "<th class=num>Acertadas</th><th class=num>Falladas</th>"
-            "<th class=num>Error</th></tr></thead><tbody>%s</tbody></table></div></div>"
-            % cuerpo)
+            "<th class=num>Abonados</th><th class=num>Del total</th>"
+            "</tr></thead><tbody>%s</tbody></table></div></div>" % cuerpo)
 
 def conducta_page(q="", msg="", pag=1):
     """Informe por categoria de abuso: primero lo que hay que cortar, al final el ruido."""
@@ -11896,7 +11812,6 @@ def conducta_page(q="", msg="", pag=1):
         tarjetas = []
         for f in grupo:
             acts = _cd_agrupa(f.get("firmas"), traducir)
-            _ya = veredictos_de(f["ip"])
             puertos = _cd_agrupa(f.get("puertos"), nombre_puerto)
             doms = _cd_agrupa(f.get("dominios"))
             # Una frase que entienda el abonado, antes de cualquier grafico.
@@ -11906,14 +11821,6 @@ def conducta_page(q="", msg="", pag=1):
             if acts:
                 resumen += " Lo mas repetido: <b>%s</b>." % esc(acts[0][0].lower())
             tec = ", ".join("%s (%d)" % (esc(str(a)), b) for a, b in (f.get("destinos") or []))
-            # El veredicto se pide por FIRMA, no por abonado: lo que se esta calificando
-            # es si esa deteccion acerto, y la misma firma puede acertar en uno y fallar
-            # en otro. Preguntar "este CPE es un falso positivo" no sirve para afinar nada.
-            _vh = "".join(
-                "<div class=vrow><span class=vfirma>%s</span>%s</div>"
-                % (esc(traducir(_fir)),
-                   veredicto_botones(f["ip"], _fir, _ya.get(_fir), pag, q, esc))
-                for _fir, _n in (f.get("firmas") or [])[:4])
             tarjetas.append(
                 "<div class=cpe style='--acento:%s'>"
                 "<div class=top><span class=ip>%s</span>"
@@ -11922,7 +11829,6 @@ def conducta_page(q="", msg="", pag=1):
                 "<p class=resumen>%s</p>"
                 "<details><summary>Ver que estuvo haciendo</summary>"
                 "<h4>&iquest;Por que lo decimos?</h4>%s"
-                "<h4>&iquest;Acerto el sistema?</h4>%s"
                 "<h4>Que hizo</h4>%s"
                 "<h4>Para que usa internet</h4>%s"
                 "<h4>Sitios que mas visito</h4>%s"
@@ -11931,7 +11837,7 @@ def conducta_page(q="", msg="", pag=1):
                 "</details></div>"
                 % (color, esc(f["ip"]), "{:,}".format(f["alertas"]).replace(",", "."),
                    "1 dia activo" if f["dias"] == 1 else "%d dias activo" % f["dias"],
-                   fmt(f["ultima"]), resumen, indicios_html(f, esc), _vh,
+                   fmt(f["ultima"]), resumen, indicios_html(f, esc),
                    _cd_minibarras(acts),
                    _cd_minibarras(puertos),
                    _cd_minibarras(doms),
@@ -11954,7 +11860,7 @@ def conducta_page(q="", msg="", pag=1):
         "Abonados con mas actividad sospechosa",
         sub="Los %d primeros de los ultimos %d dias. Pasa el raton por una barra para "
             "ver de que tipo es." % (min(10, len(filas)), dias))
-    return _cd_doc("<div class=inf id=informe>" + cab + barras + ruidosas_html(esc)
+    return _cd_doc("<div class=inf id=informe>" + cab + barras + ruidosas_html(filas, esc)
                    + pgr + "".join(secciones) + pgr + "</div>")
 
 def historico_page(dias_n=30):
@@ -13747,15 +13653,6 @@ class H(BaseHTTPRequestHandler):
                 return self._deny()
             actualizar_feeds_async(); bitacora("ACTUALIZAR-FEEDS", "manual")
             return self._html(perfil_page("Actualizando feeds en segundo plano; recarga en un momento para ver el estado.", ok=True))
-        if ruta == "/conducta/veredicto":
-            if not self._operador():
-                return self._html("<h1>Sin permiso</h1>", 403)
-            veredicto_guardar(q.get("cpe", [""])[0], q.get("firma", [""])[0],
-                              q.get("valor", [""])[0], getattr(CTX, "user", ""))
-            _p = q.get("p", ["1"])[0]
-            _q = q.get("q", [""])[0]
-            return self._redirect("/conducta?p=%s%s" % (
-                _p, ("&q=" + _up.quote(_q)) if _q else ""))
         if ruta == "/conducta/refrescar":
             # No se genera dentro de la peticion: recorrer 3 dias de logs puede tardar
             # minutos y el navegador cortaria por timeout. Lo hace el hilo de fondo.

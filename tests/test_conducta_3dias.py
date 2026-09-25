@@ -287,15 +287,33 @@ def main():
     check("hay boton para guardar en PDF", "cdPdf()" in pag, "")
     check("antes de imprimir se abre lo plegado: en papel no se puede desplegar",
           "d.open = true" in ns["_CD_JS"] and "window.print()" in ns["_CD_JS"])
+    # Con Ctrl+P no se pasa por el boton. Sin engancharse a beforeprint, las fichas
+    # salian vacias, que es exactamente como se veia el PDF.
+    check("tambien al imprimir con Ctrl+P, no solo desde el boton",
+          "beforeprint" in ns["_CD_JS"], "")
+    check("y se vuelve a plegar despues, para no dejar la pagina abierta entera",
+          "afterprint" in ns["_CD_JS"], "")
+    check("solo se cierra lo que se abrio automaticamente",
+          "cdAuto" in ns["_CD_JS"] or "cd-auto" in ns["_CD_JS"], "")
     imp = ns["_CD_CSS"].split("@media print{")[1].split("@media(prefers-color-scheme")[0]
     check("al imprimir se fuerzan los fondos, o la barra sale en blanco",
           "print-color-adjust:exact" in imp)
     check("no se imprime la navegacion ni los botones",
           ".nav" in imp and ".acciones" in imp and "display:none" in imp)
-    check("una ficha no se parte entre dos paginas",
+    check("una ficha de abonado no se parte entre dos paginas",
           "break-inside:avoid" in imp)
-    check("en papel se ve el contenido plegado",
-          "details>*" in imp.replace(" ", ""))
+    check("pero una seccion entera SI puede partirse: si no, deja hojas en blanco",
+          "break-inside:avoid" not in imp.split(".card{")[1].split("}")[0],
+          imp.split(".card{")[1].split("}")[0])
+    check("nada queda con overflow:hidden en papel, que recorta y borra contenido",
+          "overflow:visible" in imp)
+    check("la franja de gravedad pasa a borde: en absolute se estira al paginar",
+          "seccion::before{display:none" in imp.replace(" ", ""))
+    # Lo plegado se abre con JS en beforeprint, no con CSS: <details> oculta su
+    # contenido por el shadow DOM, asi que forzar el display de los hijos no lo
+    # revela de forma fiable. En papel solo se esconde el triangulo del summary.
+    check("en papel no se pinta el desplegable, que ahi no se puede desplegar",
+          "summary" in imp and "display:none" in imp)
 
     # --- glosario -------------------------------------------------------------------
     # El informe lo lee gente que no sabe que es un C2, y no tiene por que saberlo.

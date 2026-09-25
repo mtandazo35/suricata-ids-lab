@@ -6237,6 +6237,25 @@ def _blank_conf_pass():
 VENTANAS = [(30, "30 min"), (60, "1 hora"), (180, "3 horas"),
             (360, "6 horas"), (720, "12 horas"), (1440, "24 horas")]
 
+def ventana_generada():
+    """Con que ventana se genero el resumen que se esta mostrando.
+
+    El generador la deja escrita en cuarentena.json. Sirve para saber si lo que hay en
+    pantalla corresponde a lo que el operador eligio: cambiar el selector dispara una
+    regeneracion que en una caja con trafico tarda minutos, y mientras tanto se sigue
+    viendo el resumen anterior. Sin decirlo, parece que el selector no funciona."""
+    try:
+        return int(json.load(open(f"{LOGDIR}/cuarentena.json",
+                                  encoding="utf-8")).get("ventana_min") or 0)
+    except (OSError, ValueError, TypeError):
+        return 0
+
+def etiqueta_ventana(minutos):
+    for v, t in VENTANAS:
+        if v == minutos:
+            return t
+    return "%d min" % minutos
+
 def ventana_actual():
     try:
         return int(CFG.get("VENTANA_MIN", "1440") or "1440")
@@ -7873,6 +7892,10 @@ border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0
  .nav a.tab{padding:8px 11px;margin:3px 1px;font-size:14px}
  .nav a.tab.on::after{display:none}         /* el subrayado inferior no encaja al envolver */
  .nav .push{margin-left:auto}
+.wpend{display:inline-block;margin-left:9px;padding:3px 10px;border-radius:999px;
+       background:#fff3cd;border:1px solid #f0d78c;color:#7a5c00;font-size:12px;
+       font-weight:600;white-space:nowrap}
+@media(prefers-color-scheme:dark){.wpend{background:#2e2712;border-color:#5c4d1c;color:#f0d78c}}
  .nav .out{margin-left:8px;padding:7px 12px;font-size:14px}
  .nav .updbtn{margin-left:8px;padding:7px 11px;font-size:13px}
  .updov,.updask{padding:14px}
@@ -11281,14 +11304,22 @@ _CD_CSS = """<style>
   @page{size:A4;margin:14mm 12mm}
   .nav,.acciones,.chips,.tecnico{display:none !important}
   body{background:#fff !important}
-  /* en papel no hay nada que desplegar: se ve todo */
-  .inf details>*{display:revert !important}
   .inf summary{display:none !important}
+  /* overflow:hidden recorta el contenido al alto de la pagina y lo que sobra
+     DESAPARECE, que es lo que dejaba las fichas en blanco */
+  .inf,.inf .card,.inf .seccion,.inf .cpe,.inf details{overflow:visible !important}
+  /* la franja de gravedad iba en position:absolute de arriba a abajo: al partirse la
+     seccion entre dos paginas se estiraba sola por el hueco. En papel va como borde,
+     que si fluye con la paginacion */
+  .inf .seccion::before{display:none !important}
+  .inf .seccion{border-left:4px solid var(--acento);padding-left:14px}
   /* los navegadores no imprimen fondos por defecto, y sin fondo no hay barra */
   .inf,.inf *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
   .inf{--sombra:none;--fondo:#fff;font-size:11pt}
-  .card{border:1px solid #d7dce3 !important;box-shadow:none !important;
-        break-inside:avoid;page-break-inside:avoid;margin-bottom:8mm}
+  /* una seccion entera NO cabe en una pagina: pedir que no se parta deja la hoja
+     anterior en blanco y empuja el contenido fuera. Se parte la seccion, nunca la
+     ficha de un abonado */
+  .card{border:1px solid #d7dce3 !important;box-shadow:none !important;margin-bottom:8mm}
   .cpe{break-inside:avoid;page-break-inside:avoid;transform:none !important;
        box-shadow:none !important}
   .seccion{break-before:auto}
@@ -11391,12 +11422,25 @@ def conducta_barras(filas, titulo, n=10, sub=""):
 
 _CD_JS = """<script>
 // Guardar en PDF = imprimir a PDF del navegador. No se mete una libreria de PDF por
-// esto: el navegador ya sabe paginar y respeta la hoja de impresion de abajo. Antes
-// de imprimir se abre TODO lo plegado, porque en papel no hay nada que desplegar.
-function cdPdf(){
-  document.querySelectorAll('#informe details').forEach(function(d){ d.open = true; });
-  window.print();
+// esto: el navegador ya sabe paginar y respeta la hoja de impresion de abajo.
+//
+// Lo plegado se abre en 'beforeprint', no solo en el boton: si se imprime con Ctrl+P
+// -que es lo normal- no se pasa por el boton y las fichas salen vacias. Y el CSS no
+// puede suplirlo, porque <details> oculta su contenido por el shadow DOM y no por el
+// display de sus hijos.
+function cdAbrirTodo(){
+  document.querySelectorAll('#informe details').forEach(function(d){
+    if (!d.open) { d.open = true; d.dataset.cdAuto = '1'; }
+  });
 }
+function cdCerrarAuto(){
+  document.querySelectorAll('#informe details[data-cd-auto]').forEach(function(d){
+    d.open = false; delete d.dataset.cdAuto;
+  });
+}
+window.addEventListener('beforeprint', cdAbrirTodo);
+window.addEventListener('afterprint', cdCerrarAuto);
+function cdPdf(){ cdAbrirTodo(); window.print(); }
 </script>"""
 
 # --- Glosario ----------------------------------------------------------------------
@@ -12872,6 +12916,14 @@ class H(BaseHTTPRequestHandler):
                 wsel = ("<form method=post action='/ventana' class='wsel'>"
                         "<span class='wlbl'>Ventana</span>"
                         f"<select name='min' onchange='this.form.submit()'>{opts}</select></form>")
+                _vg = ventana_generada()
+                if _vg and _vg != va:
+                    # el resumen en pantalla NO es el de la ventana elegida todavia
+                    wsel += ("<span class='wpend' title='El resumen se regenera en segundo "
+                             "plano; en una caja con trafico tarda unos minutos.'>"
+                             "generando %s&hellip; (mostrando %s)</span>"
+                             % (html.escape(etiqueta_ventana(va)),
+                                html.escape(etiqueta_ventana(_vg))))
             if resumen_inner.strip():
                 cabecera = (
                     "<header class='pageh'><div>"

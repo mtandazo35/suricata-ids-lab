@@ -319,11 +319,11 @@ def main():
     # un boton que nadie sabia para que servia.
     check("ya no hay boton Regenerar",
           "Regenerar" not in pag and "/conducta/refrescar" not in pag, "")
-    check("el buscador va a la derecha, detras del boton",
-          pag.find("cdPdf()") < pag.find("class=busca"), "")
+    check("los dos controles van juntos a la derecha, el filtro primero",
+          pag.find("class=busca") < pag.find("cdPdf()"), "")
     # "cuantos veo" y "como paso al resto" son la misma pregunta: van juntos, al final.
-    _arriba = pag[:pag.rfind("<div class=pager>")]
-    _abajo = pag[pag.rfind("<div class=pager>"):]
+    _arriba = pag[:pag.rfind("<div class=pager id=pgbar>")]
+    _abajo = pag[pag.rfind("<div class=pager id=pgbar>"):]
     check("el selector de cuantos por pagina va dentro del paginador",
           "class=porpag" in _abajo, _abajo[:200])
     check("y ya no esta en la barra de arriba",
@@ -445,6 +445,12 @@ def main():
     check("y sin numeros de pagina, que no llevarian a ningun lado",
           "class='pg act'" not in _sola, _sola)
 
+    # Cambiar el tamano te mandaba al principio del informe: form.submit() por codigo no
+    # dispara el evento 'submit', asi que el guardado de posicion del panel ni se entera.
+    check("la caja del paginador se puede nombrar", "id=pgbar" in _sola, _sola[:80])
+    check("y el selector vuelve a ella en vez de subir al principio",
+          "action='/conducta#pgbar'" in pag, "")
+
     pg = ns["conducta_paginador"](3, 9, "", 450, 101, 150)
     check("la pagina actual no es un enlace", "class='pg act'>3<" in pg, pg[:200])
     check("se dice que rango se esta viendo", "101" in pg and "450" in pg, pg[:160])
@@ -509,9 +515,9 @@ def main():
     # Salia dos veces, arriba y abajo. El de arriba se metia entre el bloque de firmas
     # ruidosas y las fichas, partiendo el resumen sin hacer falta.
     check("el paginador se pinta una sola vez, al final",
-          pg1.count("<div class=pager>") == 1, pg1.count("<div class=pager>"))
+          pg1.count("<div class=pager id=pgbar>") == 1, pg1.count("<div class=pager id=pgbar>"))
     check("y va despues de las fichas, no antes",
-          pg1.rfind("<div class=pager>") > pg1.rfind("<div class=cpe"), "")
+          pg1.rfind("<div class=pager id=pgbar>") > pg1.rfind("<div class=cpe"), "")
     check("una pagina fuera de rango no revienta: se acota",
           ns["conducta_page"](pag=999, por=50).count("<div class=cpe") == 20)
     # el ranking de arriba es global y sale en todas las paginas, asi que hay que

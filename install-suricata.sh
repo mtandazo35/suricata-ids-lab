@@ -11239,7 +11239,8 @@ _CD_CSS = """<style>
          color:var(--acento);border-radius:999px;padding:2px 10px;font-weight:700;
          font-variant-numeric:tabular-nums;font-size:12.5px;line-height:1.5}
 
-.acciones{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:20px 0 0}
+.acciones{display:flex;flex-wrap:wrap;gap:10px;align-items:center;
+          margin:22px 0 4px;padding-top:18px;border-top:1px solid var(--linea)}
 .acciones form{display:flex;gap:0;margin:0}
 .acciones .busca{margin-left:auto}
 /* el filtro y su boton, pegados: se leen como un solo control */
@@ -11715,7 +11716,7 @@ def conducta_paginador(pag, paginas, q, total, desde, hasta, por=None, sel=""):
                     nums.append("<span class='pgsep'>&hellip;</span>")
                 nums.append(enlace(n))
                 ultimo = n
-    return ("<div class=pager><span class=pgc>%s&ndash;%s de %s abonados</span>%s"
+    return ("<div class=pager id=pgbar><span class=pgc>%s&ndash;%s de %s abonados</span>%s"
             "<span class=pgn>%s%s%s</span></div>"
             % ("{:,}".format(desde).replace(",", "."),
                "{:,}".format(hasta).replace(",", "."),
@@ -11824,18 +11825,18 @@ def conducta_page(q="", msg="", pag=1, por=None):
     # asi que cada formulario lleva escondido el valor del contrario.
     # El selector vive abajo, con el paginador: las dos cosas responden a la misma
     # pregunta (cuanto estoy viendo y como paso al resto), y se usan al terminar de leer.
-    selector = ("<form class=porpag method=get action='/conducta'>"
+    selector = ("<form class=porpag method=get action='/conducta#pgbar'>"
                 "<input type=hidden name=q value='%s'>"
                 "<label for=cdpor>Ver</label>"
                 "<select id=cdpor name=n onchange='this.form.submit()'>%s</select>"
                 "<span class=pl>por pagina</span></form>" % (esc(q), _opts))
     acciones = ("<div class=acciones>"
-                "<button class='b pri' type=button onclick='cdPdf()'>Generar reporte</button>"
                 "<form class=busca method=get action='/conducta'>"
                 "<input type=hidden name=n value='%d'>"
                 "<input name=q value='%s' placeholder='filtrar por IP o firma'>"
-                "<button class=b>Filtrar</button></form></div>"
-                % (por, esc(q)))
+                "<button class=b>Filtrar</button></form>"
+                "<button class='b pri' type=button onclick='cdPdf()'>Generar reporte</button>"
+                "</div>" % (por, esc(q)))
     cab = ("<div class=card><h2>Informe de %d dias &mdash; conducta por abonado</h2>"
            "<p class=per>Del %s al %s &middot; generado hace %d min &middot; %s lineas de log</p>"
            "<div class=tiles>"

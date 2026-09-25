@@ -5664,6 +5664,44 @@ def _svc_activo(nombre):
     except Exception:
         return False
 
+TZSP_ESTADO = "/var/log/suricata-tzsp.json"
+COBERTURA_MUDO = 600     # segundos sin un solo paquete de un nodo -> ese nodo esta a ciegas
+COBERTURA_RECHAZO = 0.20 # fraccion de rechazo a partir de la cual el espejo esta mal dirigido
+
+def cobertura_tzsp(ahora=None):
+    """Que parte del espejo esta llegando de verdad, y de quien.
+
+    Existe por un caso real: el MikroTik empezo a mandar el espejo a otra direccion, el
+    receptor lo rechazo entero por no estar en la lista de origenes, y el panel siguio
+    diciendo "viendo trafico" durante horas. Sin alertas parecia una red limpia, y era
+    un sensor ciego. Lo que se mira no es cuanto entra, sino cuanto se APROVECHA y si
+    todos los nodos esperados siguen hablando."""
+    ahora = ahora or time.time()
+    try:
+        d = json.load(open(TZSP_ESTADO, encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    ven = d.get("ventana") or {}
+    acep = sum(int(v) for v in (ven.get("aceptados") or {}).values())
+    rech = sum(int(v) for v in (ven.get("rechazados") or {}).values())
+    total = acep + rech
+    o = {"ts": int(d.get("ts", 0)), "aceptados": acep, "rechazados": rech,
+         "ratio_rechazo": round(rech / total, 4) if total else 0.0,
+         "intrusos": sorted((ven.get("rechazados") or {}).keys()),
+         "mudos": [], "nodos": {}, "edad": int(ahora - d.get("ts", 0))}
+    for origen in (d.get("esperados") or []):
+        # un /32 en la lista es un nodo concreto; una red puede cubrir a varios
+        visto = 0
+        for ip, t in (d.get("ultimo_visto") or {}).items():
+            if ip == origen or origen.endswith("/32") and origen.split("/")[0] == ip:
+                visto = max(visto, int(t))
+        o["nodos"][origen] = visto
+        if ahora - visto > COBERTURA_MUDO:
+            o["mudos"].append(origen)
+    esperados = len(d.get("esperados") or [])
+    o["cobertura"] = round(100.0 * (esperados - len(o["mudos"])) / esperados, 1) if esperados else None
+    return o
+
 def medir_sensor():
     """Mide el estado real del sensor (captura, perdidas, servicios, frescura del reporte).
     Corre en el hilo de fondo y cachea en SENSOR_FILE; el request solo lee el cache."""
@@ -5714,12 +5752,23 @@ def medir_sensor():
         o["candidatos"] = 0
     # clasificacion en un nivel + titulo legible
     hay_trafico = (o["pps"] is not None and o["pps"] >= 1) or (o["eve_bps"] is not None and o["eve_bps"] >= 1)
+    o["cobertura"] = cob = cobertura_tzsp(now)
     if not o["suricata"]:
         o["nivel"], o["titulo"] = "down", "Sensor detenido"
     elif o["tzsp_mode"] and not o["tzsp"]:
         o["nivel"], o["titulo"] = "warn", "Receptor TZSP caido"
     elif not ifaces:
         o["nivel"], o["titulo"] = "warn", "Sin interfaz de captura"
+    elif cob and cob.get("ratio_rechazo", 0) >= COBERTURA_RECHAZO:
+        # lo mas enganoso de todo: SI hay trafico, pero se esta tirando casi entero
+        o["nivel"] = "warn"
+        o["titulo"] = ("Espejo rechazado: el %d%% llega de un origen no autorizado (%s)"
+                       % (round(100 * cob["ratio_rechazo"]),
+                          ", ".join(cob["intrusos"][:2]) or "desconocido"))
+    elif cob and cob.get("mudos"):
+        o["nivel"] = "warn"
+        o["titulo"] = ("Sin espejo de %d nodo(s): %s. Esa parte de la red esta sin vigilar"
+                       % (len(cob["mudos"]), ", ".join(cob["mudos"][:2])))
     elif dt > 0 and not hay_trafico:
         o["nivel"], o["titulo"] = "warn", "Sin trafico"
     elif o["drop_ratio"] and o["drop_ratio"] > 0.02:
@@ -5728,7 +5777,11 @@ def medir_sensor():
         o["nivel"], o["titulo"] = "warn", "Reporte desactualizado"
     else:
         o["nivel"] = "ok"
-        o["titulo"] = "Viendo trafico" + (" · sin amenazas" if o["candidatos"] == 0 else f" · {o['candidatos']} CPE en riesgo")
+        _cb = ("" if not cob or cob.get("cobertura") is None
+               else " · cobertura %s%%" % cob["cobertura"])
+        o["titulo"] = ("Viendo trafico" + _cb
+                       + (" · sin amenazas" if o["candidatos"] == 0
+                          else f" · {o['candidatos']} CPE en riesgo"))
     # avisos proactivos: notificar cuando el estado EMPEORA (ok->warn/down), cuando cambia el
     # motivo del problema, o re-recordar cada 6h si sigue mal; y avisar la recuperacion.
     o["alert_estado"] = prev.get("alert_estado", "ok")
@@ -14135,9 +14188,12 @@ Formato TZSP: version(1)=1 | type(1) 0=recibido,1=tx | encap(2) 1=Ethernet |
 tags: 0x00=padding (sin longitud), 0x01=END (sin longitud), otros: len(1)+data |
 payload = trama Ethernet completa.
 """
-import ipaddress, os, socket, struct, sys, time
+import ipaddress, json, os, socket, struct, sys, time
 
 PORT = int(os.environ.get("TZSP_PORT", "37008"))
+# Estado legible por el panel. El journal no le sirve: necesita saber, en datos, si el
+# espejo esta llegando de un origen que no esta autorizado.
+ESTADO_JSON = os.environ.get("TZSP_ESTADO", "/var/log/suricata-tzsp.json")
 OUT_IF = os.environ.get("TZSP_OUT_IF", "ids-in")
 # --- Varios MikroTik: una interfaz por router ---
 # TZSP_MAP = "10.0.0.1=ids-in,10.9.9.1=ids-in2" manda el espejo de cada router a SU
@@ -14241,12 +14297,15 @@ def main():
           f" (solo desde {os.environ.get('TZSP_MAP') or os.environ.get('TZSP_ALLOW')})", flush=True)
     rxn = txn = bad = big = rej = 0
     porif = {}
+    visto = {}          # origen -> epoch del ultimo paquete ACEPTADO
+    rej_por = {}        # origen no autorizado -> cuantos ha mandado
     last = time.time()
     while True:
         d, peer = rx.recvfrom(65535)
         rxn += 1
         if not permitido(peer[0]):
             rej += 1
+            rej_por[peer[0]] = rej_por.get(peer[0], 0) + 1
             continue
         f = decap(d)
         if f is None or len(f) < 14:
@@ -14256,8 +14315,8 @@ def main():
                 tx = salida_de(peer[0])
                 tx.send(f)
                 txn += 1
-                if MAPA:
-                    porif[peer[0]] = porif.get(peer[0], 0) + 1
+                porif[peer[0]] = porif.get(peer[0], 0) + 1
+                visto[peer[0]] = time.time()
             except OSError:
                 big += 1
         now = time.time()
@@ -14267,7 +14326,24 @@ def main():
             det = (" por_origen=" + ",".join(f"{k}:{v}" for k, v in sorted(porif.items()))) if porif else ""
             print(f"tzsp-decap: rx={rxn} tx={txn} descartados={bad} muy_grandes={big} "
                   f"rechazados_origen={rej} ultimo_origen={peer[0]}{det}", flush=True)
+            # Y lo mismo en JSON, porque el panel no puede leer el journal. Sin esto no
+            # hay forma de avisar de que el espejo esta llegando de un origen que no
+            # esta autorizado: el receptor lo tira, Suricata no ve nada, y el panel
+            # sigue diciendo que todo va bien.
+            try:
+                _tmp = ESTADO_JSON + ".tmp"
+                with open(_tmp, "w", encoding="utf-8") as _f:
+                    json.dump({"ts": int(now), "rx": rxn, "tx": txn, "descartados": bad,
+                               "muy_grandes": big, "rechazados": rej,
+                               "ventana": {"aceptados": dict(porif),
+                                           "rechazados": dict(rej_por)},
+                               "ultimo_visto": {k: int(v) for k, v in visto.items()},
+                               "esperados": [str(_r) for _r in ALLOW]}, _f)
+                os.replace(_tmp, ESTADO_JSON)
+            except OSError:
+                pass
             porif.clear()
+            rej_por.clear()
             last = now
 
 if __name__ == "__main__":

@@ -10839,7 +10839,7 @@ def _cd_top(c, n=CONDUCTA_TOPE):
 def _cd_podar(d, tope):
     """Recorta los contadores de un CPE. Sin esto, un CPE que habla con 200.000
     destinos en 3 dias se come la RAM del panel el mismo dia que mas falta hace."""
-    for k in ("destinos", "puertos", "firmas", "dominios"):
+    for k in ("destinos", "puertos", "firmas", "dominios", "malos"):
         c = d[k]
         if len(c) > tope:
             d[k] = dict(sorted(c.items(), key=lambda kv: -kv[1])[:tope])
@@ -10942,6 +10942,9 @@ def hist_ingerir(limite_lineas=4000000):
                         fir = ((ev.get("alert") or {}).get("signature") or "")[:90]
                         if fir:
                             det[(dia, ip, "firma", fir)] = det.get((dia, ip, "firma", fir), 0) + 1
+                        mal = ((ev.get("dns") or {}).get("rrname") or "")[:80]
+                        if mal:
+                            det[(dia, ip, "malo", mal)] = det.get((dia, ip, "malo", mal), 0) + 1
                     elif tipo == "dns":
                         dom = ((ev.get("dns") or {}).get("rrname") or "")[:80]
                         if dom:
@@ -11009,7 +11012,7 @@ def hist_conducta(dias=None):
                           "bytes": by or 0, "dias": hs or 0,
                           "primera": int(pri or 0), "ultima": int((ult or 0) + 3599),
                           "destinos": [], "puertos": [], "firmas": [], "dominios": [],
-                          "destinos_n": 0, "puertos_n": 0}
+                          "malos": [], "destinos_n": 0, "puertos_n": 0}
         corte_d = time.strftime("%Y-%m-%d", time.localtime(corte))
         acc = {}
         for cpe, tipo, clave, n in c.execute(
@@ -11022,6 +11025,7 @@ def hist_conducta(dias=None):
             f["destinos"] = _cd_top(t.get("destino", {}))
             f["puertos"] = _cd_top(t.get("puerto", {}))
             f["dominios"] = _cd_top(t.get("dominio", {}))
+            f["malos"] = _cd_top(t.get("malo", {}))
             f["destinos_n"] = len(t.get("destino", {}))
             f["puertos_n"] = len(t.get("puerto", {}))
         out = sorted(filas.values(), key=lambda f: (-f["alertas"], -f["eventos"]))
@@ -11074,7 +11078,7 @@ def conducta_recolectar(dias=CONDUCTA_DIAS):
                         continue
                     d = cpes[ip] = {"eventos": 0, "alertas": 0, "bytes": 0,
                                     "destinos": {}, "puertos": {}, "firmas": {},
-                                    "dominios": {}, "dias": {},
+                                    "dominios": {}, "malos": {}, "dias": {},
                                     "primera": ts, "ultima": ts}
                 d["eventos"] += 1
                 d["primera"] = min(d["primera"], ts)
@@ -11092,6 +11096,12 @@ def conducta_recolectar(dias=CONDUCTA_DIAS):
                     fir = ((ev.get("alert") or {}).get("signature") or "")[:90]
                     if fir:
                         d["firmas"][fir] = d["firmas"].get(fir, 0) + 1
+                    # el dominio que venia en la alerta: ese es el sospechoso, no todo
+                    # lo que el abonado consulta. Mezclarlos deja una lista de google y
+                    # facebook donde deberia estar el dominio del malware
+                    mal = ((ev.get("dns") or {}).get("rrname") or "")[:80]
+                    if mal:
+                        d["malos"][mal] = d["malos"].get(mal, 0) + 1
                 elif tipo == "dns":
                     dom = ((ev.get("dns") or {}).get("rrname") or "")[:80]
                     if dom:
@@ -11105,7 +11115,8 @@ def conducta_recolectar(dias=CONDUCTA_DIAS):
                       "primera": int(d["primera"]), "ultima": int(d["ultima"]),
                       "destinos_n": len(d["destinos"]), "puertos_n": len(d["puertos"]),
                       "destinos": _cd_top(d["destinos"]), "puertos": _cd_top(d["puertos"]),
-                      "firmas": _cd_top(d["firmas"]), "dominios": _cd_top(d["dominios"])})
+                      "firmas": _cd_top(d["firmas"]), "dominios": _cd_top(d["dominios"]),
+                      "malos": _cd_top(d["malos"])})
     filas.sort(key=lambda f: (-f["alertas"], -f["eventos"]))
     return {"generado": int(time.time()), "dias": dias, "lineas": leidos,
             "cpes": len(filas), "filas": filas}
@@ -11813,6 +11824,7 @@ def conducta_page(q="", msg="", pag=1):
         for f in grupo:
             acts = _cd_agrupa(f.get("firmas"), traducir)
             puertos = _cd_agrupa(f.get("puertos"), nombre_puerto)
+            malos = _cd_agrupa(f.get("malos"))
             doms = _cd_agrupa(f.get("dominios"))
             # Una frase que entienda el abonado, antes de cualquier grafico.
             resumen = ("Este equipo hizo <b>%s</b> cosas que el sistema marca como "
@@ -11831,17 +11843,19 @@ def conducta_page(q="", msg="", pag=1):
                 "<h4>&iquest;Por que lo decimos?</h4>%s"
                 "<h4>Que hizo</h4>%s"
                 "<h4>Para que usa internet</h4>%s"
-                "<h4>Sitios que mas visito</h4>%s"
+                "<h4>Dominios sospechosos que consulto</h4>%s"
                 "<details class=tecnico><summary>Detalle tecnico (para el ISP)</summary>"
-                "<div class=kv>%d destinos distintos: %s</div></details>"
+                "<div class=kv>%d destinos distintos: %s<br>"
+                "Dominios mas consultados (todos): %s</div></details>"
                 "</details></div>"
                 % (color, esc(f["ip"]), "{:,}".format(f["alertas"]).replace(",", "."),
                    "1 dia activo" if f["dias"] == 1 else "%d dias activo" % f["dias"],
                    fmt(f["ultima"]), resumen, indicios_html(f, esc),
                    _cd_minibarras(acts),
                    _cd_minibarras(puertos),
-                   _cd_minibarras(doms),
-                   f["destinos_n"], tec or "&mdash;"))
+                   _cd_minibarras(malos),
+                   f["destinos_n"], tec or "&mdash;",
+                   ", ".join("%s (%d)" % (esc(str(a)), b) for a, b in doms) or "&mdash;"))
         secciones.append(
             "<div class='card seccion' id='c-%s' style='--acento:%s'>"
             "<h3>%s <span class=nivel>%s</span> <span class=pill>%s</span></h3>"

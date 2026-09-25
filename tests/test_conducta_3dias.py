@@ -106,7 +106,14 @@ def main():
     # rotado de AYER, comprimido: la parte que se olvida siempre
     ayer = [ev("192.168.1.10", 1, dest_ip="5.5.5.5", dest_port=8080,
                alert={"signature": "ET AYER"}),
+            # el abonado consulta cosas corrientes...
             ev("192.168.2.20", 1, tipo="dns", dest_ip="8.8.8.8",
+               dns={"rrname": "www.google.com"}),
+            ev("192.168.2.20", 1, tipo="dns", dest_ip="8.8.8.8",
+               dns={"rrname": "malo.example.com"}),
+            # ...y ademas una de ellas dispara alerta: ESA es la que interesa
+            ev("192.168.2.20", 1, dest_ip="8.8.8.8", dest_port=53,
+               alert={"signature": "ET MALWARE Known Malicious Domain"},
                dns={"rrname": "malo.example.com"})]
     with gzip.open(os.path.join(tmp, "eve.json.1.gz"), "wt", encoding="utf-8") as f:
         f.writelines(ayer)
@@ -131,7 +138,17 @@ def main():
 
     b = por_ip["192.168.2.20"]
     check("las consultas DNS quedan como dominios",
-          b["dominios"] == [["malo.example.com", 1]], b["dominios"])
+          dict(b["dominios"]) == {"www.google.com": 1, "malo.example.com": 1},
+          b["dominios"])
+    # El bloque que ve el cliente debe listar el dominio del malware, no google. Antes
+    # mezclaba las dos cosas y quedaba una lista de sitios corrientes donde deberia
+    # estar lo sospechoso.
+    check("el dominio que disparo la alerta sale aparte, como sospechoso",
+          b["malos"] == [["malo.example.com", 1]], b["malos"])
+    check("y lo que solo se consulto, sin alerta, NO entra ahi",
+          "www.google.com" not in dict(b["malos"]), b["malos"])
+    check("un CPE sin alertas de DNS no tiene dominios sospechosos",
+          por_ip["192.168.1.10"]["malos"] == [], por_ip["192.168.1.10"]["malos"])
 
     check("el mas ruidoso va primero", r["filas"][0]["ip"] == "192.168.1.10",
           r["filas"][0]["ip"])
@@ -154,7 +171,7 @@ def main():
 
     # --- la poda no puede inventar ni perder el top ---
     d = {"destinos": {str(i): i for i in range(50)}, "puertos": {}, "firmas": {},
-         "dominios": {}}
+         "dominios": {}, "malos": {}}
     ns["_cd_podar"](d, 10)
     check("al podar se queda con los mas frecuentes, no con los primeros",
           d["destinos"].get("49") == 49 and "0" not in d["destinos"], d["destinos"])

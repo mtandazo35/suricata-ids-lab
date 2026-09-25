@@ -35,6 +35,7 @@ PIEZAS = ("CONDUCTA_FILE", "CONDUCTA_DIAS", "CONDUCTA_TOPE", "CONDUCTA_MAX",
           "PUERTO_NOMBRE", "nombre_puerto", "_cd_agrupa", "_cd_minibarras",
           "_CD_CSS", "_CD_JS", "_CD_AZUL", "conducta_page", "_cd_doc",
           "CONDUCTA_POR_PAGINA", "conducta_paginador",
+          "VEREDICTOS", "veredicto_botones", "ruidosas_html",
           "GLOSARIO", "glosario_html", "CPE_INDICIOS", "CONFIANZA",
           "indicios_cpe", "confianza_cpe", "indicios_html")
 
@@ -243,6 +244,10 @@ def main():
     ns["BASE_CSS"] = "/*base*/"
     ns["nav"] = lambda activo="": "<div class=nav><a href=/conducta>Reporte</a></div>"
     ns["_up"] = __import__("urllib.parse", fromlist=["parse"])
+    # la base de veredictos vive en sqlite y tiene su propia prueba; aqui solo hace
+    # falta que la pagina se arme, asi que se devuelve "nada votado todavia"
+    ns["veredictos_de"] = lambda cpe: {}
+    ns["firmas_ruidosas"] = lambda minimo=3: []
     ns["CONDUCTA_FILE"] = os.path.join(tmp, "conducta.json")
     ns["guardar_conducta"](r)
     pag = ns["conducta_page"]()

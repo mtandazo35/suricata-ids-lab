@@ -76,6 +76,7 @@ correr "historial persistente: sobrevive al reinicio y a logrotate" "$PY" tests/
 correr "cobertura del sensor: avisa cuando esta ciego" "$PY" tests/test_cobertura_sensor.py
 correr "recorte por flujo en el receptor" "$PY" tests/test_recorte_flujo.py
 correr "salud del sensor: memcaps, drops, disco y eve" "$PY" tests/test_salud_sensor.py
+correr "feedback TP/FP y firmas ruidosas" "$PY" tests/test_veredictos.py
 correr "una address-list por categoria de abuso" "$PY" tests/test_listas_categoria.py
 correr "destinos de mala reputacion: solo publicas y solo lo solido" "$PY" tests/test_destinos_malos.py
 correr "diagnostico del MikroTik: que le falta para cortar" "$PY" tests/test_diagnostico_mk.py

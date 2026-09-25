@@ -5669,6 +5669,56 @@ def _svc_activo(nombre):
     except Exception:
         return False
 
+SALUD_DROPS = 0.02      # perdida de captura a partir de la cual el dato ya no es fiable
+SALUD_EVE_MUDO = 300    # segundos sin un evento nuevo en eve.json
+SALUD_DISCO = 90        # % de uso del disco que empieza a comprometer la captura
+SALUD_COBERTURA = 95    # % de cobertura por debajo del cual NO se afirma que no hay amenazas
+
+def suricata_stats(tam=3 * 1024 * 1024):
+    """Los contadores del ultimo evento 'stats' de eve.json.
+
+    Suricata publica ahi mucho mas que los drops: si un memcap se agota, empieza a tirar
+    flujos o a no reensamblar, y las alertas que faltan no dejan ningun rastro. Mirar
+    solo kernel_drops deja ciego justo al caso mas enganoso, porque el kernel no ha
+    tirado nada: lo tira Suricata por quedarse sin memoria."""
+    ruta = f"{LOGDIR}/eve.json"
+    try:
+        with open(ruta, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - tam))
+            cola = f.read().decode("utf-8", "replace").split("\n")
+    except OSError:
+        return {}
+    for linea in reversed(cola):
+        if '"event_type":"stats"' not in linea.replace(" ", ""):
+            continue
+        try:
+            return (json.loads(linea).get("stats") or {})
+        except ValueError:
+            continue
+    return {}
+
+def salud_memcaps(st):
+    """Los contadores de memoria agotada que NO deberian ser nunca mayores que cero."""
+    if not st:
+        return {}
+    cand = {
+        "flujos descartados (flow.memcap)": ("flow", "memcap"),
+        "sesiones TCP descartadas": ("tcp", "ssn_memcap_drop"),
+        "segmentos TCP descartados": ("tcp", "segment_memcap_drop"),
+        "reensamblado agotado": ("tcp", "reassembly_memcap_drop"),
+        "defragmentacion agotada": ("defrag", "max_frag_hits"),
+    }
+    out = {}
+    for etiqueta, (sec, clave) in cand.items():
+        try:
+            v = int((st.get(sec) or {}).get(clave, 0))
+        except (TypeError, ValueError):
+            v = 0
+        if v > 0:
+            out[etiqueta] = v
+    return out
+
 TZSP_ESTADO = "/var/log/suricata-tzsp.json"
 COBERTURA_MUDO = 600     # segundos sin un solo paquete de un nodo -> ese nodo esta a ciegas
 COBERTURA_RECHAZO = 0.20 # fraccion de rechazo a partir de la cual el espejo esta mal dirigido
@@ -5758,6 +5808,26 @@ def medir_sensor():
     # clasificacion en un nivel + titulo legible
     hay_trafico = (o["pps"] is not None and o["pps"] >= 1) or (o["eve_bps"] is not None and o["eve_bps"] >= 1)
     o["cobertura"] = cob = cobertura_tzsp(now)
+    _st = suricata_stats()
+    o["memcaps"] = salud_memcaps(_st)
+    try:
+        _kp = int((_st.get("capture") or {}).get("kernel_packets", 0))
+        _kd = int((_st.get("capture") or {}).get("kernel_drops", 0))
+    except (TypeError, ValueError):
+        _kp = _kd = 0
+    o["kernel_packets"], o["kernel_drops"] = _kp, _kd
+    o["drops_pct"] = round(100.0 * _kd / _kp, 2) if _kp else 0.0
+    o["reglas"] = int((_st.get("detect") or {}).get("engines", [{}])[0].get("rules_loaded", 0)) \
+        if isinstance((_st.get("detect") or {}).get("engines"), list) else 0
+    try:
+        _sv = os.statvfs(LOGDIR)
+        o["disco_pct"] = round(100.0 * (_sv.f_blocks - _sv.f_bfree) / _sv.f_blocks, 1)
+    except (OSError, ZeroDivisionError):
+        o["disco_pct"] = None
+    try:
+        o["eve_edad"] = int(now - os.path.getmtime(f"{LOGDIR}/eve.json"))
+    except OSError:
+        o["eve_edad"] = None
     if not o["suricata"]:
         o["nivel"], o["titulo"] = "down", "Sensor detenido"
     elif o["tzsp_mode"] and not o["tzsp"]:
@@ -5776,17 +5846,43 @@ def medir_sensor():
                        % (len(cob["mudos"]), ", ".join(cob["mudos"][:2])))
     elif dt > 0 and not hay_trafico:
         o["nivel"], o["titulo"] = "warn", "Sin trafico"
+    elif o["memcaps"]:
+        # el caso mas enganoso: el kernel no tira nada, lo tira Suricata por quedarse
+        # sin memoria, y las alertas que faltan no dejan rastro en ningun sitio
+        _k = sorted(o["memcaps"].items(), key=lambda kv: -kv[1])[0]
+        o["nivel"] = "warn"
+        o["titulo"] = ("Memoria de Suricata agotada: %s (%s). Se estan perdiendo "
+                       "detecciones" % (_k[0], "{:,}".format(_k[1]).replace(",", ".")))
+    elif o["drops_pct"] > SALUD_DROPS * 100:
+        o["nivel"] = "warn"
+        o["titulo"] = "Captura con perdidas: %.2f%% de los paquetes" % o["drops_pct"]
+    elif o["eve_edad"] is not None and o["eve_edad"] > SALUD_EVE_MUDO:
+        o["nivel"] = "warn"
+        o["titulo"] = ("Sin eventos nuevos desde hace %d min: Suricata esta viva pero "
+                       "no registra nada" % (o["eve_edad"] // 60))
+    elif o["disco_pct"] is not None and o["disco_pct"] >= SALUD_DISCO:
+        o["nivel"] = "warn"
+        o["titulo"] = ("Disco al %.0f%%: al llenarse se pierden capturas y logs "
+                       "sin avisar" % o["disco_pct"])
     elif o["drop_ratio"] and o["drop_ratio"] > 0.02:
         o["nivel"], o["titulo"] = "warn", "Captura con perdidas"
     elif o["reporte_edad"] is not None and o["reporte_edad"] > 2 * REFRESH_SECS:
         o["nivel"], o["titulo"] = "warn", "Reporte desactualizado"
     else:
         o["nivel"] = "ok"
-        _cb = ("" if not cob or cob.get("cobertura") is None
-               else " · cobertura %s%%" % cob["cobertura"])
-        o["titulo"] = ("Viendo trafico" + _cb
-                       + (" · sin amenazas" if o["candidatos"] == 0
-                          else f" · {o['candidatos']} CPE en riesgo"))
+        _cob = None if not cob else cob.get("cobertura")
+        _cb = "" if _cob is None else " · cobertura %s%%" % _cob
+        if o["candidatos"] == 0 and _cob is not None and _cob < SALUD_COBERTURA:
+            # NUNCA decir "sin amenazas" con cobertura incompleta. Es la afirmacion mas
+            # cara que puede hacer el panel: no hay alertas porque no estamos mirando,
+            # y quien lo lee entiende que la red esta limpia.
+            o["nivel"] = "warn"
+            o["titulo"] = ("Cobertura incompleta (%s%%): no se puede afirmar que no haya "
+                           "amenazas" % _cob)
+        else:
+            o["titulo"] = ("Viendo trafico" + _cb
+                           + (" · sin amenazas" if o["candidatos"] == 0
+                              else f" · {o['candidatos']} CPE en riesgo"))
     # avisos proactivos: notificar cuando el estado EMPEORA (ok->warn/down), cuando cambia el
     # motivo del problema, o re-recordar cada 6h si sigue mal; y avisar la recuperacion.
     o["alert_estado"] = prev.get("alert_estado", "ok")

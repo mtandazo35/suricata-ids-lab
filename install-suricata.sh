@@ -11096,7 +11096,8 @@ _CD_CSS = """<style>
 .bloque h3{margin:0 0 3px;font-size:16px;color:var(--tinta);letter-spacing:-.01em}
 .bloque .sub{color:var(--suave);font-size:12.5px;margin:0 0 14px}
 
-.seccion{margin:22px 0 0;position:relative;overflow:hidden;scroll-margin-top:72px}
+.seccion{margin:22px 0 0;position:relative;overflow:hidden;scroll-margin-top:72px;
+         padding-left:20px}
 .seccion::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--acento)}
 .seccion h3{display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin:0 0 5px;
             font-size:18.5px;letter-spacing:-.015em;color:var(--tinta);font-weight:700}
@@ -11123,10 +11124,26 @@ _CD_CSS = """<style>
 .cpe summary{cursor:pointer;color:var(--azul);font-size:13px;font-weight:600;padding:4px 0;
              list-style:none;user-select:none}
 .cpe summary::-webkit-details-marker{display:none}
-.cpe summary::before{content:"\25b8";display:inline-block;margin-right:6px;transition:transform .15s ease}
+.cpe summary::before{content:"";display:inline-block;width:0;height:0;margin-right:9px;
+                     border:5px solid transparent;border-left-color:currentColor;
+                     vertical-align:1px;transition:transform .16s ease}
 .cpe details[open]>summary::before{transform:rotate(90deg)}
 .cpe h4{margin:15px 0 5px;font-size:11px;color:var(--suave);text-transform:uppercase;
         letter-spacing:.08em;font-weight:700}
+.glos{margin:10px 0 0;background:color-mix(in srgb,var(--azul) 5%, transparent);
+      border:1px solid color-mix(in srgb,var(--azul) 18%, transparent);
+      border-radius:9px;padding:8px 12px}
+.glos>summary{color:var(--azul);font-size:13px;font-weight:600}
+.glos>p{margin:8px 0 2px;font-size:13.5px;line-height:1.6;color:var(--tinta2);max-width:74ch}
+.indicios{width:100%;border-collapse:collapse;margin:2px 0 4px;font-size:13px}
+.indicios th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.07em;
+             color:var(--suave);font-weight:700;padding:0 0 5px}
+.indicios td{padding:5px 0;border-top:1px solid var(--linea);color:var(--tinta2)}
+.indicios td.v{text-align:right;white-space:nowrap;font-weight:600}
+.indicios tr.i-si td.v{color:#c0392b}
+.indicios tr.i-quiza td.v{color:#b9770e}
+.indicios tr.i-no td.v{color:var(--suave);font-weight:500}
+.conf{margin:8px 0 2px;font-size:13.5px;color:var(--tinta2)}
 .cpe .vacio{color:var(--suave);font-size:13px;margin:2px 0 10px}
 
 /* barras: mismo tono, extremo de dato redondeado, origen a ras */
@@ -11505,7 +11522,7 @@ def conducta_page(q="", msg=""):
             tarjetas.append(
                 "<div class=cpe style='--acento:%s'>"
                 "<div class=top><span class=ip>%s</span>"
-                "<span class=b>%s alertas</span><span class=b>%d dias activo</span>"
+                "<span class=b>%s alertas</span><span class=b>%s</span>"
                 "<span class=b>ultima vez %s</span></div>"
                 "<p class=resumen>%s</p>"
                 "%s"
@@ -11518,7 +11535,8 @@ def conducta_page(q="", msg=""):
                 "<div class=kv>%d destinos distintos: %s</div></details>"
                 "</details></div>"
                 % (color, esc(f["ip"]), "{:,}".format(f["alertas"]).replace(",", "."),
-                   f["dias"], fmt(f["ultima"]), resumen,
+                   "1 dia activo" if f["dias"] == 1 else "%d dias activo" % f["dias"],
+                   fmt(f["ultima"]), resumen,
                    glosario_html(c, esc), indicios_html(f, esc),
                    _cd_minibarras(acts),
                    _cd_minibarras(puertos),
@@ -11526,9 +11544,10 @@ def conducta_page(q="", msg=""):
                    f["destinos_n"], tec or "&mdash;"))
         secciones.append(
             "<div class='card seccion' id='c-%s' style='--acento:%s'>"
-            "<h3>%s <span class=nivel>%s</span> <span class=pill>%d abonado(s)</span></h3>"
+            "<h3>%s <span class=nivel>%s</span> <span class=pill>%s</span></h3>"
             "<p class=qes>%s</p><p class=qhacer><b>Que hacer:</b> %s</p>%s%s</div>"
-            % (c, color, esc(nombre_categoria(c)), esc(nivel), len(grupo),
+            % (c, color, esc(nombre_categoria(c)), esc(nivel),
+               "1 abonado" if len(grupo) == 1 else "%d abonados" % len(grupo),
                esc(que), esc(hacer),
                "".join(tarjetas),
                ("<p class=sub2>Se muestran los primeros 120 de %d; el CSV los trae todos.</p>"

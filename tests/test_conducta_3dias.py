@@ -269,6 +269,16 @@ def main():
           "background:var(--azul)" in ns["_CD_CSS"])
     check("la pista de la barra tambien sale de los tokens",
           "background:var(--pista)" in ns["_CD_CSS"])
+    # El CSS vive dentro de una cadena de Python. Un escape como el de una flecha
+    # (barra + 25b8) ahi no es un escape CSS: Python lo lee como OCTAL y al navegador
+    # le llega un caracter de control, que se pinta como un cuadro raro junto a cada
+    # desplegable. No da ningun error, solo se ve mal.
+    for _nom in ("_CD_CSS", "_CD_JS"):
+        _malos = [repr(c) for c in ns[_nom]
+                  if ord(c) < 32 and c not in "\n\r\t"]
+        check("%s sin caracteres de control (escape comido por Python)" % _nom,
+              not _malos, _malos[:3])
+
     check("el informe fija su tipografia y no hereda la serif del navegador",
           "font:" in ns["_CD_CSS"].split(".inf{")[1].split("}")[0],
           ns["_CD_CSS"].split(".inf{")[1].split("}")[0][-90:])

@@ -77,6 +77,7 @@ correr "cobertura del sensor: avisa cuando esta ciego" "$PY" tests/test_cobertur
 correr "recorte por flujo en el receptor" "$PY" tests/test_recorte_flujo.py
 correr "salud del sensor: memcaps, drops, disco y eve" "$PY" tests/test_salud_sensor.py
 correr "feedback TP/FP y firmas ruidosas" "$PY" tests/test_veredictos.py
+correr "banco de PCAP: generador y comparador" "$PY" tests/test_pcap_banco.py
 correr "una address-list por categoria de abuso" "$PY" tests/test_listas_categoria.py
 correr "destinos de mala reputacion: solo publicas y solo lo solido" "$PY" tests/test_destinos_malos.py
 correr "diagnostico del MikroTik: que le falta para cortar" "$PY" tests/test_diagnostico_mk.py

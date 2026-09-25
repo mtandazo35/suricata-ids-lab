@@ -1,0 +1,6 @@
+{
+  "descripcion": "Una sesion HTTPS normal: handshake, datos y cierre limpio.",
+  "por_que_importa": "El 86% del trafico de un ISP es esto. Si genera alertas, el panel es inservible.",
+  "max_alertas": 0,
+  "obligatorio": true
+}

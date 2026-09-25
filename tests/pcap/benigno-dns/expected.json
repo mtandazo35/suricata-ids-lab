@@ -1,0 +1,6 @@
+{
+  "descripcion": "Consultas DNS a dominios corrientes (Google, Facebook, WhatsApp, Spotify, Bing).",
+  "por_que_importa": "Es el trafico mas comun de cualquier abonado. Una alerta aqui es un falso positivo que ensucia el riesgo de TODA la red.",
+  "max_alertas": 0,
+  "obligatorio": true
+}

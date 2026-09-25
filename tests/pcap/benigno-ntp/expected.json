@@ -1,0 +1,6 @@
+{
+  "descripcion": "Sincronizacion de hora por NTP, cliente y respuesta.",
+  "por_que_importa": "El NTP se confunde con ataques de amplificacion. Un cliente que solo pone su reloj en hora no puede salir como atacante.",
+  "max_alertas": 0,
+  "obligatorio": true
+}

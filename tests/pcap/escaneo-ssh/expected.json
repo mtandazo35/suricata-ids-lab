@@ -1,0 +1,10 @@
+{
+  "descripcion": "Un CPE mandando SYN al puerto 22 de 120 direcciones distintas, sin respuesta.",
+  "por_que_importa": "Es el patron que mas rapido mete una IP publica en las listas negras.",
+  "min_alertas": 1,
+  "must_alert": [
+    "scan",
+    "ssh"
+  ],
+  "obligatorio": false
+}

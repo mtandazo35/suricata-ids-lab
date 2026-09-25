@@ -1,0 +1,11 @@
+{
+  "descripcion": "Barrido a los puertos 23 y 2323 de 120 direcciones: el patron clasico de las botnets de IoT.",
+  "por_que_importa": "Si esto no se detecta, una botnet de camaras y routers pasa desapercibida.",
+  "min_alertas": 1,
+  "must_alert": [
+    "telnet",
+    "scan",
+    "mirai"
+  ],
+  "obligatorio": false
+}

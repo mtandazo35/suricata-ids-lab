@@ -65,8 +65,15 @@ def entorno(tmp):
     return ns
 
 
-def ev(ip, hace_dias, tipo="alert", **kw):
-    t = time.time() - hace_dias * 86400
+def ev(ip, dias_atras, tipo="alert", **kw):
+    """Un evento al MEDIODIA de hace N dias enteros.
+
+    Anclado al mediodia y a dias enteros a proposito: contar "dias activos" a partir de
+    horas relativas (hace 2,4 h, hace 36 h) da un numero distinto segun la hora a la que
+    se ejecute la prueba y segun la zona horaria de la maquina. Paso: en Ecuador daba 2
+    y en el runner en UTC de madrugada, 3."""
+    b = time.localtime(time.time() - dias_atras * 86400)
+    t = time.mktime((b.tm_year, b.tm_mon, b.tm_mday, 12, 0, 0, 0, 0, -1))
     d = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000000", time.localtime(t)),
          "src_ip": ip, "event_type": tipo}
     d.update(kw)
@@ -78,16 +85,16 @@ def main():
 
     # eve.json de hoy
     hoy = [
-        ev("192.168.1.10", 0.1, dest_ip="8.8.8.8", dest_port=53,
+        ev("192.168.1.10", 0, dest_ip="8.8.8.8", dest_port=53,
            alert={"signature": 'ET MALWARE "raro"; con punto y coma'}),
-        ev("192.168.1.10", 0.2, dest_ip="1.1.1.1", dest_port=443,
+        ev("192.168.1.10", 0, dest_ip="1.1.1.1", dest_port=443,
            alert={"signature": "ET SCAN generico"}),
-        ev("192.168.1.10", 0.3, tipo="flow", dest_ip="1.1.1.1",
+        ev("192.168.1.10", 0, tipo="flow", dest_ip="1.1.1.1",
            flow={"bytes_toserver": 5000}),
-        ev("172.17.0.9", 0.1, dest_ip="9.9.9.9", dest_port=22,
+        ev("172.17.0.9", 0, dest_ip="9.9.9.9", dest_port=22,
            alert={"signature": "ET SCAN SSH"}),
         # internet: NO es un abonado y no debe aparecer
-        ev("203.0.113.5", 0.1, dest_ip="192.168.1.10", dest_port=445,
+        ev("203.0.113.5", 0, dest_ip="192.168.1.10", dest_port=445,
            alert={"signature": "ET ATTACK entrante"}),
         # mas viejo que la ventana: fuera
         ev("192.168.1.99", 9, dest_ip="8.8.4.4", alert={"signature": "ET VIEJO"}),
@@ -96,9 +103,9 @@ def main():
         f.writelines(hoy)
 
     # rotado de AYER, comprimido: la parte que se olvida siempre
-    ayer = [ev("192.168.1.10", 1.5, dest_ip="5.5.5.5", dest_port=8080,
+    ayer = [ev("192.168.1.10", 1, dest_ip="5.5.5.5", dest_port=8080,
                alert={"signature": "ET AYER"}),
-            ev("192.168.2.20", 1.2, tipo="dns", dest_ip="8.8.8.8",
+            ev("192.168.2.20", 1, tipo="dns", dest_ip="8.8.8.8",
                dns={"rrname": "malo.example.com"})]
     with gzip.open(os.path.join(tmp, "eve.json.1.gz"), "wt", encoding="utf-8") as f:
         f.writelines(ayer)

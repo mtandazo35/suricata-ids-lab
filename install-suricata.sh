@@ -10808,7 +10808,9 @@ _CD_CSS = """<style>
    - el extremo de dato de cada barra va redondeado y el origen a ras de la linea
      base, para que se puedan comparar longitudes sin que el radio mienta. */
 .inf{--azul:#2a78d6;--pista:#eef1f5;--linea:#e4e8ee;--tinta:#141b24;--tinta2:#3d4856;
-     --suave:#6b7684;--fondo:#fff;--sombra:0 1px 2px rgba(16,24,40,.05)}
+     --suave:#6b7684;--fondo:#fff;--sombra:0 1px 2px rgba(16,24,40,.05);
+     font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.inf h2,.inf h3,.inf h4{font-family:inherit}
 .inf h2{margin:0 0 5px;font-size:23px;letter-spacing:-.015em;color:var(--tinta);font-weight:700}
 .inf .per{color:var(--suave);font-size:13px;margin:0 0 18px}
 
@@ -10903,6 +10905,28 @@ _CD_CSS = """<style>
   .bars .fi,.mini .fi{animation:none}
   .cpe{transition:none}
 }
+@media print{
+  /* El PDF lo pagina el navegador; aqui solo se le dice que es cada cosa en papel. */
+  @page{size:A4;margin:14mm 12mm}
+  .nav,.acciones,.chips,.tecnico{display:none !important}
+  body{background:#fff !important}
+  /* en papel no hay nada que desplegar: se ve todo */
+  .inf details>*{display:revert !important}
+  .inf summary{display:none !important}
+  /* los navegadores no imprimen fondos por defecto, y sin fondo no hay barra */
+  .inf,.inf *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .inf{--sombra:none;--fondo:#fff;font-size:11pt}
+  .card{border:1px solid #d7dce3 !important;box-shadow:none !important;
+        break-inside:avoid;page-break-inside:avoid;margin-bottom:8mm}
+  .cpe{break-inside:avoid;page-break-inside:avoid;transform:none !important;
+       box-shadow:none !important}
+  .seccion{break-before:auto}
+  .seccion h3{break-after:avoid;page-break-after:avoid}
+  .tile .n{font-size:22pt}
+  .bars .fi,.mini .fi{animation:none}
+  .inf h2{font-size:17pt}
+  a{text-decoration:none;color:inherit}
+}
 @media(prefers-color-scheme:dark){
   /* pasos propios sobre fondo oscuro, no el claro invertido */
   .inf{--azul:#5598e7;--pista:#212932;--linea:#2b333e;--tinta:#e8edf3;--tinta2:#c2ccd8;
@@ -10994,6 +11018,16 @@ def conducta_barras(filas, titulo, n=10, sub=""):
     return ("<div class='card bloque'><h3>%s</h3>%s<div class=bars>%s</div></div>"
             % (esc(titulo), ("<p class=sub>%s</p>" % esc(sub)) if sub else "", fil))
 
+_CD_JS = """<script>
+// Guardar en PDF = imprimir a PDF del navegador. No se mete una libreria de PDF por
+// esto: el navegador ya sabe paginar y respeta la hoja de impresion de abajo. Antes
+// de imprimir se abre TODO lo plegado, porque en papel no hay nada que desplegar.
+function cdPdf(){
+  document.querySelectorAll('#informe details').forEach(function(d){ d.open = true; });
+  window.print();
+}
+</script>"""
+
 def conducta_page(q="", msg=""):
     """Informe por categoria de abuso: primero lo que hay que cortar, al final el ruido."""
     esc = html.escape
@@ -11025,7 +11059,7 @@ def conducta_page(q="", msg=""):
     graves = sum(len(porcat[c]) for c in ("botnet", "escaneo", "fuerza"))
     edad = int((time.time() - rep_.get("generado", 0)) // 60)
 
-    cab = ("<div class='card inf'><h2>Informe de %d dias &mdash; conducta por abonado</h2>"
+    cab = ("<div class=card><h2>Informe de %d dias &mdash; conducta por abonado</h2>"
            "<p class=per>Del %s al %s &middot; generado hace %d min &middot; %s lineas de log</p>"
            "<div class=tiles>"
            "<div class=tile><div class=n>%d</div><div class=l>abonados con actividad</div></div>"
@@ -11038,6 +11072,7 @@ def conducta_page(q="", msg=""):
            "<input name=q value='%s' placeholder='filtrar por IP o firma'>"
            "<button class=b>Filtrar</button></form> "
            "<a class=b href='/conducta.csv'>Descargar CSV</a> "
+           "<button class=b type=button onclick='cdPdf()'>Guardar en PDF</button> "
            "<form method=post action='/conducta/refrescar' style='display:inline'>"
            "<button class=b>Regenerar</button></form></div>%s</div>"
            % (dias, desde, hasta, edad,
@@ -11104,7 +11139,9 @@ def conducta_page(q="", msg=""):
         "Abonados con mas actividad sospechosa",
         sub="Los %d primeros de los ultimos %d dias. Pasa el raton por una barra para "
             "ver de que tipo es." % (min(10, len(filas)), dias))
-    return wrap(_CD_CSS + cab + barras + "".join(secciones), refresh=False, active="/conducta")
+    return wrap(_CD_CSS + "<div class=inf id=informe>" + cab + barras
+                + "".join(secciones) + "</div>" + _CD_JS,
+                refresh=False, active="/conducta")
 
 def historico_page(dias_n=30):
     esc = html.escape

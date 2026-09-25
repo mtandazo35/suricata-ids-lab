@@ -32,7 +32,8 @@ PIEZAS = ("CONDUCTA_FILE", "CONDUCTA_DIAS", "CONDUCTA_TOPE", "CONDUCTA_MAX",
           "conducta_recolectar", "conducta_csv", "guardar_conducta", "cargar_conducta",
           "_TRAD", "traducir", "CAT_CPE", "CAT_OTROS", "nombre_categoria",
           "CONDUCTA_GUIA", "conducta_categoria", "_CD_COLORES", "conducta_barras",
-          "PUERTO_NOMBRE", "nombre_puerto", "_cd_agrupa", "_cd_minibarras")
+          "PUERTO_NOMBRE", "nombre_puerto", "_cd_agrupa", "_cd_minibarras",
+          "_CD_CSS", "_CD_JS", "_CD_AZUL", "conducta_page")
 
 fallos = 0
 
@@ -230,6 +231,47 @@ def main():
     check("los miles se separan para poder leerlos", "9.690" in mb, mb[:300])
     check("sin datos no se pinta una caja vacia sin explicar",
           "Nada que destacar" in ns["_cd_minibarras"]([]))
+
+    # --- la pagina entera -----------------------------------------------------------
+    # El fallo que hubo: los tokens de color (--azul, --pista) vivian en .inf, que solo
+    # envolvia la tarjeta de cabecera. Las barras son tarjetas HERMANAS, asi que
+    # heredaban las variables sin definir y salian transparentes: filas con la IP y el
+    # numero, y ningun grafico en medio. Se ve raro pero no da ningun error.
+    ns["wrap"] = lambda cuerpo, refresh=True, active="": cuerpo
+    ns["CONDUCTA_FILE"] = os.path.join(tmp, "conducta.json")
+    ns["guardar_conducta"](r)
+    pag = ns["conducta_page"]()
+
+    ini = pag.find("<div class=inf")
+    check("el informe entero va dentro del contenedor de tokens", ini >= 0)
+    check("las barras quedan DENTRO de ese contenedor, no fuera",
+          ini >= 0 and ini < pag.find("class=bars"), (ini, pag.find("class=bars")))
+    check("y las fichas de los abonados tambien",
+          ini >= 0 and ini < pag.find("class=cpe"), (ini, pag.find("class=cpe")))
+    check("el contenedor se cierra al final, no antes de las secciones",
+          pag.rfind("</div>") > pag.rfind("class=cpe"))
+
+    check("el relleno de las barras usa el tono definido en los tokens",
+          "background:var(--azul)" in ns["_CD_CSS"])
+    check("la pista de la barra tambien sale de los tokens",
+          "background:var(--pista)" in ns["_CD_CSS"])
+    check("el informe fija su tipografia y no hereda la serif del navegador",
+          "font:" in ns["_CD_CSS"].split(".inf{")[1].split("}")[0],
+          ns["_CD_CSS"].split(".inf{")[1].split("}")[0][-90:])
+
+    # --- PDF ---------------------------------------------------------------------
+    check("hay boton para guardar en PDF", "cdPdf()" in pag, "")
+    check("antes de imprimir se abre lo plegado: en papel no se puede desplegar",
+          "d.open = true" in ns["_CD_JS"] and "window.print()" in ns["_CD_JS"])
+    imp = ns["_CD_CSS"].split("@media print{")[1].split("@media(prefers-color-scheme")[0]
+    check("al imprimir se fuerzan los fondos, o la barra sale en blanco",
+          "print-color-adjust:exact" in imp)
+    check("no se imprime la navegacion ni los botones",
+          ".nav" in imp and ".acciones" in imp and "display:none" in imp)
+    check("una ficha no se parte entre dos paginas",
+          "break-inside:avoid" in imp)
+    check("en papel se ve el contenido plegado",
+          "details>*" in imp.replace(" ", ""))
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

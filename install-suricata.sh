@@ -44,6 +44,10 @@ Uso: sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] 
   -n HOME_NET  red(es) "casa" en CIDR, separadas por coma (default: la de la interfaz)
   -p PUERTO    puerto de la web EveBox (default: 5636)
   -P CLAVE     clave del usuario web 'admin' (default: aleatoria, se muestra al final)
+  -a REDES     red(es) desde las que se permite entrar a la web, en CIDR y separadas
+               por coma (p.ej. 203.0.113.0/24). Sin esto los puertos web NO se abren
+               en el firewall: publicarlos en internet expone el trafico de tus
+               abonados y una clave que viaja en claro.
   -b BYTES     con -t: recorta cada flujo a los primeros BYTES en el propio receptor
                (p.ej. 10000). Para cuando NO se puede filtrar en el MikroTik: el
                espejo llega entero igual, pero no se ahoga al sensor con el payload.
@@ -65,13 +69,15 @@ USAGE
 # ----------------------------------------------------------------------------- args
 IFACE=""; HOME_NET=""; HOME_NET_GIVEN=0; WEB=1; WEB_PORT=5636; WEB_PASS=""; TZSP=0; TZSP_PORT=37008; MIRROR_SRC=""
 TZSP_BYTES=0   # recorte por flujo en el receptor (0 = sin recorte)
-while getopts "i:n:p:P:m:b:tWh" opt; do
+GESTION=""     # red(es) desde las que se permite llegar a la web (UFW)
+while getopts "i:n:p:P:m:b:a:tWh" opt; do
   case "$opt" in
     i) IFACE="$OPTARG" ;;
     n) HOME_NET="$OPTARG"; HOME_NET_GIVEN=1 ;;
     p) WEB_PORT="$OPTARG" ;;
     P) WEB_PASS="$OPTARG" ;;
     b) TZSP_BYTES="$OPTARG" ;;
+    a) GESTION="$OPTARG" ;;
     m) MIRROR_SRC="$OPTARG" ;;
     t) TZSP=1 ;;
     W) WEB=0 ;;
@@ -14710,11 +14716,22 @@ chmod 755 /usr/local/bin/suricata-panel-update
 
 if [ ! -f /etc/suricata-dashboard.conf ]; then
   DASH_PASS="$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(16)))')"
+  # MIS_REDES son las redes de TUS abonados: lo que decide que IP puede entrar a la
+  # cuarentena de CPEs. Por defecto el panel asume las privadas RFC1918, que es falso
+  # en cuanto das IP publica a tus clientes o espejas despues del NAT. Si se declaro
+  # -n, esas son las redes buenas y se dejan escritas desde el primer arranque.
+  _MIS_REDES=""
+  [ "$HOME_NET_GIVEN" -eq 1 ] && [ -n "$HOME_NET" ] && _MIS_REDES="MIS_REDES=${HOME_NET}"
   cat > /etc/suricata-dashboard.conf <<CONF
 # Panel de estadisticas de Suricata. Cambia PASS y reinicia: systemctl restart suricata-dashboard
 PORT=5637
 USER=admin
 PASS=${DASH_PASS}
+# Ventana del resumen en minutos. 30 deja casi ciego al detector (un CPE infectado que
+# actua a rafagas no acumula lo suficiente) y 1440 hace que cada generacion lea mucho
+# log. 360 es el punto que quedo tras medirlo en produccion.
+VENTANA_MIN=360
+${_MIS_REDES}
 CONF
   chmod 600 /etc/suricata-dashboard.conf
 fi
@@ -14735,7 +14752,14 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now suricata-dashboard >/dev/null 2>&1 || systemctl restart suricata-dashboard
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-  ufw status | grep -qE "^${DASH_PORT}/tcp\s+ALLOW" || ufw allow "${DASH_PORT}/tcp" comment 'Suricata dashboard' >/dev/null 2>&1 || true
+  # Solo desde las redes declaradas con -a. Abrirlo a todo internet publicaria el
+  # trafico de los abonados del cliente y una clave que viaja sin cifrar.
+  if [ -n "$GESTION" ]; then
+    for _g in ${GESTION//,/ }; do
+      ufw status | grep -qE "${DASH_PORT}.*ALLOW.*${_g}" \
+        || ufw allow from "$_g" to any port "${DASH_PORT}" proto tcp comment 'Suricata dashboard' >/dev/null 2>&1 || true
+    done
+  fi
 fi
 sleep 1
 # IP para mostrar (PUB_IP aun no esta definido en este punto del script)
@@ -15517,8 +15541,15 @@ PYP
 
   # --- firewall ----------------------------------------------------------------
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-    if ! ufw status | grep -qE "^${WEB_PORT}/tcp\s+ALLOW"; then
-      ufw allow "${WEB_PORT}/tcp" comment 'EveBox web' >/dev/null && ok "UFW: abierto ${WEB_PORT}/tcp para la web."
+    if [ -n "$GESTION" ]; then
+      for _g in ${GESTION//,/ }; do
+        ufw status | grep -qE "${WEB_PORT}.*ALLOW.*${_g}" \
+          || ufw allow from "$_g" to any port "${WEB_PORT}" proto tcp comment 'EveBox web' >/dev/null \
+          && ok "UFW: ${WEB_PORT}/tcp permitido solo desde ${_g}."
+      done
+    else
+      warn "UFW activo y sin -a: ${WEB_PORT}/tcp NO se abre. Publicar la web en internet"
+      warn "expone el trafico de tus abonados; usa -a TU_RED/24 o llega por VPN."
     fi
   fi
 fi

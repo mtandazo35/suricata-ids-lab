@@ -74,6 +74,7 @@ correr "salto al inicio de la ventana sin perder eventos" "$PY" tests/test_salto
 correr "reporte de 3 dias: que hizo cada CPE" "$PY" tests/test_conducta_3dias.py
 correr "historial persistente: sobrevive al reinicio y a logrotate" "$PY" tests/test_historial_db.py
 correr "cobertura del sensor: avisa cuando esta ciego" "$PY" tests/test_cobertura_sensor.py
+correr "recorte por flujo en el receptor" "$PY" tests/test_recorte_flujo.py
 correr "una address-list por categoria de abuso" "$PY" tests/test_listas_categoria.py
 correr "destinos de mala reputacion: solo publicas y solo lo solido" "$PY" tests/test_destinos_malos.py
 correr "diagnostico del MikroTik: que le falta para cortar" "$PY" tests/test_diagnostico_mk.py

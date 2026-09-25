@@ -44,6 +44,9 @@ Uso: sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] 
   -n HOME_NET  red(es) "casa" en CIDR, separadas por coma (default: la de la interfaz)
   -p PUERTO    puerto de la web EveBox (default: 5636)
   -P CLAVE     clave del usuario web 'admin' (default: aleatoria, se muestra al final)
+  -b BYTES     con -t: recorta cada flujo a los primeros BYTES en el propio receptor
+               (p.ej. 10000). Para cuando NO se puede filtrar en el MikroTik: el
+               espejo llega entero igual, pero no se ahoga al sensor con el payload.
   -m ORIGEN    con -t: IP/CIDR del MikroTik que envia el espejo TZSP (una o varias,
                separadas por coma). Restringe UFW y el receptor a ese origen.
                OBLIGATORIO con -t: sin origen conocido cualquier host de la red podria
@@ -61,12 +64,14 @@ USAGE
 
 # ----------------------------------------------------------------------------- args
 IFACE=""; HOME_NET=""; HOME_NET_GIVEN=0; WEB=1; WEB_PORT=5636; WEB_PASS=""; TZSP=0; TZSP_PORT=37008; MIRROR_SRC=""
-while getopts "i:n:p:P:m:tWh" opt; do
+TZSP_BYTES=0   # recorte por flujo en el receptor (0 = sin recorte)
+while getopts "i:n:p:P:m:b:tWh" opt; do
   case "$opt" in
     i) IFACE="$OPTARG" ;;
     n) HOME_NET="$OPTARG"; HOME_NET_GIVEN=1 ;;
     p) WEB_PORT="$OPTARG" ;;
     P) WEB_PASS="$OPTARG" ;;
+    b) TZSP_BYTES="$OPTARG" ;;
     m) MIRROR_SRC="$OPTARG" ;;
     t) TZSP=1 ;;
     W) WEB=0 ;;
@@ -14337,6 +14342,81 @@ PORT = int(os.environ.get("TZSP_PORT", "37008"))
 # Estado legible por el panel. El journal no le sirve: necesita saber, en datos, si el
 # espejo esta llegando de un origen que no esta autorizado.
 ESTADO_JSON = os.environ.get("TZSP_ESTADO", "/var/log/suricata-tzsp.json")
+
+# --- Recorte por flujo: el connection-bytes de quien no manda en el MikroTik ---------
+# Lo correcto es filtrar en el router (connection-bytes en mangle): ahi el trafico ni
+# siquiera sale, y se ahorra el enlace. Pero cuando no se tiene acceso al router, el
+# espejo llega entero igual y lo unico que queda es no ahogar al sensor con el.
+#
+# Suricata detecta en el ARRANQUE de cada conexion: el SYN, el handshake TLS con su SNI,
+# la cabecera HTTP, el DNS. El resto es payload, y con TLS ni se puede inspeccionar. Se
+# reenvian los primeros TZSP_BYTES de cada flujo y se tira lo que viene despues.
+#
+# Vale 0 por defecto: sin querer no se recorta nada, porque recortar de mas seria perder
+# deteccion sin que nadie lo pida.
+RECORTE = int(os.environ.get("TZSP_BYTES", "0"))
+RECORTE_TTL = 120          # un flujo callado este tiempo se olvida
+RECORTE_MAX = 200000       # tope de flujos vivos; si se pasa, se limpia lo viejo
+_flujos = {}               # clave -> [bytes reenviados, visto por ultima vez]
+_ultima_limpia = 0.0
+
+def _clave_flujo(f):
+    """Identidad del flujo a partir de la trama Ethernet, igual en los dos sentidos.
+
+    Devuelve None si no es IPv4/TCP/UDP: lo que no sepamos leer se reenvia siempre, que
+    es lo seguro. Recortar a ciegas algo que no entendemos seria crear puntos ciegos."""
+    if len(f) < 34:
+        return None
+    et = f[12] << 8 | f[13]
+    off = 14
+    if et == 0x8100 and len(f) >= 38:      # VLAN
+        et = f[16] << 8 | f[17]
+        off = 18
+    if et != 0x0800:
+        return None
+    ihl = (f[off] & 0x0F) * 4
+    if ihl < 20 or len(f) < off + ihl + 4:
+        return None
+    proto = f[off + 9]
+    if proto not in (6, 17):
+        return None
+    src = f[off + 12:off + 16]
+    dst = f[off + 16:off + 20]
+    sp = f[off + ihl] << 8 | f[off + ihl + 1]
+    dp = f[off + ihl + 2] << 8 | f[off + ihl + 3]
+    # el DNS no se recorta nunca: es diminuto y es donde mas se detecta
+    if proto == 17 and (sp == 53 or dp == 53):
+        return None
+    a, b = (src, sp), (dst, dp)
+    if a > b:
+        a, b = b, a
+    return (proto, a[0], a[1], b[0], b[1])
+
+def recortar(f, ahora):
+    """True = este paquete NO hace falta. Solo se descarta dentro de un flujo ya visto
+    que supero el limite."""
+    global _ultima_limpia
+    if not RECORTE:
+        return False
+    k = _clave_flujo(f)
+    if k is None:
+        return False
+    if ahora - _ultima_limpia > 30:
+        _ultima_limpia = ahora
+        viejos = [x for x, v in _flujos.items() if ahora - v[1] > RECORTE_TTL]
+        for x in viejos:
+            del _flujos[x]
+        if len(_flujos) > RECORTE_MAX:
+            _flujos.clear()      # mejor perder la cuenta que la memoria
+    v = _flujos.get(k)
+    if v is None:
+        _flujos[k] = [len(f), ahora]
+        return False
+    v[1] = ahora
+    if v[0] >= RECORTE:
+        return True
+    v[0] += len(f)
+    return False
 OUT_IF = os.environ.get("TZSP_OUT_IF", "ids-in")
 # --- Varios MikroTik: una interfaz por router ---
 # TZSP_MAP = "10.0.0.1=ids-in,10.9.9.1=ids-in2" manda el espejo de cada router a SU
@@ -14438,7 +14518,7 @@ def main():
     _destinos = ", ".join(f"{r}->{i}" for r, i in MAPA) or OUT_IF
     print(f"tzsp-decap: escuchando UDP {PORT} -> {_destinos}"
           f" (solo desde {os.environ.get('TZSP_MAP') or os.environ.get('TZSP_ALLOW')})", flush=True)
-    rxn = txn = bad = big = rej = 0
+    rxn = txn = bad = big = rej = cor = 0
     porif = {}
     visto = {}          # origen -> epoch del ultimo paquete ACEPTADO
     rej_por = {}        # origen no autorizado -> cuantos ha mandado
@@ -14453,6 +14533,8 @@ def main():
         f = decap(d)
         if f is None or len(f) < 14:
             bad += 1
+        elif recortar(f, time.time()):
+            cor += 1
         else:
             try:
                 tx = salida_de(peer[0])
@@ -14467,8 +14549,9 @@ def main():
             # con varios routers interesa ver que TODOS estan mandando: si uno se calla,
             # ese nodo se queda sin vigilancia y no hay ningun otro aviso
             det = (" por_origen=" + ",".join(f"{k}:{v}" for k, v in sorted(porif.items()))) if porif else ""
+            _rec = f" recortados={cor}" if RECORTE else ""
             print(f"tzsp-decap: rx={rxn} tx={txn} descartados={bad} muy_grandes={big} "
-                  f"rechazados_origen={rej} ultimo_origen={peer[0]}{det}", flush=True)
+                  f"rechazados_origen={rej}{_rec} ultimo_origen={peer[0]}{det}", flush=True)
             # Y lo mismo en JSON, porque el panel no puede leer el journal. Sin esto no
             # hay forma de avisar de que el espejo esta llegando de un origen que no
             # esta autorizado: el receptor lo tira, Suricata no ve nada, y el panel
@@ -14478,6 +14561,7 @@ def main():
                 with open(_tmp, "w", encoding="utf-8") as _f:
                     json.dump({"ts": int(now), "rx": rxn, "tx": txn, "descartados": bad,
                                "muy_grandes": big, "rechazados": rej,
+                               "recortados": cor, "recorte_bytes": RECORTE,
                                "ventana": {"aceptados": dict(porif),
                                            "rechazados": dict(rej_por)},
                                "ultimo_visto": {k: int(v) for k, v in visto.items()},
@@ -14531,6 +14615,10 @@ Environment=TZSP_OUT_IF=${TZSP_IN}
 Environment=TZSP_ALLOW=${MIRROR_SRC}
 # cada router a su interfaz (ver tzsp-decap.py); con uno solo equivale a lo de siempre
 Environment=TZSP_MAP=${TZSP_MAP}
+# Recorte por flujo (0 = desactivado). Es el connection-bytes de quien no puede tocar
+# el MikroTik: se reenvian los primeros bytes de cada conexion, que es donde Suricata
+# detecta, y se tira el payload, que con TLS no se puede inspeccionar igualmente.
+Environment=TZSP_BYTES=${TZSP_BYTES}
 # crea los pares veth si no existen; sin IPv6 para que no metan ruido propio.
 # Las tramas reinyectadas NO deben entrar a la pila IP del kernel ni reenviarse.
 # mtu 65535 (maximo de veth): el router agrega segmentos (GRO) y manda tramas de hasta
@@ -14538,6 +14626,13 @@ Environment=TZSP_MAP=${TZSP_MAP}
 # en el reensamblado. Suricata dimensiona el snaplen por el MTU (block-size 128k).
 ${TZSP_PRE}# el SO_RCVBUF de 16 MB del receptor lo topa rmem_max
 ExecStartPre=-/usr/sbin/sysctl -qw net.core.rmem_max=16777216
+# Reensamblado IP. Una trama espejada de 1514 B mas la cabecera TZSP pasa de 1500, asi
+# que llega FRAGMENTADA. Con los 4 MB por defecto y decenas de miles de fragmentos por
+# segundo, la cache se desborda y se descarta casi todo: se pierde una parte enorme del
+# espejo con kernel_drops en cero y todo aparentemente sano.
+ExecStartPre=-/usr/sbin/sysctl -qw net.ipv4.ipfrag_high_thresh=67108864
+ExecStartPre=-/usr/sbin/sysctl -qw net.ipv4.ipfrag_low_thresh=50331648
+ExecStartPre=-/usr/sbin/sysctl -qw net.ipv4.ipfrag_time=15
 ExecStart=/usr/bin/python3 /usr/local/bin/tzsp-decap.py
 Restart=always
 RestartSec=2

@@ -321,6 +321,13 @@ def main():
           "Regenerar" not in pag and "/conducta/refrescar" not in pag, "")
     check("el buscador va a la derecha, detras del boton",
           pag.find("cdPdf()") < pag.find("class=busca"), "")
+    # "cuantos veo" y "como paso al resto" son la misma pregunta: van juntos, al final.
+    _arriba = pag[:pag.rfind("<div class=pager>")]
+    _abajo = pag[pag.rfind("<div class=pager>"):]
+    check("el selector de cuantos por pagina va dentro del paginador",
+          "class=porpag" in _abajo, _abajo[:200])
+    check("y ya no esta en la barra de arriba",
+          "class=porpag" not in _arriba, "")
     check("el PDF es la accion principal de la pagina", "b pri" in pag, "")
     # el CSV sale de la barra por peticion; la ruta se queda, que el PDF va paginado y
     # sacar 600 abonados de una vez sigue haciendo falta
@@ -430,6 +437,13 @@ def main():
 
     check("con una sola pagina no se pinta paginador",
           ns["conducta_paginador"](1, 1, "", 12, 1, 12) == "")
+    # Si eliges 100 y todo cabe en una pagina, sin esto te quedas encerrado: desaparece
+    # el paginador, y con el la unica forma de volver a 10.
+    _sola = ns["conducta_paginador"](1, 1, "", 12, 1, 12, 100, "<form class=porpag></form>")
+    check("pero con una sola pagina el selector sigue saliendo",
+          "class=porpag" in _sola, _sola)
+    check("y sin numeros de pagina, que no llevarian a ningun lado",
+          "class='pg act'" not in _sola, _sola)
 
     pg = ns["conducta_paginador"](3, 9, "", 450, 101, 150)
     check("la pagina actual no es un enlace", "class='pg act'>3<" in pg, pg[:200])

@@ -9339,10 +9339,12 @@ navegador cortaria por timeout en cualquier caja con trafico de verdad. La linea
 del informe dice <b>hace cuantos minutos</b> se genero, que es lo que hay que mirar para
 saber si lo que se ve esta fresco.</p>
 <p>La barra de arriba tiene <b>Generar reporte</b> (abre todas las fichas e imprime, una hoja
-por abonado), el selector de <b>cuantos abonados por pagina</b> &mdash;10 por defecto, porque
-cincuenta fichas seguidas no se leen&mdash; y el <b>filtro</b> por IP o por firma. El tamano de
-pagina y el filtro viajan juntos: cambiar uno no borra el otro, y el paginador de abajo
-arrastra los dos.</p>
+por abonado) y el <b>filtro</b> por IP o por firma. Abajo, junto al paginador, esta el selector
+de <b>cuantos abonados por pagina</b>: 10 por defecto, porque cincuenta fichas seguidas no se
+leen. Va ahi porque responde a la misma pregunta que el paginador y se usa al terminar de leer,
+y sale <b>aunque haya una sola pagina</b>: si no, al elegir 100 desapareceria el paginador y con
+el la unica forma de volver a 10. El tamano de pagina y el filtro viajan juntos: cambiar uno no
+borra el otro.</p>
 <p>El <b>CSV</b> usa punto y coma y lleva BOM, que es lo que abre Excel en espanol sin pedir
 nada. Las firmas que traen <code>;</code> o comillas van entrecomilladas: sin eso se corren
 las columnas y el cliente termina leyendo el dato de otro abonado.</p>
@@ -11239,11 +11241,7 @@ _CD_CSS = """<style>
 
 .acciones{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:20px 0 0}
 .acciones form{display:flex;gap:0;margin:0}
-.acciones .porpag{margin-left:auto;align-items:center;gap:8px}
-.acciones .porpag label,.acciones .porpag .pl{font-size:13px;color:var(--suave)}
-.acciones .porpag select{padding:9px 10px;border:1px solid #ccd3dc;border-radius:10px;
-background:#fff;font:14px system-ui;color:var(--tinta);cursor:pointer}
-.acciones .porpag select:focus{outline:2px solid var(--azul);outline-offset:-1px}
+.acciones .busca{margin-left:auto}
 /* el filtro y su boton, pegados: se leen como un solo control */
 .acciones input{padding:9px 13px;border:1px solid #ccd3dc;border-right:0;
                 border-radius:10px 0 0 10px;font-size:13.5px;min-width:230px;
@@ -11264,8 +11262,7 @@ background:#fff;font:14px system-ui;color:var(--tinta);cursor:pointer}
 .inf .b.sec{color:var(--suave)}
 @media(max-width:700px){
   .acciones{gap:8px}
-  .acciones .porpag{margin-left:0}
-  .acciones .busca{width:100%}
+  .acciones .busca{margin-left:0;width:100%}
   .acciones input{min-width:0;flex:1 1 140px}
 }
 
@@ -11345,6 +11342,11 @@ background:#fff;font:14px system-ui;color:var(--tinta);cursor:pointer}
        margin:16px 0;padding:10px 14px;background:var(--fondo);border:1px solid var(--linea);
        border-radius:11px}
 .pgc{color:var(--suave);font-size:13px;font-variant-numeric:tabular-nums}
+.pager .porpag{display:flex;align-items:center;gap:8px;margin:0}
+.pager .porpag label,.pager .porpag .pl{font-size:13px;color:var(--suave)}
+.pager .porpag select{padding:6px 9px;border:1px solid var(--linea);border-radius:8px;
+background:#fff;font:600 13px system-ui;color:var(--tinta);cursor:pointer}
+.pager .porpag select:focus{outline:2px solid var(--azul);outline-offset:-1px}
 .pgn{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
 .pg{display:inline-block;min-width:32px;text-align:center;padding:5px 9px;border-radius:8px;
     font-size:13px;font-weight:600;color:var(--tinta2);text-decoration:none;
@@ -11689,11 +11691,13 @@ def _cd_por(n):
         return CONDUCTA_POR_PAGINA
     return n if n in CONDUCTA_OPCIONES else CONDUCTA_POR_PAGINA
 
-def conducta_paginador(pag, paginas, q, total, desde, hasta, por=None):
+def conducta_paginador(pag, paginas, q, total, desde, hasta, por=None, sel=""):
     """Navegacion entre paginas. Muestra los extremos y una ventana alrededor de la
     actual: con 13 paginas caben todas, con 200 no, y una tira de 200 numeros es tan
     inutil como no tener paginador."""
-    if paginas <= 1:
+    # Con una sola pagina no hay a donde ir, pero el selector SI tiene que salir: si
+    # eliges 100 y todo cabe en una pagina, sin el te quedas sin forma de volver a 10.
+    if paginas <= 1 and not sel:
         return ""
     qs = ("&q=" + _up.quote(q)) if q else ""
     # sin esto, saltar de pagina te devuelve a los 10 por defecto y se pierde la eleccion
@@ -11704,17 +11708,18 @@ def conducta_paginador(pag, paginas, q, total, desde, hasta, por=None):
             return "<span class='pg act'>%s</span>" % (txt or n)
         return "<a class='pg %s' href='/conducta?p=%d%s'>%s</a>" % (cls, n, qs, txt or n)
     nums, ultimo = [], 0
-    for n in range(1, paginas + 1):
-        if n <= 2 or n > paginas - 2 or abs(n - pag) <= 2:
-            if ultimo and n > ultimo + 1:
-                nums.append("<span class='pgsep'>&hellip;</span>")
-            nums.append(enlace(n))
-            ultimo = n
-    return ("<div class=pager><span class=pgc>%s&ndash;%s de %s abonados</span>"
+    if paginas > 1:          # un unico "1" encendido no es navegacion, es ruido
+        for n in range(1, paginas + 1):
+            if n <= 2 or n > paginas - 2 or abs(n - pag) <= 2:
+                if ultimo and n > ultimo + 1:
+                    nums.append("<span class='pgsep'>&hellip;</span>")
+                nums.append(enlace(n))
+                ultimo = n
+    return ("<div class=pager><span class=pgc>%s&ndash;%s de %s abonados</span>%s"
             "<span class=pgn>%s%s%s</span></div>"
             % ("{:,}".format(desde).replace(",", "."),
                "{:,}".format(hasta).replace(",", "."),
-               "{:,}".format(total).replace(",", "."),
+               "{:,}".format(total).replace(",", "."), sel,
                enlace(max(1, pag - 1), "&lsaquo; anterior") if pag > 1 else "",
                "".join(nums),
                enlace(min(paginas, pag + 1), "siguiente &rsaquo;") if pag < paginas else ""))
@@ -11817,18 +11822,20 @@ def conducta_page(q="", msg="", pag=1, por=None):
                     for n in CONDUCTA_OPCIONES)
     # El filtro y el tamano de pagina viajan juntos: cambiar uno no puede borrar el otro,
     # asi que cada formulario lleva escondido el valor del contrario.
-    acciones = ("<div class=acciones>"
-                "<button class='b pri' type=button onclick='cdPdf()'>Generar reporte</button>"
-                "<form class=porpag method=get action='/conducta'>"
+    # El selector vive abajo, con el paginador: las dos cosas responden a la misma
+    # pregunta (cuanto estoy viendo y como paso al resto), y se usan al terminar de leer.
+    selector = ("<form class=porpag method=get action='/conducta'>"
                 "<input type=hidden name=q value='%s'>"
                 "<label for=cdpor>Ver</label>"
                 "<select id=cdpor name=n onchange='this.form.submit()'>%s</select>"
-                "<span class=pl>por pagina</span></form>"
+                "<span class=pl>por pagina</span></form>" % (esc(q), _opts))
+    acciones = ("<div class=acciones>"
+                "<button class='b pri' type=button onclick='cdPdf()'>Generar reporte</button>"
                 "<form class=busca method=get action='/conducta'>"
                 "<input type=hidden name=n value='%d'>"
                 "<input name=q value='%s' placeholder='filtrar por IP o firma'>"
                 "<button class=b>Filtrar</button></form></div>"
-                % (esc(q), _opts, por, esc(q)))
+                % (por, esc(q)))
     cab = ("<div class=card><h2>Informe de %d dias &mdash; conducta por abonado</h2>"
            "<p class=per>Del %s al %s &middot; generado hace %d min &middot; %s lineas de log</p>"
            "<div class=tiles>"
@@ -11907,7 +11914,8 @@ def conducta_page(q="", msg="", pag=1, por=None):
         secciones = ["<div class=card><p class=sub2>Ningun abonado coincide con el filtro.</p></div>"]
     # Un solo paginador, al final. Arriba quedaba pegado al bloque de firmas ruidosas y
     # partia el resumen de las fichas; para saltar de pagina se llega leyendo hasta abajo.
-    pgr = conducta_paginador(pag, paginas, q, total_n, ini_i + 1, ini_i + len(trozo), por)
+    pgr = conducta_paginador(pag, paginas, q, total_n, ini_i + 1, ini_i + len(trozo),
+                             por, selector)
     barras = conducta_barras(
         sorted(filas, key=lambda f: -f["alertas"]),
         "Abonados con mas actividad sospechosa",

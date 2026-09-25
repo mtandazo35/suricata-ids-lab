@@ -11281,6 +11281,147 @@ function cdPdf(){
 }
 </script>"""
 
+# --- Glosario ----------------------------------------------------------------------
+# El informe lo lee gente que no sabe que es un C2, y no tiene por que saberlo. Poner
+# el termino sin explicarlo obliga a preguntarle a un ingeniero, que es exactamente lo
+# que el panel deberia evitar.
+GLOSARIO = {
+    "botnet": ("botnet", "Una botnet es un conjunto de equipos infectados que alguien "
+               "controla a distancia sin que sus duenos lo sepan: computadores, routers, "
+               "camaras, DVR o telefonos. Un equipo dentro de una botnet puede escanear "
+               "internet, buscar aparatos vulnerables, probar contrasenas, participar en "
+               "ataques o mandar spam, todo sin que el abonado note nada raro."),
+    "c2": ("servidor de control (C2)", "Es el servidor desde el que un atacante da "
+           "ordenes a los equipos que ha infectado. Que un equipo hable con uno de estos "
+           "servidores es la senal mas clara de que esta comprometido: no es el abonado "
+           "quien decide esas conexiones."),
+    "escaneo": ("escaneo", "Es probar muchas direcciones de internet, una tras otra, "
+                "para ver cuales responden y con que servicios. Un equipo normal no hace "
+                "esto: lo hace un programa buscando aparatos que pueda atacar."),
+    "fuerza": ("fuerza bruta", "Es intentar entrar a un servicio ajeno probando "
+               "contrasenas una y otra vez hasta acertar. Cada intento fallido queda "
+               "registrado en el equipo atacado y suele terminar en una denuncia."),
+    "spam": ("spam", "Correo basura enviado en masa. Cuando sale de tu red, quien "
+             "termina en las listas negras de correo es tu IP publica, no el abonado."),
+    "dns": ("DNS de malware", "El DNS es la guia telefonica de internet: traduce "
+            "nombres a direcciones. Cuando un equipo pregunta muchas veces por nombres "
+            "que solo usan programas maliciosos, suele ser la primera senal de que hay "
+            "algo instalado, antes incluso de que llegue a conectarse."),
+    "p2p": ("P2P", "Programas de intercambio de archivos como BitTorrent. No es un "
+            "ataque ni ensucia tu reputacion: consume enlace y abre muchisimas "
+            "conexiones a la vez."),
+    "minado": ("criptominado", "Software que usa el equipo para generar criptomonedas. "
+               "A veces lo instala el propio dueno y a veces llega con un virus; "
+               "conviene mirarlo antes de decidir."),
+    "telnet": ("Telnet", "Un sistema antiguo para administrar aparatos a distancia, sin "
+               "cifrado. Casi nadie deberia usarlo hoy, pero muchisimas camaras y routers "
+               "lo siguen teniendo abierto, y por eso las botnets lo buscan tanto."),
+    "tr069": ("TR-069", "El protocolo con el que un operador administra los routers de "
+              "sus clientes. Que alguien lo busque masivamente por internet suele ser un "
+              "intento de tomar el control de equipos ajenos."),
+    "reputacion": ("listas de reputacion", "Listas publicas que recopilan direcciones "
+                   "vistas atacando o alojando programas maliciosos. Que tu IP publica "
+                   "aparezca en una es lo que hace que otros servicios te bloqueen."),
+    "falso": ("falso positivo", "Una alerta que resulta no ser un problema real. Pasa, y "
+              "por eso el sistema no da nada por confirmado con una sola senal."),
+}
+
+def glosario_html(clave, esc=None):
+    """El termino explicado, plegado, junto a donde aparece. Plegado a proposito: quien
+    ya sabe que es una botnet no tiene que leerlo cada vez."""
+    esc = esc or html.escape
+    g = GLOSARIO.get(clave)
+    if not g:
+        return ""
+    return ("<details class=glos><summary>&iquest;Que significa <b>%s</b>?</summary>"
+            "<p>%s</p></details>" % (esc(g[0]), esc(g[1])))
+
+# --- Indicios: por que decimos lo que decimos ---------------------------------------
+# Una sola senal no confirma nada (es la regla del QA y es correcta: un unico aviso
+# debil no puede terminar en "infectado"). Lo que sube la confianza es que varias
+# senales INDEPENDIENTES apunten a lo mismo.
+CPE_INDICIOS = [
+    ("c2", "Comunicacion con servidor de control (C2)",
+     ["Botnet CnC", "Botnet", "Botnet Mirai", "Botnet Katana", "Troyano", "Ransomware"], []),
+    ("malware", "Trafico de programas maliciosos",
+     ["Trafico de malware"], []),
+    ("escaneo", "Escaneo de internet",
+     ["Escaneo de puertos", "Escaneo SSH", "Escaneo Telnet", "Escaneo TR-069",
+      "Escaneo saliente"], []),
+    ("telnet", "Busqueda de aparatos por Telnet",
+     ["Escaneo Telnet"], ["23", "2323"]),
+    ("tr069", "Busqueda de routers por TR-069",
+     ["Escaneo TR-069"], ["7547"]),
+    ("fuerza", "Intentos de contrasena contra terceros",
+     ["Fuerza bruta", "RDP/VNC"], ["22", "3389", "5900"]),
+    ("dns", "Consultas a dominios de malware",
+     ["DNS sospechoso"], []),
+    ("spam", "Envio de correo en volumen", ["Spam"], ["25", "465", "587"]),
+]
+CONFIANZA = [(4, "alta", "Alta confianza"), (2, "probable", "Probable"),
+             (1, "sospecha", "Sospecha"), (0, "ninguna", "Sin evidencia")]
+
+def indicios_cpe(f, dias_persistencia=2, destinos_muchos=40):
+    """Los indicios de un CPE, cada uno con su veredicto: si, detectado o no.
+
+    'detectado' (ambar) es para lo que apunta pero no basta solo: muchos destinos
+    distintos puede ser un escaneo o un movil con muchas apps abiertas."""
+    firmas = {traducir(a) for a, _n in (f.get("firmas") or [])}
+    puertos = {str(a) for a, _n in (f.get("puertos") or [])}
+    out = []
+    for clave, etiqueta, cats, ptos in CPE_INDICIOS:
+        if firmas & set(cats):
+            out.append([clave, etiqueta, "si"])
+        elif ptos and puertos & set(ptos):
+            out.append([clave, etiqueta, "quiza"])
+        else:
+            out.append([clave, etiqueta, "no"])
+    # senales que no vienen de una firma sino del PATRON
+    out.append(["destinos", "Muchos destinos distintos",
+                "si" if f.get("destinos_n", 0) >= destinos_muchos else "no"])
+    out.append(["persistencia", "Comportamiento repetido en varios dias",
+                "si" if f.get("dias", 0) >= dias_persistencia else "no"])
+    return out
+
+def confianza_cpe(indicios):
+    """Cuenta senales independientes. Las 'quiza' valen la mitad: un puerto por si solo
+    no prueba nada, pero acompanado suma."""
+    n = sum(1 for _c, _e, v in indicios if v == "si")
+    n += 0.5 * sum(1 for _c, _e, v in indicios if v == "quiza")
+    for minimo, clave, texto in CONFIANZA:
+        if n >= minimo:
+            return clave, texto, n
+    return "ninguna", "Sin evidencia", n
+
+def indicios_html(f, esc=None):
+    esc = esc or html.escape
+    ind = indicios_cpe(f)
+    _cl, texto, n = confianza_cpe(ind)
+    icono = {"si": "&#10004;", "quiza": "&#9888;", "no": "&#10007;"}
+    filas = "".join(
+        "<tr class=i-%s><td>%s</td><td class=v>%s %s</td></tr>"
+        % (v, esc(e), icono[v],
+           {"si": "Si", "quiza": "Detectado", "no": "No"}[v])
+        for _c, e, v in ind)
+    return ("<table class=indicios><thead><tr><th>Indicio</th><th>Resultado</th></tr>"
+            "</thead><tbody>%s</tbody></table>"
+            "<p class=conf>Nivel de confianza: <b>%s</b> &mdash; %s senal(es) "
+            "independiente(s) apuntan a lo mismo.</p>"
+            % (filas, esc(texto), ("%g" % n)))
+
+def _cd_doc(cuerpo):
+    """El documento completo, como el resto de paginas del panel.
+
+    Ojo con wrap(): no construye la pagina, solo INSERTA la barra despues de <body>.
+    Pasarle un fragmento no falla, devuelve el fragmento tal cual, y la pagina sale sin
+    barra, sin CSS base y con la serif del navegador."""
+    return ("<!doctype html><html lang=es><head><meta charset=utf-8>"
+            "<link rel=icon type=image/png href=/favicon.ico>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<title>Suricata</title><style>" + BASE_CSS + "</style>" + _CD_CSS
+            + "</head><body>" + nav("/conducta") + "<main>" + cuerpo + "</main>"
+            + _CD_JS + "</body></html>")
+
 def conducta_page(q="", msg=""):
     """Informe por categoria de abuso: primero lo que hay que cortar, al final el ruido."""
     esc = html.escape
@@ -11293,7 +11434,7 @@ def conducta_page(q="", msg=""):
                   "<form method=post action='/conducta/refrescar'>"
                   "<button class=b>Generar ahora</button></form></div>"
                   % (CONDUCTA_DIAS, CONDUCTA_CADA // 3600, CONDUCTA_DIAS))
-        return wrap(cuerpo, refresh=False, active="/conducta")
+        return _cd_doc(cuerpo)
 
     filas = rep_.get("filas", [])
     q = (q or "").strip()
@@ -11362,7 +11503,9 @@ def conducta_page(q="", msg=""):
                 "<span class=b>%s alertas</span><span class=b>%d dias activo</span>"
                 "<span class=b>ultima vez %s</span></div>"
                 "<p class=resumen>%s</p>"
+                "%s"
                 "<details><summary>Ver que estuvo haciendo</summary>"
+                "<h4>&iquest;Por que lo decimos?</h4>%s"
                 "<h4>Que hizo</h4>%s"
                 "<h4>Para que usa internet</h4>%s"
                 "<h4>Sitios que mas visito</h4>%s"
@@ -11371,6 +11514,7 @@ def conducta_page(q="", msg=""):
                 "</details></div>"
                 % (color, esc(f["ip"]), "{:,}".format(f["alertas"]).replace(",", "."),
                    f["dias"], fmt(f["ultima"]), resumen,
+                   glosario_html(c, esc), indicios_html(f, esc),
                    _cd_minibarras(acts),
                    _cd_minibarras(puertos),
                    _cd_minibarras(doms),
@@ -11392,9 +11536,8 @@ def conducta_page(q="", msg=""):
         "Abonados con mas actividad sospechosa",
         sub="Los %d primeros de los ultimos %d dias. Pasa el raton por una barra para "
             "ver de que tipo es." % (min(10, len(filas)), dias))
-    return wrap(_CD_CSS + "<div class=inf id=informe>" + cab + barras
-                + "".join(secciones) + "</div>" + _CD_JS,
-                refresh=False, active="/conducta")
+    return _cd_doc("<div class=inf id=informe>" + cab + barras
+                   + "".join(secciones) + "</div>")
 
 def historico_page(dias_n=30):
     esc = html.escape

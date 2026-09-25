@@ -33,7 +33,9 @@ PIEZAS = ("CONDUCTA_FILE", "CONDUCTA_DIAS", "CONDUCTA_TOPE", "CONDUCTA_MAX",
           "_TRAD", "traducir", "CAT_CPE", "CAT_OTROS", "nombre_categoria",
           "CONDUCTA_GUIA", "conducta_categoria", "_CD_COLORES", "conducta_barras",
           "PUERTO_NOMBRE", "nombre_puerto", "_cd_agrupa", "_cd_minibarras",
-          "_CD_CSS", "_CD_JS", "_CD_AZUL", "conducta_page")
+          "_CD_CSS", "_CD_JS", "_CD_AZUL", "conducta_page", "_cd_doc",
+          "GLOSARIO", "glosario_html", "CPE_INDICIOS", "CONFIANZA",
+          "indicios_cpe", "confianza_cpe", "indicios_html")
 
 fallos = 0
 
@@ -237,10 +239,22 @@ def main():
     # envolvia la tarjeta de cabecera. Las barras son tarjetas HERMANAS, asi que
     # heredaban las variables sin definir y salian transparentes: filas con la IP y el
     # numero, y ningun grafico en medio. Se ve raro pero no da ningun error.
-    ns["wrap"] = lambda cuerpo, refresh=True, active="": cuerpo
+    ns["BASE_CSS"] = "/*base*/"
+    ns["nav"] = lambda activo="": "<div class=nav><a href=/conducta>Reporte</a></div>"
     ns["CONDUCTA_FILE"] = os.path.join(tmp, "conducta.json")
     ns["guardar_conducta"](r)
     pag = ns["conducta_page"]()
+
+    # wrap() no construye la pagina: solo INSERTA la barra despues de <body>. Pasarle
+    # un fragmento no falla, devuelve el fragmento tal cual, y la pagina sale sin barra,
+    # sin CSS base y con la serif del navegador. Eso es lo que se veia.
+    check("la pagina es un documento completo, no un fragmento",
+          pag.lstrip().startswith("<!doctype html"), pag[:60])
+    check("y trae la barra de navegacion", "class=nav" in pag, "")
+    check("con el CSS base del panel, no solo el del informe", "/*base*/" in pag)
+    vacia = ns["_cd_doc"]("<p>sin datos</p>")
+    check("hasta la pagina vacia trae barra y estilo",
+          vacia.lstrip().startswith("<!doctype html") and "class=nav" in vacia)
 
     ini = pag.find("<div class=inf")
     check("el informe entero va dentro del contenedor de tokens", ini >= 0)
@@ -272,6 +286,54 @@ def main():
           "break-inside:avoid" in imp)
     check("en papel se ve el contenido plegado",
           "details>*" in imp.replace(" ", ""))
+
+    # --- glosario -------------------------------------------------------------------
+    # El informe lo lee gente que no sabe que es un C2, y no tiene por que saberlo.
+    g = ns["glosario_html"]("botnet")
+    check("el termino se explica junto a donde aparece", "botnet" in g.lower(), g[:80])
+    check("va plegado: quien ya lo sabe no lo lee cada vez", g.startswith("<details"))
+    check("la explicacion no usa jerga sin explicar",
+          "equipos infectados" in ns["GLOSARIO"]["botnet"][1])
+    check("un termino que no existe no rompe la pagina", ns["glosario_html"]("xyz") == "")
+    check("todas las categorias del informe tienen glosario",
+          all(c in ns["GLOSARIO"] for c, _n, _cs, _l in ns["CAT_CPE"]),
+          [c for c, _n, _cs, _l in ns["CAT_CPE"] if c not in ns["GLOSARIO"]])
+
+    # --- indicios: una sola senal no confirma nada -----------------------------------
+    def ind(firmas=(), puertos=(), destinos_n=0, dias=1):
+        return ns["indicios_cpe"]({"firmas": [[f, 1] for f in firmas],
+                                   "puertos": [[p_, 1] for p_ in puertos],
+                                   "destinos_n": destinos_n, "dias": dias})
+
+    solo = ind(firmas=["ET SCAN Potential SSH Scan"])
+    cl, _t, n = ns["confianza_cpe"](solo)
+    check("una sola senal NO llega a alta confianza", cl != "alta", (cl, n))
+    check("pero tampoco se ignora: queda como sospecha", cl == "sospecha", (cl, n))
+
+    muchas = ind(firmas=["ET MALWARE Botnet CnC checkin", "ET SCAN Potential SSH Scan",
+                         "ET MALWARE Known Malicious Domain"],
+                 puertos=["23"], destinos_n=120, dias=3)
+    cl2, _t2, n2 = ns["confianza_cpe"](muchas)
+    check("varias senales independientes si suben la confianza", cl2 == "alta", (cl2, n2))
+    check("mas senales = mas confianza", n2 > n, (n, n2))
+
+    check("sin nada, no se inventa evidencia",
+          ns["confianza_cpe"](ind())[0] == "ninguna", ns["confianza_cpe"](ind()))
+
+    # el puerto por si solo es un indicio DEBIL, no una confirmacion
+    solo_puerto = ind(puertos=["23"])
+    check("un puerto suelto se marca como 'quiza', no como 'si'",
+          any(v == "quiza" for _c, _e, v in solo_puerto)
+          and not any(v == "si" for _c, _e, v in solo_puerto), solo_puerto)
+    check("y por si solo no pasa de sospecha",
+          ns["confianza_cpe"](solo_puerto)[0] in ("ninguna", "sospecha"),
+          ns["confianza_cpe"](solo_puerto))
+
+    tabla = ns["indicios_html"]({"firmas": [["ET MALWARE Botnet CnC checkin", 9]],
+                                 "puertos": [["23", 5]], "destinos_n": 90, "dias": 3})
+    check("la tabla dice que indicios se cumplen y cuales no",
+          "Si" in tabla and "No" in tabla, "")
+    check("y cierra con el nivel de confianza", "Nivel de confianza" in tabla)
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

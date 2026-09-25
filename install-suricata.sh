@@ -7991,7 +7991,10 @@ BASE_CSS = (
     ".mono{font-family:ui-monospace,Consolas,monospace}"
     ".muted{color:#9a9a95;font-size:12px}"
     "code{background:#f1f1ef;padding:1px 5px;border-radius:4px}"
-    ".card{border:1px solid #e7e6e2;border-radius:12px;background:#fff}"
+    # El margen va AQUI y no en cada pagina: sin el, dos tarjetas hermanas salen pegadas
+    # y parece un fallo de render. Paso en el informe (barras y firmas ruidosas) porque el
+    # .card base no traia separacion y cada pagina tenia que acordarse de ponersela.
+    ".card{border:1px solid #e7e6e2;border-radius:12px;background:#fff;margin-bottom:16px}"
     "table{width:100%;border-collapse:collapse;font-size:13px}"
     "thead th{background:#f4f4f2;text-align:left;padding:9px 12px;border-bottom:1px solid #e7e6e2;color:#52514e;font-weight:600}"
     "tbody td{padding:9px 12px;border-bottom:1px solid #f2f1ee;vertical-align:top}"

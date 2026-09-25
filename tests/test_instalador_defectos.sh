@@ -71,6 +71,12 @@ check "se permite solo desde las redes de -a" \
 check "y sin -a se avisa en vez de abrir" \
       "$(grep -c 'UFW activo y sin -a' install-suricata.sh)" "1"
 
+# --- las tarjetas no salen pegadas -------------------------------------------------
+# El .card de BASE_CSS no traia margen, asi que dos tarjetas hermanas se tocaban y cada
+# pagina tenia que acordarse de separarlas. Se vio en el informe, entre las barras y el
+# bloque de firmas ruidosas.
+check "el .card base separa una tarjeta de la siguiente"       "$(grep -cE '\.card\{border:1px solid #e7e6e2;.*margin-bottom:16px\}' install-suricata.sh)" "1"
+
 # --- la ayuda lo cuenta ------------------------------------------------------------
 check "el flag -a esta en getopts" \
       "$(grep -cE '^while getopts "[^"]*a:[^"]*" opt; do$' install-suricata.sh)" "1"

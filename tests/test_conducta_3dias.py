@@ -166,6 +166,12 @@ def main():
           cat("ET INFO Observed DNS Query to .life TLD"))
     check("sin firmas, tambien otros", cat() == "otros", cat())
 
+    check("la gravedad nunca va solo en el color: lleva su nombre escrito",
+          all(len(v) == 4 and v[3] for v in ns["CONDUCTA_GUIA"].values()),
+          {k: v[3:] for k, v in ns["CONDUCTA_GUIA"].items()})
+    check("lo que hay que cortar comparte etiqueta de gravedad",
+          ns["CONDUCTA_GUIA"]["botnet"][3] == ns["CONDUCTA_GUIA"]["escaneo"][3]
+          == ns["CONDUCTA_GUIA"]["fuerza"][3] != ns["CONDUCTA_GUIA"]["p2p"][3])
     check("toda categoria tiene su explicacion y su color en la guia",
           all(c in ns["CONDUCTA_GUIA"] for c, _n, _cs, _l in ns["CAT_CPE"])
           and ns["CAT_OTROS"][0] in ns["CONDUCTA_GUIA"])
@@ -216,12 +222,14 @@ def main():
     check("un puerto raro no inventa un nombre",
           ns["nombre_puerto"]("47231") == "puerto 47231", ns["nombre_puerto"]("47231"))
 
-    mb = ns["_cd_minibarras"]([["navegacion segura (443)", 9690], ["consultas de DNS (53)", 2329]],
-                              "#c0392b")
+    mb = ns["_cd_minibarras"]([["navegacion segura (443)", 9690],
+                                       ["consultas de DNS (53)", 2329]])
     check("la barra mayor ocupa el 100%", "width:100.0%" in mb, mb[:200])
+    check("todas las barras del bloque llevan el mismo tono, no uno por puesto",
+          "background" not in mb, mb[:200])
     check("los miles se separan para poder leerlos", "9.690" in mb, mb[:300])
     check("sin datos no se pinta una caja vacia sin explicar",
-          "Nada que destacar" in ns["_cd_minibarras"]([], "#000"))
+          "Nada que destacar" in ns["_cd_minibarras"]([]))
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

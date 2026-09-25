@@ -7649,14 +7649,17 @@ def refrescador():
 
 _NAV_LINKS = [("/", "En vivo"), ("/top", "Top origenes"), ("/detalle", "Detalle"),
               ("/cuarentena", "Cuarentena"), ("/reputacion", "Consultar IP"),
-              ("/historico", "Historico"), ("/conducta", "Reporte 3 dias"),
+              ("/historico", "Historico"), ("/conducta", "Reporte"),
               ("/exclusiones", "Exclusiones"),
               ("/ajustes", "Ajustes")]   # Log y Documentacion viven dentro de Ajustes
 _NAV_CSS = """<style>
 html{scrollbar-gutter:stable}  /* reservar el hueco del scroll: paginas cortas (Exclusiones) y largas (Ajustes) no desplazan el contenido */
 .nav{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#12161c,#0b0b0b);color:#fff;
 font:15px system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25)}
-.nav .navwrap{max-width:1360px;margin:0 auto;padding:0 28px;height:58px;display:flex;align-items:center;gap:4px;flex-wrap:nowrap}
+.nav .navwrap{max-width:1360px;margin:0 auto;padding:0 28px;height:58px;display:flex;align-items:center;gap:4px;flex-wrap:nowrap;
+overflow-x:auto;overflow-y:hidden;scrollbar-width:none}  /* una pestana de mas no puede empujar "Salir" fuera de la barra */
+.nav .navwrap::-webkit-scrollbar{display:none}
+.nav a.tab{flex:0 0 auto}
 .nav .brand{font-weight:700;font-size:16px;margin-right:14px;display:flex;align-items:center;gap:11px;letter-spacing:.2px}
 .nav .brand .applogo{height:30px;width:auto;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.4))}
 .nav .brand .elogo{height:34px;width:auto;max-width:150px;object-fit:contain;border-radius:5px;background:#fff;padding:3px;display:block}
@@ -10760,24 +10763,26 @@ def conducta_csv(rep_):
 CONDUCTA_GUIA = {
     "botnet": ("El equipo esta infectado y habla con su centro de mando.",
                "Aislar y avisar al abonado: mientras siga conectado, ataca a terceros "
-               "desde tu IP publica.", "#c0392b"),
+               "desde tu IP publica.", "#d03b3b", "Critico"),
     "escaneo": ("Esta barriendo puertos o buscando equipos vulnerables en internet.",
                 "Cortar. Es lo que mas rapido te mete la publica en las listas negras.",
-                "#c0392b"),
+                "#d03b3b", "Critico"),
     "fuerza": ("Esta probando claves contra servicios ajenos (SSH, RDP, VNC).",
-               "Cortar. Cada intento fallido suma denuncias contra tu rango.", "#c0392b"),
+               "Cortar. Cada intento fallido suma denuncias contra tu rango.",
+               "#d03b3b", "Critico"),
     "dns": ("Consulta dominios de malware. Suele ser el primer sintoma, antes de la "
             "conexion real.", "Redirigir su DNS a tu resolutor, que ya filtra. No hace "
-            "falta dejarlo sin internet.", "#d68910"),
+            "falta dejarlo sin internet.", "#ec835a", "Grave"),
     "spam": ("Manda correo saliente en volumen.",
              "Cerrarle solo el correo (25/465/587). Sigue navegando y deja de quemarte "
-             "la reputacion.", "#d68910"),
+             "la reputacion.", "#ec835a", "Grave"),
     "minado": ("Esta minando criptomonedas.",
-               "Encolar. Es consumo, no un ataque a terceros.", "#2471a3"),
+               "Encolar. Es consumo, no un ataque a terceros.", "#fab219", "Vigilar"),
     "p2p": ("Trafico P2P / BitTorrent.",
-            "Encolar, no cortar. No ensucia tu reputacion, te come el enlace.", "#2471a3"),
+            "Encolar, no cortar. No ensucia tu reputacion, te come el enlace.",
+            "#fab219", "Vigilar"),
     "otros": ("Actividad que no encaja en las categorias anteriores.",
-              "Revisar a mano antes de decidir.", "#5d6d7e"),
+              "Revisar a mano antes de decidir.", "#8a9199", "Sin clasificar"),
 }
 
 def conducta_categoria(f):
@@ -10793,103 +10798,127 @@ def conducta_categoria(f):
     return CAT_OTROS[0]
 
 _CD_CSS = """<style>
-/* Informe de conducta. Lo lee el abonado, no un ingeniero: prioridad a la jerarquia
-   visual (que se vea primero lo grave) y a que cada dato tenga su etiqueta en
-   castellano. Los colores son gravedad, no marca. */
-.inf{--rojo:#c0392b;--ambar:#d68910;--azul:#2471a3;--linea:#e3e7ec;--tinta:#1f2933;
-     --suave:#667485;--fondo:#fff}
-.inf h2{margin:0 0 4px;font-size:22px;letter-spacing:-.01em;color:var(--tinta)}
-.inf .per{color:var(--suave);font-size:13px;margin:0 0 16px}
+/* Informe de conducta. Reglas que se siguen aqui, no por gusto:
+   - el texto lleva tinta, nunca el color de la serie; el color vive en la marca.
+   - las barras van todas del MISMO tono: colorearlas por su puesto en el ranking
+     haria que el color signifique "posicion", y al filtrar cambiarian de color sin
+     que haya cambiado el dato. La magnitud ya la da la longitud.
+   - la gravedad SIEMPRE lleva su nombre escrito ("Critico", "Grave"...), nunca va
+     solo en el color: quien no distingue rojo de naranja tiene que poder leerlo.
+   - el extremo de dato de cada barra va redondeado y el origen a ras de la linea
+     base, para que se puedan comparar longitudes sin que el radio mienta. */
+.inf{--azul:#2a78d6;--pista:#eef1f5;--linea:#e4e8ee;--tinta:#141b24;--tinta2:#3d4856;
+     --suave:#6b7684;--fondo:#fff;--sombra:0 1px 2px rgba(16,24,40,.05)}
+.inf h2{margin:0 0 5px;font-size:23px;letter-spacing:-.015em;color:var(--tinta);font-weight:700}
+.inf .per{color:var(--suave);font-size:13px;margin:0 0 18px}
 
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:0}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:12px}
 .tile{background:var(--fondo);border:1px solid var(--linea);border-radius:12px;
-      padding:14px 16px;box-shadow:0 1px 2px rgba(16,24,40,.04)}
-.tile .n{font-size:30px;font-weight:700;line-height:1.05;letter-spacing:-.02em;
+      padding:15px 17px;box-shadow:var(--sombra)}
+.tile .n{font-size:32px;font-weight:750;line-height:1;letter-spacing:-.025em;
          font-variant-numeric:tabular-nums;color:var(--tinta)}
-.tile .l{color:var(--suave);font-size:12px;margin-top:3px;line-height:1.35}
+.tile .l{color:var(--suave);font-size:12.5px;margin-top:5px;line-height:1.4}
 
-.chips{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
-.chip{border-radius:999px;padding:5px 13px;color:#fff;font-size:12px;font-weight:600;
-      letter-spacing:.01em;box-shadow:0 1px 2px rgba(16,24,40,.12)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 0}
+.chip{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:6px 13px;
+      font-size:12.5px;color:var(--tinta2);text-decoration:none;background:var(--fondo);
+      border:1px solid var(--linea);transition:border-color .15s,box-shadow .15s}
+.chip:hover{border-color:var(--azul);box-shadow:var(--sombra)}
+.chip .pt{width:9px;height:9px;border-radius:50%;background:var(--acento);flex:0 0 auto}
+.chip b{font-variant-numeric:tabular-nums;color:var(--tinta)}
 
-.acciones{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:18px 0 0}
-.acciones input{padding:7px 11px;border-radius:8px;border:1px solid #ccd3dc;
-                font-size:13px;min-width:210px}
+.acciones{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:20px 0 0}
+.acciones form{display:flex;gap:8px;margin:0}
+.acciones input{padding:8px 12px;border-radius:9px;border:1px solid #ccd3dc;font-size:13px;
+                min-width:215px;background:var(--fondo);color:var(--tinta)}
 .acciones input:focus{outline:2px solid #9ec2e6;outline-offset:1px;border-color:#9ec2e6}
 
-.seccion{margin:20px 0 0;position:relative;overflow:hidden}
-.seccion::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;
-                 background:var(--acento,#8a9199)}
-.seccion h3{display:flex;align-items:center;gap:10px;margin:0 0 4px;font-size:18px;
-            letter-spacing:-.01em;color:var(--tinta)}
-.seccion h3 .pill{border-radius:7px;padding:2px 10px;color:#fff;font-size:13px;
-                  font-weight:700;font-variant-numeric:tabular-nums}
-.seccion .qes{color:#3c4757;margin:0 0 3px;font-size:14px;line-height:1.5}
-.seccion .qhacer{color:var(--suave);font-size:13px;margin:0 0 14px;line-height:1.5}
+.bloque h3{margin:0 0 3px;font-size:16px;color:var(--tinta);letter-spacing:-.01em}
+.bloque .sub{color:var(--suave);font-size:12.5px;margin:0 0 14px}
 
-.cpe{background:var(--fondo);border:1px solid var(--linea);border-left:4px solid;
-     border-radius:11px;padding:13px 16px;margin:0 0 10px;
-     transition:box-shadow .15s ease,transform .15s ease}
-.cpe:hover{box-shadow:0 4px 14px rgba(16,24,40,.09);transform:translateY(-1px)}
+.seccion{margin:22px 0 0;position:relative;overflow:hidden;scroll-margin-top:72px}
+.seccion::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--acento)}
+.seccion h3{display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin:0 0 5px;
+            font-size:18.5px;letter-spacing:-.015em;color:var(--tinta);font-weight:700}
+.nivel{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;
+       border-radius:6px;padding:3px 8px;color:var(--acento);
+       background:color-mix(in srgb,var(--acento) 14%, transparent);
+       border:1px solid color-mix(in srgb,var(--acento) 34%, transparent)}
+.pill{font-size:12px;font-weight:600;color:var(--suave);border:1px solid var(--linea);
+      border-radius:999px;padding:3px 10px;font-variant-numeric:tabular-nums}
+.seccion .qes{color:var(--tinta2);margin:0 0 3px;font-size:14px;line-height:1.55;max-width:75ch}
+.seccion .qhacer{color:var(--suave);font-size:13px;margin:0 0 16px;line-height:1.55;max-width:75ch}
+
+.cpe{background:var(--fondo);border:1px solid var(--linea);border-left:4px solid var(--acento);
+     border-radius:11px;padding:14px 17px;margin:0 0 10px;
+     transition:box-shadow .16s ease,transform .16s ease}
+.cpe:hover{box-shadow:0 5px 16px rgba(16,24,40,.09);transform:translateY(-1px)}
 .cpe .top{display:flex;flex-wrap:wrap;align-items:center;gap:9px}
 .cpe .ip{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:17px;font-weight:700;
          letter-spacing:-.02em;color:var(--tinta)}
-.cpe .b{background:#f2f5f9;border:1px solid #e7ecf2;border-radius:7px;padding:3px 9px;
-        font-size:12px;color:#4a5665;font-variant-numeric:tabular-nums;white-space:nowrap}
-.cpe .resumen{margin:10px 0 0;font-size:14.5px;color:#2b3542;line-height:1.6}
-.cpe details{margin-top:10px}
-.cpe summary{cursor:pointer;color:var(--azul);font-size:13px;font-weight:600;
-             padding:4px 0;list-style:none;user-select:none}
+.cpe .b{background:#f3f6fa;border:1px solid #e7ecf2;border-radius:7px;padding:3px 9px;
+        font-size:12px;color:var(--tinta2);font-variant-numeric:tabular-nums;white-space:nowrap}
+.cpe .resumen{margin:11px 0 0;font-size:14.5px;color:var(--tinta2);line-height:1.6;max-width:80ch}
+.cpe details{margin-top:11px}
+.cpe summary{cursor:pointer;color:var(--azul);font-size:13px;font-weight:600;padding:4px 0;
+             list-style:none;user-select:none}
 .cpe summary::-webkit-details-marker{display:none}
-.cpe summary::before{content:"\25b8 ";display:inline-block;transition:transform .15s ease}
+.cpe summary::before{content:"\25b8";display:inline-block;margin-right:6px;transition:transform .15s ease}
 .cpe details[open]>summary::before{transform:rotate(90deg)}
-.cpe h4{margin:14px 0 4px;font-size:11.5px;color:#7a869a;text-transform:uppercase;
-        letter-spacing:.07em;font-weight:700}
-.cpe .vacio{color:#95a0ad;font-size:13px;margin:2px 0 10px}
+.cpe h4{margin:15px 0 5px;font-size:11px;color:var(--suave);text-transform:uppercase;
+        letter-spacing:.08em;font-weight:700}
+.cpe .vacio{color:var(--suave);font-size:13px;margin:2px 0 10px}
 
-.bars,.mini{margin:6px 0 0}
-.bars .row,.mini .row{display:flex;align-items:center;gap:10px;margin:0 0 6px}
-.bars .lb{flex:0 0 140px}
-.mini .lb{flex:0 0 250px}
-.bars .lb,.mini .lb{text-align:right;font-size:13px;color:#3c4757;overflow:hidden;
+/* barras: mismo tono, extremo de dato redondeado, origen a ras */
+.bars,.mini{margin:2px 0 0}
+.bars .row,.mini .row{display:flex;align-items:center;gap:11px;margin:0 0 6px;
+                      border-radius:6px;transition:background .12s}
+.bars .row:hover,.mini .row:hover{background:color-mix(in srgb,var(--azul) 6%, transparent)}
+.bars .lb{flex:0 0 142px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
+.mini .lb{flex:0 0 252px;font-size:13px}
+.bars .lb,.mini .lb{text-align:right;color:var(--tinta2);overflow:hidden;
                     text-overflow:ellipsis;white-space:nowrap}
-.bars .lb{font-family:ui-monospace,Menlo,Consolas,monospace}
-.bars .tr,.mini .tr{flex:1 1 auto;background:#eef1f5;border-radius:5px;overflow:hidden}
+.bars .tr,.mini .tr{flex:1 1 auto;background:var(--pista);border-radius:4px}
 .bars .tr{height:24px}
 .mini .tr{height:17px}
-.bars .fi,.mini .fi{height:100%;border-radius:5px;min-width:3px;
-                    animation:cdcrece .45s cubic-bezier(.22,1,.36,1)}
+.bars .fi,.mini .fi{height:100%;background:var(--azul);border-radius:0 4px 4px 0;
+                    min-width:3px;animation:cdcrece .5s cubic-bezier(.22,1,.36,1)}
 @keyframes cdcrece{from{width:0}}
-.bars .vl{flex:0 0 auto;font-size:13px;font-weight:600}
+.bars .vl{flex:0 0 66px;font-size:13px;font-weight:600}
 .mini .vl{flex:0 0 62px;font-size:12px}
-.bars .vl,.mini .vl{color:#4a5665;font-variant-numeric:tabular-nums}
+.bars .vl,.mini .vl{color:var(--tinta2);font-variant-numeric:tabular-nums}
 
-.tecnico{margin-top:10px;border-top:1px dashed var(--linea);padding-top:8px}
-.tecnico summary{color:#95a0ad;font-size:12px;font-weight:500}
-.tecnico .kv{font-size:12px;color:#7a869a;line-height:1.75;word-break:break-all;
-             font-family:ui-monospace,Menlo,Consolas,monospace;margin-top:4px}
+.tecnico{margin-top:12px;border-top:1px dashed var(--linea);padding-top:9px}
+.tecnico summary{color:var(--suave);font-size:12px;font-weight:500}
+.tecnico .kv{font-size:12px;color:var(--suave);line-height:1.75;word-break:break-all;
+             font-family:ui-monospace,Menlo,Consolas,monospace;margin-top:5px}
 
 @media(max-width:700px){
   .inf h2{font-size:19px}
-  .mini .lb,.bars .lb{flex-basis:120px;font-size:12px}
-  .cpe{padding:11px 12px}
-  .cpe .top{gap:6px}
+  .bars .lb,.mini .lb{flex-basis:112px;font-size:12px}
+  .bars .vl,.mini .vl{flex-basis:52px}
+  .cpe{padding:12px 13px}
+}
+@media(prefers-reduced-motion:reduce){
+  .bars .fi,.mini .fi{animation:none}
+  .cpe{transition:none}
 }
 @media(prefers-color-scheme:dark){
-  .inf{--linea:#2a323c;--tinta:#e6ebf1;--suave:#95a2b3;--fondo:#161a20}
-  .tile,.cpe{box-shadow:none}
-  .cpe:hover{box-shadow:0 4px 14px rgba(0,0,0,.45)}
-  .cpe .b{background:#212932;border-color:#2d3742;color:#c3ccd8}
-  .cpe .resumen{color:#dbe2ea}
-  .seccion .qes{color:#c8d2de}
-  .bars .tr,.mini .tr{background:#212932}
-  .bars .lb,.mini .lb,.bars .vl,.mini .vl{color:#c3ccd8}
-  .acciones input{background:#11151a;border-color:#2d3742;color:#e6ebf1}
+  /* pasos propios sobre fondo oscuro, no el claro invertido */
+  .inf{--azul:#5598e7;--pista:#212932;--linea:#2b333e;--tinta:#e8edf3;--tinta2:#c2ccd8;
+       --suave:#95a2b3;--fondo:#161a20;--sombra:none}
+  .cpe:hover{box-shadow:0 5px 16px rgba(0,0,0,.5)}
+  .cpe .b{background:#1f262f;border-color:#2b333e}
+  .acciones input{border-color:#2b333e}
 }
 </style>"""
 
-_CD_COLORES = ["#e05c5c", "#e08b3c", "#7ab547", "#2ba3b5", "#7d6fd1",
-               "#c95c9c", "#5d8ac9", "#8a9199"]
+# Un solo tono para las barras. Colorearlas por su puesto en el ranking hace que el
+# color signifique "posicion", asi que al filtrar la lista los supervivientes cambian
+# de color sin que haya cambiado nada: el ojo lee un cambio que no existe. La magnitud
+# ya la dice la longitud de la barra; el color no tiene que repetirla.
+_CD_AZUL = "#2a78d6"        # tono secuencial sobre fondo claro
+_CD_AZUL_OSC = "#5598e7"    # su paso equivalente sobre fondo oscuro
 
 # Un numero de puerto no le dice nada a quien no es de redes, y el informe lo lee el
 # abonado, no un ingeniero. Se nombra lo que el puerto SIGNIFICA para el.
@@ -10928,7 +10957,7 @@ def _cd_agrupa(pares, fn=None, n=6):
         acc[k] = acc.get(k, 0) + int(b)
     return sorted(acc.items(), key=lambda kv: -kv[1])[:n]
 
-def _cd_minibarras(pares, color):
+def _cd_minibarras(pares):
     """Barras pequenas dentro de la ficha. Una lista separada por comas con numeros
     entre parentesis obliga a comparar de cabeza; una barra se ve de un vistazo."""
     esc = html.escape
@@ -10936,13 +10965,14 @@ def _cd_minibarras(pares, color):
         return "<p class=vacio>Nada que destacar.</p>"
     tope = max(v for _k, v in pares) or 1
     return "<div class=mini>" + "".join(
-        "<div class=row><div class=lb>%s</div><div class=tr>"
-        "<div class=fi style='width:%.1f%%;background:%s'></div></div>"
+        "<div class=row title='%s: %s'><div class=lb>%s</div><div class=tr>"
+        "<div class=fi style='width:%.1f%%'></div></div>"
         "<div class=vl>%s</div></div>"
-        % (esc(k), max(100.0 * v / tope, 1.0), color, "{:,}".format(v).replace(",", "."))
+        % (esc(k), "{:,}".format(v).replace(",", "."), esc(k),
+           max(100.0 * v / tope, 1.0), "{:,}".format(v).replace(",", "."))
         for k, v in pares) + "</div>"
 
-def conducta_barras(filas, titulo, n=10):
+def conducta_barras(filas, titulo, n=10, sub=""):
     """El mismo ranking de atacantes que el resumen en vivo, pero sobre TODA la ventana
     del informe. En vivo se ve quien ataca ahora; aqui, quien lleva tres dias haciendolo,
     que es lo que sirve para decidir un corte."""
@@ -10952,14 +10982,17 @@ def conducta_barras(filas, titulo, n=10):
         return ""
     tope = max(f["alertas"] for f in top)
     fil = "".join(
-        "<div class=row><div class=lb>%s</div><div class=tr>"
-        "<div class=fi style='width:%.1f%%;background:%s'></div></div>"
-        "<div class=vl>%d</div></div>"
-        % (esc(f["ip"]), max(100.0 * f["alertas"] / tope, 1.0),
-           _CD_COLORES[i % len(_CD_COLORES)], f["alertas"])
-        for i, f in enumerate(top))
-    return "<div class=card><h3 style='margin:0 0 10px'>%s</h3><div class=bars>%s</div></div>" % (
-        esc(titulo), fil)
+        "<div class=row title='%s: %s alertas, %s'>"
+        "<div class=lb>%s</div><div class=tr>"
+        "<div class=fi style='width:%.1f%%'></div></div>"
+        "<div class=vl>%s</div></div>"
+        % (esc(f["ip"]), "{:,}".format(f["alertas"]).replace(",", "."),
+           esc(nombre_categoria(f.get("_cat", "otros")).lower()),
+           esc(f["ip"]), max(100.0 * f["alertas"] / tope, 1.0),
+           "{:,}".format(f["alertas"]).replace(",", "."))
+        for f in top)
+    return ("<div class='card bloque'><h3>%s</h3>%s<div class=bars>%s</div></div>"
+            % (esc(titulo), ("<p class=sub>%s</p>" % esc(sub)) if sub else "", fil))
 
 def conducta_page(q="", msg=""):
     """Informe por categoria de abuso: primero lo que hay que cortar, al final el ruido."""
@@ -11010,8 +11043,9 @@ def conducta_page(q="", msg=""):
            % (dias, desde, hasta, edad,
               "{:,}".format(rep_.get("lineas", 0)).replace(",", "."),
               len(filas), alertas, graves,
-              "".join("<span class=chip style='background:%s'>%s: %d</span>"
-                      % (CONDUCTA_GUIA[c][2], esc(nombre_categoria(c)), len(porcat[c]))
+              "".join("<a class=chip href='#c-%s' style='--acento:%s'>"
+                      "<span class=pt></span>%s <b>%d</b></a>"
+                      % (c, CONDUCTA_GUIA[c][2], esc(nombre_categoria(c)), len(porcat[c]))
                       for c in orden if porcat[c]),
               esc(q), ("<p class=sub2>" + esc(msg) + "</p>") if msg else ""))
 
@@ -11021,7 +11055,7 @@ def conducta_page(q="", msg=""):
         grupo = porcat[c]
         if not grupo:
             continue
-        que, hacer, color = CONDUCTA_GUIA[c]
+        que, hacer, color, nivel = CONDUCTA_GUIA[c]
         tarjetas = []
         for f in grupo[:120]:
             acts = _cd_agrupa(f.get("firmas"), traducir)
@@ -11035,7 +11069,7 @@ def conducta_page(q="", msg=""):
                 resumen += " Lo mas repetido: <b>%s</b>." % esc(acts[0][0].lower())
             tec = ", ".join("%s (%d)" % (esc(str(a)), b) for a, b in (f.get("destinos") or []))
             tarjetas.append(
-                "<div class=cpe style='border-left-color:%s'>"
+                "<div class=cpe style='--acento:%s'>"
                 "<div class=top><span class=ip>%s</span>"
                 "<span class=b>%s alertas</span><span class=b>%d dias activo</span>"
                 "<span class=b>ultima vez %s</span></div>"
@@ -11049,15 +11083,16 @@ def conducta_page(q="", msg=""):
                 "</details></div>"
                 % (color, esc(f["ip"]), "{:,}".format(f["alertas"]).replace(",", "."),
                    f["dias"], fmt(f["ultima"]), resumen,
-                   _cd_minibarras(acts, color),
-                   _cd_minibarras(puertos, "#5d8ac9"),
-                   _cd_minibarras(doms, "#7ab547"),
+                   _cd_minibarras(acts),
+                   _cd_minibarras(puertos),
+                   _cd_minibarras(doms),
                    f["destinos_n"], tec or "&mdash;"))
         secciones.append(
-            "<div class='card seccion' style='--acento:%s'>"
-            "<h3><span class=pill style='background:%s'>%d</span>"
-            "%s</h3><p class=qes>%s</p><p class=qhacer><b>Que hacer:</b> %s</p>%s%s</div>"
-            % (color, color, len(grupo), esc(nombre_categoria(c)), esc(que), esc(hacer),
+            "<div class='card seccion' id='c-%s' style='--acento:%s'>"
+            "<h3>%s <span class=nivel>%s</span> <span class=pill>%d abonado(s)</span></h3>"
+            "<p class=qes>%s</p><p class=qhacer><b>Que hacer:</b> %s</p>%s%s</div>"
+            % (c, color, esc(nombre_categoria(c)), esc(nivel), len(grupo),
+               esc(que), esc(hacer),
                "".join(tarjetas),
                ("<p class=sub2>Se muestran los primeros 120 de %d; el CSV los trae todos.</p>"
                 % len(grupo)) if len(grupo) > 120 else ""))
@@ -11066,7 +11101,9 @@ def conducta_page(q="", msg=""):
         secciones = ["<div class=card><p class=sub2>Ningun abonado coincide con el filtro.</p></div>"]
     barras = conducta_barras(
         sorted(filas, key=lambda f: -f["alertas"]),
-        "IPs origen (atacantes) &mdash; ultimos %d dias" % dias)
+        "Abonados con mas actividad sospechosa",
+        sub="Los %d primeros de los ultimos %d dias. Pasa el raton por una barra para "
+            "ver de que tipo es." % (min(10, len(filas)), dias))
     return wrap(_CD_CSS + cab + barras + "".join(secciones), refresh=False, active="/conducta")
 
 def historico_page(dias_n=30):

@@ -34,7 +34,7 @@ PIEZAS = ("CONDUCTA_FILE", "CONDUCTA_DIAS", "CONDUCTA_TOPE", "CONDUCTA_MAX",
           "CONDUCTA_GUIA", "conducta_categoria", "_CD_COLORES", "conducta_barras",
           "PUERTO_NOMBRE", "nombre_puerto", "_cd_agrupa", "_cd_minibarras",
           "_CD_CSS", "_CD_JS", "_CD_AZUL", "conducta_page", "_cd_doc",
-          "CONDUCTA_POR_PAGINA", "conducta_paginador",
+          "CONDUCTA_POR_PAGINA", "CONDUCTA_OPCIONES", "_cd_por", "conducta_paginador",
           "RUIDO_ALTO", "RUIDO_MEDIO", "RUIDO_MIN_CPES",
           "firmas_ruidosas", "ruidosas_html",
           "GLOSARIO", "glosario_html", "CPE_INDICIOS", "CONFIANZA",
@@ -312,7 +312,15 @@ def main():
           ns["_CD_CSS"].split(".inf{")[1].split("}")[0][-90:])
 
     # --- PDF ---------------------------------------------------------------------
-    check("hay boton para guardar en PDF", "cdPdf()" in pag, "")
+    check("hay boton para generar el reporte", "cdPdf()" in pag, "")
+    check("el boton se llama Generar reporte, no Guardar en PDF",
+          ">Generar reporte</button>" in pag and ">Guardar en PDF<" not in pag, "")
+    # "Regenerar" solo adelantaba el refresco que el hilo de fondo hace igual cada 6 h:
+    # un boton que nadie sabia para que servia.
+    check("ya no hay boton Regenerar",
+          "Regenerar" not in pag and "/conducta/refrescar" not in pag, "")
+    check("el buscador va a la derecha, detras del boton",
+          pag.find("cdPdf()") < pag.find("class=busca"), "")
     check("el PDF es la accion principal de la pagina", "b pri" in pag, "")
     # el CSV sale de la barra por peticion; la ruta se queda, que el PDF va paginado y
     # sacar 600 abonados de una vez sigue haciendo falta
@@ -415,8 +423,9 @@ def main():
     check("y cierra con el nivel de confianza", "Nivel de confianza" in tabla)
 
     # --- paginacion ------------------------------------------------------------------
-    # Con 600 abonados la pagina era inmanejable y el navegador se arrastraba.
-    check("se pagina de 50 en 50", ns["CONDUCTA_POR_PAGINA"] == 50,
+    # Con 600 abonados la pagina era inmanejable y el navegador se arrastraba. Con 50 ya
+    # no se arrastraba pero seguia sin leerse: por defecto entra una pantalla.
+    check("por defecto se pagina de 10 en 10", ns["CONDUCTA_POR_PAGINA"] == 10,
           ns["CONDUCTA_POR_PAGINA"])
 
     check("con una sola pagina no se pinta paginador",
@@ -452,14 +461,45 @@ def main():
                          "dominios": [], "destinos_n": 1, "puertos_n": 1}
                         for i in range(120)]}
     ns["guardar_conducta"](grande)
-    pg1 = ns["conducta_page"](pag=1)
-    pg3 = ns["conducta_page"](pag=3)
-    check("la primera pagina trae 50 fichas, no las 120",
+    pg1 = ns["conducta_page"](pag=1, por=50)
+    pg3 = ns["conducta_page"](pag=3, por=50)
+    check("pidiendo 50, la primera pagina trae 50 fichas y no las 120",
           pg1.count("<div class=cpe") == 50, pg1.count("<div class=cpe"))
     check("la ultima trae el resto", pg3.count("<div class=cpe") == 20,
           pg3.count("<div class=cpe"))
+
+    # --- cuantos por pagina ---------------------------------------------------------------
+    # 50 fichas de golpe no se leen. Por defecto entra una pantalla y el resto se pide.
+    check("por defecto son 10 por pagina",
+          ns["conducta_page"](pag=1).count("<div class=cpe") == 10,
+          ns["conducta_page"](pag=1).count("<div class=cpe"))
+    check("el selector ofrece los tamanos", ns["CONDUCTA_OPCIONES"] == (10, 25, 50, 100),
+          ns["CONDUCTA_OPCIONES"])
+    check("y sale marcado el que se esta usando",
+          "<option value=25 selected>25</option>" in ns["conducta_page"](por=25), "")
+    # un ?n= a mano no puede obligar al panel a armar 50000 fichas
+    check("un tamano inventado cae al de por defecto", ns["_cd_por"](50000) == 10,
+          ns["_cd_por"](50000))
+    check("y un tamano ilegible tambien", ns["_cd_por"]("veinte") == 10)
+    check("sin valor, el de por defecto", ns["_cd_por"]("") == 10)
+    check("cambiar de pagina no pierde el tamano elegido",
+          "n=25" in ns["conducta_paginador"](1, 9, "", 225, 1, 25, 25), "")
+    check("con el tamano por defecto no se ensucia la URL",
+          "n=" not in ns["conducta_paginador"](1, 9, "", 90, 1, 10, 10), "")
+    # si el filtro borrase el tamano (o al reves) habria que elegir dos veces por consulta
+    _p25 = ns["conducta_page"](q="192.168", por=25)
+    check("el filtro arrastra el tamano escondido",
+          "<input type=hidden name=n value='25'>" in _p25, "")
+    check("y el selector arrastra el filtro escondido",
+          "<input type=hidden name=q value='192.168'>" in _p25, "")
+    # Salia dos veces, arriba y abajo. El de arriba se metia entre el bloque de firmas
+    # ruidosas y las fichas, partiendo el resumen sin hacer falta.
+    check("el paginador se pinta una sola vez, al final",
+          pg1.count("<div class=pager>") == 1, pg1.count("<div class=pager>"))
+    check("y va despues de las fichas, no antes",
+          pg1.rfind("<div class=pager>") > pg1.rfind("<div class=cpe"), "")
     check("una pagina fuera de rango no revienta: se acota",
-          ns["conducta_page"](pag=999).count("<div class=cpe") == 20)
+          ns["conducta_page"](pag=999, por=50).count("<div class=cpe") == 20)
     # el ranking de arriba es global y sale en todas las paginas, asi que hay que
     # mirar las FICHAS, no la pagina entera
     _ficha = "<span class=ip>192.168.0.0</span>"

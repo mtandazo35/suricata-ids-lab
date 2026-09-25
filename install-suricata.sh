@@ -9334,9 +9334,15 @@ viejos que la ventana se saltan por su fecha, sin abrirlos.</p>
 <p>Solo entran <b>tus abonados</b> (los rangos de <code>MIS_REDES</code>). Una IP de internet
 no es un CPE: llenaria la tabla de servidores ajenos y no serviria para decidir a quien cortar.</p>
 <p>Recorrer 3 dias de logs cuesta, asi que <b>no se genera al abrir la pagina</b>: lo hace el
-hilo de fondo cada 6 horas con prioridad baja, y el boton <b>Regenerar</b> solo lo adelanta.
-Si se generara dentro de la peticion, el navegador cortaria por timeout en cualquier caja con
-trafico de verdad.</p>
+hilo de fondo cada 6 horas con prioridad baja. Si se generara dentro de la peticion, el
+navegador cortaria por timeout en cualquier caja con trafico de verdad. La linea de arriba
+del informe dice <b>hace cuantos minutos</b> se genero, que es lo que hay que mirar para
+saber si lo que se ve esta fresco.</p>
+<p>La barra de arriba tiene <b>Generar reporte</b> (abre todas las fichas e imprime, una hoja
+por abonado), el selector de <b>cuantos abonados por pagina</b> &mdash;10 por defecto, porque
+cincuenta fichas seguidas no se leen&mdash; y el <b>filtro</b> por IP o por firma. El tamano de
+pagina y el filtro viajan juntos: cambiar uno no borra el otro, y el paginador de abajo
+arrastra los dos.</p>
 <p>El <b>CSV</b> usa punto y coma y lleva BOM, que es lo que abre Excel en espanol sin pedir
 nada. Las firmas que traen <code>;</code> o comillas van entrecomilladas: sin eso se corren
 las columnas y el cliente termina leyendo el dato de otro abonado.</p>
@@ -11233,6 +11239,11 @@ _CD_CSS = """<style>
 
 .acciones{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:20px 0 0}
 .acciones form{display:flex;gap:0;margin:0}
+.acciones .porpag{margin-left:auto;align-items:center;gap:8px}
+.acciones .porpag label,.acciones .porpag .pl{font-size:13px;color:var(--suave)}
+.acciones .porpag select{padding:9px 10px;border:1px solid #ccd3dc;border-radius:10px;
+background:#fff;font:14px system-ui;color:var(--tinta);cursor:pointer}
+.acciones .porpag select:focus{outline:2px solid var(--azul);outline-offset:-1px}
 /* el filtro y su boton, pegados: se leen como un solo control */
 .acciones input{padding:9px 13px;border:1px solid #ccd3dc;border-right:0;
                 border-radius:10px 0 0 10px;font-size:13.5px;min-width:230px;
@@ -11253,6 +11264,8 @@ _CD_CSS = """<style>
 .inf .b.sec{color:var(--suave)}
 @media(max-width:700px){
   .acciones{gap:8px}
+  .acciones .porpag{margin-left:0}
+  .acciones .busca{width:100%}
   .acciones input{min-width:0;flex:1 1 140px}
 }
 
@@ -11664,15 +11677,28 @@ def _cd_doc(cuerpo):
             + "</head><body>" + nav("/conducta") + "<main>" + cuerpo + "</main>"
             + _CD_JS + "</body></html>")
 
-CONDUCTA_POR_PAGINA = 50
+CONDUCTA_POR_PAGINA = 10          # por defecto: una pantalla se lee, cincuenta fichas no
+CONDUCTA_OPCIONES = (10, 25, 50, 100)
 
-def conducta_paginador(pag, paginas, q, total, desde, hasta):
+def _cd_por(n):
+    """Cuantos abonados por pagina. Solo valen los valores del selector: un ?n= escrito
+    a mano con 50000 dejaria al panel armando fichas hasta agotar la memoria."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return CONDUCTA_POR_PAGINA
+    return n if n in CONDUCTA_OPCIONES else CONDUCTA_POR_PAGINA
+
+def conducta_paginador(pag, paginas, q, total, desde, hasta, por=None):
     """Navegacion entre paginas. Muestra los extremos y una ventana alrededor de la
     actual: con 13 paginas caben todas, con 200 no, y una tira de 200 numeros es tan
     inutil como no tener paginador."""
     if paginas <= 1:
         return ""
     qs = ("&q=" + _up.quote(q)) if q else ""
+    # sin esto, saltar de pagina te devuelve a los 10 por defecto y se pierde la eleccion
+    if por and por != CONDUCTA_POR_PAGINA:
+        qs += "&n=%d" % por
     def enlace(n, txt=None, cls=""):
         if n == pag:
             return "<span class='pg act'>%s</span>" % (txt or n)
@@ -11745,7 +11771,7 @@ def ruidosas_html(filas, esc=None, tope=8):
             "<th class=num>Abonados</th><th class=num>Del total</th>"
             "</tr></thead><tbody>%s</tbody></table></div></div>" % cuerpo)
 
-def conducta_page(q="", msg="", pag=1):
+def conducta_page(q="", msg="", pag=1, por=None):
     """Informe por categoria de abuso: primero lo que hay que cortar, al final el ruido."""
     esc = html.escape
     rep_ = cargar_conducta()
@@ -11772,10 +11798,11 @@ def conducta_page(q="", msg="", pag=1):
     # corta, asi la primera pagina es SIEMPRE lo que hay que mirar primero
     plano = [f for c in orden for f in porcat[c]]
     total_n = len(plano)
-    paginas = max(1, (total_n + CONDUCTA_POR_PAGINA - 1) // CONDUCTA_POR_PAGINA)
+    por = _cd_por(por)
+    paginas = max(1, (total_n + por - 1) // por)
     pag = max(1, min(int(pag or 1), paginas))
-    ini_i = (pag - 1) * CONDUCTA_POR_PAGINA
-    trozo = plano[ini_i:ini_i + CONDUCTA_POR_PAGINA]
+    ini_i = (pag - 1) * por
+    trozo = plano[ini_i:ini_i + por]
     enpag = {c: [f for f in trozo if f["_cat"] == c] for c in orden}
 
     dias = rep_.get("dias", CONDUCTA_DIAS)
@@ -11785,6 +11812,23 @@ def conducta_page(q="", msg="", pag=1):
     graves = sum(len(porcat[c]) for c in ("botnet", "escaneo", "fuerza"))
     edad = int((time.time() - rep_.get("generado", 0)) // 60)
 
+    _opts = "".join("<option value=%d%s>%d</option>"
+                    % (n, " selected" if n == por else "", n)
+                    for n in CONDUCTA_OPCIONES)
+    # El filtro y el tamano de pagina viajan juntos: cambiar uno no puede borrar el otro,
+    # asi que cada formulario lleva escondido el valor del contrario.
+    acciones = ("<div class=acciones>"
+                "<button class='b pri' type=button onclick='cdPdf()'>Generar reporte</button>"
+                "<form class=porpag method=get action='/conducta'>"
+                "<input type=hidden name=q value='%s'>"
+                "<label for=cdpor>Ver</label>"
+                "<select id=cdpor name=n onchange='this.form.submit()'>%s</select>"
+                "<span class=pl>por pagina</span></form>"
+                "<form class=busca method=get action='/conducta'>"
+                "<input type=hidden name=n value='%d'>"
+                "<input name=q value='%s' placeholder='filtrar por IP o firma'>"
+                "<button class=b>Filtrar</button></form></div>"
+                % (esc(q), _opts, por, esc(q)))
     cab = ("<div class=card><h2>Informe de %d dias &mdash; conducta por abonado</h2>"
            "<p class=per>Del %s al %s &middot; generado hace %d min &middot; %s lineas de log</p>"
            "<div class=tiles>"
@@ -11792,14 +11836,7 @@ def conducta_page(q="", msg="", pag=1):
            "<div class=tile><div class=n>%d</div><div class=l>alertas en el periodo</div></div>"
            "<div class=tile><div class=n style='color:#c0392b'>%d</div>"
            "<div class=l>para cortar (botnet, escaneo, fuerza bruta)</div></div>"
-           "</div><div class=chips>%s</div>"
-           "<div class=acciones>"
-           "<form method=get action='/conducta' style='display:inline'>"
-           "<input name=q value='%s' placeholder='filtrar por IP o firma'>"
-           "<button class=b>Filtrar</button></form>"
-           "<button class='b pri' type=button onclick='cdPdf()'>Guardar en PDF</button>"
-           "<form method=post action='/conducta/refrescar' style='display:inline'>"
-           "<button class='b sec'>Regenerar</button></form></div>%s</div>"
+           "</div><div class=chips>%s</div>%s%s</div>"
            % (dias, desde, hasta, edad,
               "{:,}".format(rep_.get("lineas", 0)).replace(",", "."),
               len(filas), alertas, graves,
@@ -11810,7 +11847,7 @@ def conducta_page(q="", msg="", pag=1):
                          esc(CONDUCTA_GUIA[c][3]), esc(nombre_categoria(c)),
                          "{:,}".format(len(porcat[c])).replace(",", "."))
                       for c in orden if porcat[c]),
-              esc(q), ("<p class=sub2>" + esc(msg) + "</p>") if msg else ""))
+              acciones, ("<p class=sub2>" + esc(msg) + "</p>") if msg else ""))
 
     fmt = lambda t: time.strftime("%d/%m %H:%M", time.localtime(t))
     secciones = []
@@ -11868,14 +11905,16 @@ def conducta_page(q="", msg="", pag=1):
 
     if not secciones:
         secciones = ["<div class=card><p class=sub2>Ningun abonado coincide con el filtro.</p></div>"]
-    pgr = conducta_paginador(pag, paginas, q, total_n, ini_i + 1, ini_i + len(trozo))
+    # Un solo paginador, al final. Arriba quedaba pegado al bloque de firmas ruidosas y
+    # partia el resumen de las fichas; para saltar de pagina se llega leyendo hasta abajo.
+    pgr = conducta_paginador(pag, paginas, q, total_n, ini_i + 1, ini_i + len(trozo), por)
     barras = conducta_barras(
         sorted(filas, key=lambda f: -f["alertas"]),
         "Abonados con mas actividad sospechosa",
         sub="Los %d primeros de los ultimos %d dias. Pasa el raton por una barra para "
             "ver de que tipo es." % (min(10, len(filas)), dias))
     return _cd_doc("<div class=inf id=informe>" + cab + barras + ruidosas_html(filas, esc)
-                   + pgr + "".join(secciones) + pgr + "</div>")
+                   + "".join(secciones) + pgr + "</div>")
 
 def historico_page(dias_n=30):
     esc = html.escape
@@ -13156,7 +13195,8 @@ class H(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 _pg = 1
             return self._html(conducta_page(q=_qc.get("q", [""])[0],
-                                            msg=_qc.get("msg", [""])[0], pag=_pg))
+                                            msg=_qc.get("msg", [""])[0], pag=_pg,
+                                            por=_qc.get("n", [""])[0]))
         if path == "/historico":
             _qh = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             try:

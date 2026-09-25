@@ -2535,7 +2535,7 @@ def top_destinos_section(n_dst=5, n_sub=8):
     return (
         "<section class=\"card\" style=\"margin-top:16px\"><h2>Top IPs destino mas atacadas (y quien las ataca)</h2>"
         "<p class=\"muted\" style=\"margin:0 0 12px\">El espejo del cuadro anterior: los blancos que reciben mas alertas y "
-        "los CPEs de tu red que los golpean. Util para detectar un <b>destino comun</b> (un mismo C2 o servidor tocado por "
+        "los CPEs de tu red que los atacan. Util para detectar un <b>destino comun</b> (un mismo C2 o servidor tocado por "
         "varios CPEs a la vez). El chip muestra el dueño/reputacion del destino.</p>"
         f"<div class=\"topwrap\">{''.join(cards)}</div></section>")
 
@@ -2591,18 +2591,19 @@ def entrantes_section(n_src=8, n_sub=6, max_src=5000, max_det=60):
             f"<div class='thd'><span class='rank'>#{i}</span>"
             f"<span class='ipx mono'>{esc(_ipa)}</span>{_chip}{_dst_badge(_ipa)}{_chip_nodo(src)}"
             f"<span class='tot'>{e['n']:,} alertas</span>{_den}"
-            f"<span class='meta'>&rarr; golpea {len(e['dst']):,} IP(s) de tu red</span></div>"
+            f"<span class='meta'>&rarr; ataco {len(e['dst']):,} IP(s) de tu red</span></div>"
             + (f"<div style='padding:0 15px 10px'>{_aidb}</div>" if _aidb else "")
             + f"<div class='tablewrap'><table><thead><tr>"
-            f"<th>IP de tu red (a quien golpea)</th><th>Puerto destino</th>"
+            f"<th>Equipo tuyo atacado</th><th>Puerto destino</th>"
             f"<th>Protocolo</th><th>Firma</th><th class='num'>Peticiones</th>"
             f"</tr></thead><tbody>{rows}</tbody></table></div></div>")
     return (
         "<section class=\"card\" style=\"margin-top:16px\"><h2>Ataques entrantes desde internet</h2>"
-        "<p class=\"muted\" style=\"margin:0 0 12px\">Origenes de <b>fuera</b> golpeando IPs de tu red. "
+        "<p class=\"muted\" style=\"margin:0 0 12px\">Direcciones de <b>internet</b> que estan atacando "
+        "equipos de tu red. "
         "<b>No son abonados tuyos</b>, asi que no entran al motor de cuarentena: mandarlos a la "
         "address-list de CPEs no bloquearia nada util. Lo que corresponde es <b>cortarlos en el borde</b> "
-        "(firewall de entrada) o <b>cerrar la exposicion</b> del equipo golpeado: si algo tuyo recibe "
+        "(firewall de entrada) o <b>cerrar la exposicion</b> del equipo atacado: si algo tuyo recibe "
         "escaneo constante desde internet, casi siempre es que tiene un puerto publicado que no hacia falta.</p>"
         + ("<script>function qden(b,ip,f,dp,pr,n){if(!confirm('Denunciar '+ip+' a AbuseIPDB?\\n\\n"
            "Es publico y queda a tu nombre. No se envia ninguna IP tuya.'))return;"
@@ -9144,7 +9145,7 @@ que se actualiza solo cada 20 segundos.</td></tr>
 <tr><td><b>Top origenes</b></td><td>Ranking del <b>Top 5 de CPEs que mas alertan</b> (quien ataca mas),
 con el desglose de cada uno: puerto origen, IP destino, dueño/organizacion del destino, puerto y
 protocolo. Debajo, el <b>espejo</b>: <b>Top IPs destino mas atacadas</b> (los blancos que reciben mas
-alertas) y que CPEs las golpean &mdash; util para detectar un destino comun (un mismo C2/servidor
+alertas) y que CPEs las atacan &mdash; util para detectar un destino comun (un mismo C2/servidor
 tocado por varios CPEs). Y al final, <b>Ataques entrantes desde internet</b> (ver abajo).</td></tr>
 <tr><td><b>Detalle</b></td><td>La tabla completa de ataques: quien ataca, a que IP y puerto,
 protocolo, tipo de ataque, cuantas veces y desde/hasta cuando. Paginada de 20 en 20; al
@@ -9215,7 +9216,7 @@ el <code>suricata.rules</code> final.</p>
 <ul>
 <li>Un <b>timer</b> de systemd (<code>suricata-rules-update.timer</code>) corre
 <b>todos los dias a las 04:30</b> (con un retardo aleatorio de hasta 30&nbsp;min para no
-golpear al servidor a la misma hora que todos).</li>
+consultar al servidor a la misma hora que todos).</li>
 <li>Ejecuta <code>suricata-update</code> &rarr; descarga la ultima version de ET Open y
 recarga las reglas <b>en caliente</b> (<code>reload-rules</code>), sin reiniciar Suricata
 ni perder trafico.</li>
@@ -9552,7 +9553,7 @@ CPE, y el CPE infectado es el que ensucia tus publicas</b>. Cortar la entrada no
 esta infectado &mdash;para eso esta la cuarentena&mdash; pero corta las <b>infecciones nuevas</b>,
 que es lo unico que hace que el numero baje y se quede abajo.</p>
 <p>En <b>Abuso saliente</b> el panel arma la lista con los origenes de internet que <b>de verdad</b>
-estan golpeando tu red: los que pegan fuerte y a varios destinos, mas los que ademas aparecen
+estan atacando tu red: los que insisten mucho y contra varios equipos, mas los que ademas aparecen
 fichados en los feeds de reputacion (a esos les basta con poco). <b>No</b> se vuelcan los feeds
 enteros: son cientos de miles de IPs, llenan la RAM del router y meten falsos positivos de sitios
 que tus abonados visitan.</p>
@@ -9836,7 +9837,7 @@ podia aparecer como "CPE infectado" y, con <b>politicas automaticas</b> activada
 address-list de cuarentena: no bloquea nada util y ensucia la lista.</p>
 <p><b>Que hacer con un ataque entrante:</b> no va a la cuarentena de CPEs (esa lista es de
 abonados). Se corta en el <b>firewall de borde</b>, o mejor: se <b>cierra la exposicion</b> del
-equipo golpeado. Si algo tuyo recibe escaneo constante desde internet, casi siempre es que tiene
+equipo atacado. Si algo tuyo recibe escaneo constante desde internet, casi siempre es que tiene
 un puerto publicado que no hacia falta.</p>
 <p><b>Si das IP publica a tus clientes</b>, dilo con <code>MIS_REDES=203.0.113.0/24,10.0.0.0/8</code>
 en <code>/etc/suricata-dashboard.conf</code>; por defecto son las privadas
@@ -9991,7 +9992,7 @@ del Top y en cada atacante de <b>Ataques entrantes</b> puede aparecer una etique
 <b>solo lee la cache</b>: nunca llama a la API, para que la cuota la controle un unico proceso.</p>
 
 <h3>Denunciar atacantes (apagado por defecto)</h3>
-<p>El panel puede <b>devolver la denuncia</b>: mandar a AbuseIPDB las IPs de internet que golpean tu
+<p>El panel puede <b>devolver la denuncia</b>: mandar a AbuseIPDB las IPs de internet que atacan tu
 red, que es lo que hace que la base sirva para todos. Es la unica funcion que <b>publica algo hacia
 fuera y a tu nombre</b>, asi que viene <b>apagada</b> y se activa en <b>Ajustes &rarr; Reputacion</b>.
 Con ella activa, cada atacante de <b>Ataques entrantes</b> muestra un boton <b>Denunciar</b>.</p>
@@ -10001,7 +10002,7 @@ Con ella activa, cada atacante de <b>Ataques entrantes</b> muestra un boton <b>D
 NAT: denunciar tu propio rango te mete a <b>vos</b> en las listas negras. Tampoco las de la lista
 <b>Nunca bloquear</b>.</li>
 <li><b>El comentario no lleva ninguna IP</b>, ni la del atacante (ya va en su campo) ni la de la
-maquina golpeada. Solo el nombre de la firma, el puerto y cuantas alertas hubo.</li>
+maquina atacada. Solo el nombre de la firma, el puerto y cuantas alertas hubo.</li>
 <li>Las <b>categorias</b> salen de la firma de Suricata y se <b>suman</b>: un "SSH Scan" se denuncia
 como <i>SSH</i> y <i>Escaneo de puertos</i>, no como fuerza bruta.</li>
 <li>La misma IP <b>no se repite antes de 24 h</b>.</li>
@@ -11213,11 +11214,30 @@ _CD_CSS = """<style>
          color:var(--acento);border-radius:999px;padding:2px 10px;font-weight:700;
          font-variant-numeric:tabular-nums;font-size:12.5px;line-height:1.5}
 
-.acciones{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:20px 0 0}
-.acciones form{display:flex;gap:8px;margin:0}
-.acciones input{padding:8px 12px;border-radius:9px;border:1px solid #ccd3dc;font-size:13px;
-                min-width:215px;background:var(--fondo);color:var(--tinta)}
-.acciones input:focus{outline:2px solid #9ec2e6;outline-offset:1px;border-color:#9ec2e6}
+.acciones{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:20px 0 0}
+.acciones form{display:flex;gap:0;margin:0}
+/* el filtro y su boton, pegados: se leen como un solo control */
+.acciones input{padding:9px 13px;border:1px solid #ccd3dc;border-right:0;
+                border-radius:10px 0 0 10px;font-size:13.5px;min-width:230px;
+                background:var(--fondo);color:var(--tinta)}
+.acciones input:focus{outline:2px solid var(--azul);outline-offset:-1px;position:relative;z-index:1}
+.acciones form .b{border-radius:0 10px 10px 0}
+.inf .b{display:inline-flex;align-items:center;justify-content:center;gap:7px;
+        padding:9px 16px;border-radius:10px;border:1px solid #ccd3dc;background:var(--fondo);
+        color:var(--tinta2);font-size:13.5px;font-weight:600;cursor:pointer;
+        text-decoration:none;line-height:1.2;
+        transition:background .15s,border-color .15s,box-shadow .15s,transform .15s}
+.inf .b:hover{border-color:var(--azul);color:var(--azul);box-shadow:var(--sombra)}
+.inf .b:active{transform:translateY(1px)}
+.inf .b:focus-visible{outline:2px solid var(--azul);outline-offset:2px}
+/* el PDF es la accion principal: es a lo que se viene esta pagina */
+.inf .b.pri{background:var(--azul);border-color:var(--azul);color:#fff}
+.inf .b.pri:hover{background:#1f66bd;border-color:#1f66bd;color:#fff}
+.inf .b.sec{color:var(--suave)}
+@media(max-width:700px){
+  .acciones{gap:8px}
+  .acciones input{min-width:0;flex:1 1 140px}
+}
 
 .bloque h3{margin:0 0 3px;font-size:16px;color:var(--tinta);letter-spacing:-.01em}
 .bloque .sub{color:var(--suave);font-size:12.5px;margin:0 0 14px}
@@ -11695,11 +11715,10 @@ def conducta_page(q="", msg="", pag=1):
            "<div class=acciones>"
            "<form method=get action='/conducta' style='display:inline'>"
            "<input name=q value='%s' placeholder='filtrar por IP o firma'>"
-           "<button class=b>Filtrar</button></form> "
-           "<a class=b href='/conducta.csv'>Descargar CSV</a> "
-           "<button class=b type=button onclick='cdPdf()'>Guardar en PDF</button> "
+           "<button class=b>Filtrar</button></form>"
+           "<button class='b pri' type=button onclick='cdPdf()'>Guardar en PDF</button>"
            "<form method=post action='/conducta/refrescar' style='display:inline'>"
-           "<button class=b>Regenerar</button></form></div>%s</div>"
+           "<button class='b sec'>Regenerar</button></form></div>%s</div>"
            % (dias, desde, hasta, edad,
               "{:,}".format(rep_.get("lineas", 0)).replace(",", "."),
               len(filas), alertas, graves,
@@ -11963,7 +11982,7 @@ def historico_page(dias_n=30):
             "<section class=card><h2 style='font-size:15px;margin:0 0 4px'>"
             "Cortar a los que te atacan desde internet</h2>"
             f"<p class=sub2 style='margin:0 0 8px'><b>{len(bl):,}</b> IPs de internet estan "
-            f"golpeando tu red"
+            f"atacando tu red"
             + (f", <b>{con_feed:,}</b> de ellas ademas fichadas en feeds de reputacion" if con_feed else "")
             + ". Cortarlas no limpia lo que ya esta infectado, pero <b>corta las infecciones "
               "nuevas</b>: el atacante de fuera es el que infecta al CPE, y el CPE infectado es "

@@ -287,6 +287,11 @@ def main():
 
     # --- PDF ---------------------------------------------------------------------
     check("hay boton para guardar en PDF", "cdPdf()" in pag, "")
+    check("el PDF es la accion principal de la pagina", "b pri" in pag, "")
+    # el CSV sale de la barra por peticion; la ruta se queda, que el PDF va paginado y
+    # sacar 600 abonados de una vez sigue haciendo falta
+    check("el CSV ya no ocupa sitio en la barra",
+          "/conducta.csv" not in pag, "")
     check("antes de imprimir se abre lo plegado: en papel no se puede desplegar",
           "d.open = true" in ns["_CD_JS"] and "window.print()" in ns["_CD_JS"])
     # Con Ctrl+P no se pasa por el boton. Sin engancharse a beforeprint, las fichas

@@ -300,8 +300,18 @@ def main():
           "print-color-adjust:exact" in imp)
     check("no se imprime la navegacion ni los botones",
           ".nav" in imp and ".acciones" in imp and "display:none" in imp)
-    check("una ficha de abonado no se parte entre dos paginas",
+    # Una hoja por abonado: cada ficha es un documento en si misma y se puede arrancar
+    # la pagina de un cliente sin que salga la de otro. La primera comparte hoja con el
+    # encabezado de su categoria, que es su contexto.
+    check("una fila de la tabla o de un grafico nunca se corta",
           "break-inside:avoid" in imp)
+    check("el encabezado de la ficha no se queda huerfano al final de la hoja",
+          "break-after:avoid" in imp)
+    check("cada abonado arranca en su propia hoja",
+          "break-before:page" in imp.replace(" ", ""), "")
+    check("pero la PRIMERA ficha se queda con el encabezado de su categoria",
+          ".cpe+.cpe{break-before:page" in imp.replace(" ", ""),
+          imp[imp.find(".cpe +"):imp.find(".cpe +") + 70])
     check("pero una seccion entera SI puede partirse: si no, deja hojas en blanco",
           "break-inside:avoid" not in imp.split(".card{")[1].split("}")[0],
           imp.split(".card{")[1].split("}")[0])
@@ -323,6 +333,14 @@ def main():
     check("la explicacion no usa jerga sin explicar",
           "equipos infectados" in ns["GLOSARIO"]["botnet"][1])
     check("un termino que no existe no rompe la pagina", ns["glosario_html"]("xyz") == "")
+    # El glosario es de la CATEGORIA: era identico en cada tarjeta de la seccion, lo
+    # que alargaba las fichas hasta no caber en una pagina del PDF.
+    _sec = pag[pag.find("class='card seccion'"):]
+    _sec = _sec[:_sec.find("class='card seccion'", 10)] if _sec.find(
+        "class='card seccion'", 10) > 0 else _sec
+    check("el glosario sale una vez por seccion, no repetido en cada abonado",
+          _sec.count("class=glos") <= 1, _sec.count("class=glos"))
+
     check("todas las categorias del informe tienen glosario",
           all(c in ns["GLOSARIO"] for c, _n, _cs, _l in ns["CAT_CPE"]),
           [c for c, _n, _cs, _l in ns["CAT_CPE"] if c not in ns["GLOSARIO"]])

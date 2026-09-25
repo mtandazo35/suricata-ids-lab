@@ -11199,12 +11199,19 @@ _CD_CSS = """<style>
 .tile .l{color:var(--suave);font-size:12.5px;margin-top:5px;line-height:1.4}
 
 .chips{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 0}
-.chip{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:6px 13px;
-      font-size:12.5px;color:var(--tinta2);text-decoration:none;background:var(--fondo);
-      border:1px solid var(--linea);transition:border-color .15s,box-shadow .15s}
-.chip:hover{border-color:var(--azul);box-shadow:var(--sombra)}
-.chip .pt{width:9px;height:9px;border-radius:50%;background:var(--acento);flex:0 0 auto}
-.chip b{font-variant-numeric:tabular-nums;color:var(--tinta)}
+.chip{display:inline-flex;align-items:center;gap:8px;border-radius:999px;
+      padding:5px 6px 5px 13px;font-size:13px;color:var(--tinta2);text-decoration:none;
+      background:var(--fondo);border:1px solid var(--linea);font-weight:600;
+      transition:border-color .15s,box-shadow .15s,transform .15s}
+.chip:hover{border-color:var(--acento);box-shadow:var(--sombra);transform:translateY(-1px)}
+.chip:focus-visible{outline:2px solid var(--azul);outline-offset:2px}
+.chip .pt{width:9px;height:9px;border-radius:50%;background:var(--acento);flex:0 0 auto;
+          box-shadow:0 0 0 3px color-mix(in srgb,var(--acento) 18%, transparent)}
+/* el numero en su propia pastilla: separa el dato de la etiqueta y permite compararlos
+   de un vistazo entre categorias, que es para lo que esta la fila */
+.chip .n{background:color-mix(in srgb,var(--acento) 13%, transparent);
+         color:var(--acento);border-radius:999px;padding:2px 10px;font-weight:700;
+         font-variant-numeric:tabular-nums;font-size:12.5px;line-height:1.5}
 
 .acciones{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:20px 0 0}
 .acciones form{display:flex;gap:8px;margin:0}
@@ -11320,8 +11327,21 @@ _CD_CSS = """<style>
      anterior en blanco y empuja el contenido fuera. Se parte la seccion, nunca la
      ficha de un abonado */
   .card{border:1px solid #d7dce3 !important;box-shadow:none !important;margin-bottom:8mm}
-  .cpe{break-inside:avoid;page-break-inside:avoid;transform:none !important;
-       box-shadow:none !important}
+  /* UNA HOJA POR ABONADO: cada ficha es un documento en si misma, y asi se puede
+     arrancar la pagina de un cliente y mandarsela sin que salga la de otro.
+     Es '.cpe + .cpe' y no '.cpe' a secas para que la PRIMERA ficha se quede con el
+     encabezado de su categoria -que es su contexto- en vez de dejarlo solo en una
+     hoja con tres lineas. */
+  .cpe + .cpe{break-before:page;page-break-before:always}
+  .cpe{transform:none !important;box-shadow:none !important;
+       break-inside:avoid;page-break-inside:avoid}
+  /* si una ficha no cabe ni en una hoja entera, se parte; pero ni un encabezado
+     huerfano ni una fila cortada por la mitad */
+  .cpe .top,.cpe .resumen,.cpe h4{break-after:avoid;page-break-after:avoid}
+  .indicios tr,.bars .row,.mini .row{break-inside:avoid;page-break-inside:avoid}
+  .glos{break-inside:avoid;page-break-inside:avoid}
+  /* el ranking general va en su hoja, antes de las fichas */
+  .bloque{break-after:page;page-break-after:always}
   .seccion{break-before:auto}
   .seccion h3{break-after:avoid;page-break-after:avoid}
   .tile .n{font-size:22pt}
@@ -11634,9 +11654,12 @@ def conducta_page(q="", msg=""):
            % (dias, desde, hasta, edad,
               "{:,}".format(rep_.get("lineas", 0)).replace(",", "."),
               len(filas), alertas, graves,
-              "".join("<a class=chip href='#c-%s' style='--acento:%s'>"
-                      "<span class=pt></span>%s <b>%d</b></a>"
-                      % (c, CONDUCTA_GUIA[c][2], esc(nombre_categoria(c)), len(porcat[c]))
+              "".join("<a class=chip href='#c-%s' style='--acento:%s' "
+                      "title='%s abonado(s) &middot; %s'>"
+                      "<span class=pt></span>%s<span class=n>%s</span></a>"
+                      % (c, CONDUCTA_GUIA[c][2], len(porcat[c]),
+                         esc(CONDUCTA_GUIA[c][3]), esc(nombre_categoria(c)),
+                         "{:,}".format(len(porcat[c])).replace(",", "."))
                       for c in orden if porcat[c]),
               esc(q), ("<p class=sub2>" + esc(msg) + "</p>") if msg else ""))
 
@@ -11665,7 +11688,6 @@ def conducta_page(q="", msg=""):
                 "<span class=b>%s alertas</span><span class=b>%s</span>"
                 "<span class=b>ultima vez %s</span></div>"
                 "<p class=resumen>%s</p>"
-                "%s"
                 "<details><summary>Ver que estuvo haciendo</summary>"
                 "<h4>&iquest;Por que lo decimos?</h4>%s"
                 "<h4>Que hizo</h4>%s"
@@ -11676,8 +11698,7 @@ def conducta_page(q="", msg=""):
                 "</details></div>"
                 % (color, esc(f["ip"]), "{:,}".format(f["alertas"]).replace(",", "."),
                    "1 dia activo" if f["dias"] == 1 else "%d dias activo" % f["dias"],
-                   fmt(f["ultima"]), resumen,
-                   glosario_html(c, esc), indicios_html(f, esc),
+                   fmt(f["ultima"]), resumen, indicios_html(f, esc),
                    _cd_minibarras(acts),
                    _cd_minibarras(puertos),
                    _cd_minibarras(doms),
@@ -11685,10 +11706,10 @@ def conducta_page(q="", msg=""):
         secciones.append(
             "<div class='card seccion' id='c-%s' style='--acento:%s'>"
             "<h3>%s <span class=nivel>%s</span> <span class=pill>%s</span></h3>"
-            "<p class=qes>%s</p><p class=qhacer><b>Que hacer:</b> %s</p>%s%s</div>"
+            "<p class=qes>%s</p><p class=qhacer><b>Que hacer:</b> %s</p>%s%s%s</div>"
             % (c, color, esc(nombre_categoria(c)), esc(nivel),
                "1 abonado" if len(grupo) == 1 else "%d abonados" % len(grupo),
-               esc(que), esc(hacer),
+               esc(que), esc(hacer), glosario_html(c, esc),
                "".join(tarjetas),
                ("<p class=sub2>Se muestran los primeros 120 de %d; el CSV los trae todos.</p>"
                 % len(grupo)) if len(grupo) > 120 else ""))

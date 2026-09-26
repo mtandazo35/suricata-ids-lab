@@ -28,7 +28,9 @@ DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
 ARBOL = ast.parse(DASH)
 
 PIEZAS = ("_SELLO_VISTO", "_SELLO_CADA", "_sello", "_CONF_CACHE", "_REDES_CACHE",
-          "conf", "mis_redes", "es_mi_cpe")
+          "conf", "mis_redes", "es_mi_cpe",
+          "cargar_nunca", "_NUNCA_CACHE", "_nunca_listas", "nunca_bloquear",
+          "cargar_dest_ok", "_DEST_OK_CACHE", "_dest_ok_set")
 
 fallos = 0
 
@@ -48,6 +50,8 @@ def entorno(tmp):
         if nom in PIEZAS:
             exec(ast.get_source_segment(DASH, n) or "", ns)
     ns["CONF"] = os.path.join(tmp, "dash.conf")
+    ns["NUNCA_FILE"] = os.path.join(tmp, "nunca.lst")
+    ns["DEST_OK_FILE"] = os.path.join(tmp, "destok.lst")
     # sin freno, para no dormir un segundo en cada comprobacion; el freno se comprueba
     # aparte, como valor
     ns["_SELLO_CADA"] = 0
@@ -133,6 +137,34 @@ def main():
     check("la cache de conf no acumula versiones", len(ns3["_CONF_CACHE"]) == 1,
           len(ns3["_CONF_CACHE"]))
     check("ni la de redes", len(ns3["_REDES_CACHE"]) == 1, len(ns3["_REDES_CACHE"]))
+
+    # --- las otras dos listas cacheadas ---------------------------------------------
+    # nunca_bloquear() releia el archivo y reconstruia las redes en CADA llamada, y se
+    # llama por candidato: 72 us -> 0,5 us. Devuelve un bool, asi que lo cacheado no sale
+    # al exterior y no puede romper nada; lo que SI rompe es no enterarse de que alguien
+    # acaba de proteger una IP.
+    ns4 = entorno(tmp)
+    escribir(ns4["NUNCA_FILE"], "198.51.100.7\n10.0.0.0/8\n")
+    check("una IP protegida no se bloquea", ns4["nunca_bloquear"]("198.51.100.7") is True)
+    check("y una de una red protegida, tampoco", ns4["nunca_bloquear"]("10.9.9.9") is True)
+    check("una cualquiera si", ns4["nunca_bloquear"]("203.0.113.9") is False)
+    escribir(ns4["NUNCA_FILE"], "203.0.113.9\n")
+    check("al proteger otra IP, se nota enseguida",
+          ns4["nunca_bloquear"]("203.0.113.9") is True)
+    check("y la que se quito deja de estar protegida",
+          ns4["nunca_bloquear"]("198.51.100.7") is False)
+
+    # _dest_ok_set() si devuelve un conjunto, y hay quien le hace add()/discard() antes de
+    # guardarlo: tiene que ser una copia, o el siguiente lector veria un cambio a medias.
+    escribir(ns4["DEST_OK_FILE"], "203.0.113.1\n203.0.113.2\n")
+    d1 = ns4["_dest_ok_set"]()
+    check("lee los destinos de confianza", d1 == {"203.0.113.1", "203.0.113.2"}, d1)
+    d1.add("8.8.8.8")
+    check("quien lo modifica trabaja sobre su copia, no sobre la cache",
+          "8.8.8.8" not in ns4["_dest_ok_set"](), ns4["_dest_ok_set"]())
+    escribir(ns4["DEST_OK_FILE"], "203.0.113.1\n")
+    check("y un cambio en el archivo se ve",
+          ns4["_dest_ok_set"]() == {"203.0.113.1"}, ns4["_dest_ok_set"]())
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

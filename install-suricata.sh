@@ -5409,19 +5409,33 @@ def es_mi_cpe(ip):
         return False
     return any(a.version == n.version and a in n for n in mis_redes())
 
-def nunca_bloquear(ip):
+_NUNCA_CACHE = {}
+
+def _nunca_listas():
+    """La lista de 'nunca bloquear', ya resuelta. Se reparseaba por cada candidato."""
+    clave = _sello(NUNCA_FILE)
+    hecho = _NUNCA_CACHE.get(clave)
+    if hecho is not None:
+        return hecho
     ips = set(); nets = []
     for l in cargar_nunca().splitlines():
-        s = l.split("#", 1)[0].strip()
-        if not s:
+        t = l.split("#", 1)[0].strip()
+        if not t:
             continue
         try:
-            if "/" in s:
-                nets.append(ipaddress.ip_network(s, strict=False))
+            if "/" in t:
+                nets.append(ipaddress.ip_network(t, strict=False))
             else:
-                ips.add(s)
+                ips.add(t)
         except ValueError:
             pass
+    hecho = (frozenset(ips), tuple(nets))     # inmutables: se comparten entre llamadas
+    _NUNCA_CACHE.clear()
+    _NUNCA_CACHE[clave] = hecho
+    return hecho
+
+def nunca_bloquear(ip):
+    ips, nets = _nunca_listas()
     if ip in ips:
         return True
     try:
@@ -5441,13 +5455,20 @@ def cargar_dest_ok():
     except OSError:
         return ""
 
+_DEST_OK_CACHE = {}
+
 def _dest_ok_set():
-    s = set()
-    for l in cargar_dest_ok().splitlines():
-        x = l.split("#", 1)[0].strip()
-        if x:
-            s.add(x)
-    return s
+    clave = _sello(DEST_OK_FILE)
+    hecho = _DEST_OK_CACHE.get(clave)
+    if hecho is None:
+        hecho = frozenset(
+            x for x in (l.split("#", 1)[0].strip() for l in cargar_dest_ok().splitlines())
+            if x)
+        _DEST_OK_CACHE.clear()
+        _DEST_OK_CACHE[clave] = hecho
+    # copia mutable: hay quien le hace add()/discard() antes de guardar, y eso no puede
+    # acabar dentro de la cache
+    return set(hecho)
 
 def guardar_dest_ok_set(conjunto):
     try:
@@ -10810,12 +10831,13 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
         entradas = decl.get(rid) or []
         nom = r.get("nombre") or r.get("HOST") or rid
         filas = []
+        _cache_aidb = _aidb_cache() or {}      # una vez, no por fila
         for ent in entradas:
             h = hist.get(ent) or {}
             sc = int(h.get("ultimo_score", 0))
             visto = (time.strftime("%d/%m %H:%M", time.localtime(h["ultimo_ts"]))
                      if h.get("ultimo_ts") else "nunca")
-            dat = (_aidb_cache() or {}).get(ent) or {}
+            dat = _cache_aidb.get(ent) or {}
             cats = _cats_de(dat)
             # que se le denuncia y, sobre todo, QUIEN de este nodo lo esta haciendo
             det = ""

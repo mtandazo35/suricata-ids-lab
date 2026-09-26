@@ -7308,6 +7308,230 @@ def vigilar_dnsbl():
             pass
     return n
 
+# ---------------------------------------------------------------------------------
+# Salir de las listas negras
+# ---------------------------------------------------------------------------------
+# Lo que NO se hace aqui: mandar la solicitud solo. Tres razones, por orden de peso:
+#
+#   1. Las listas que mas duelen caducan SOLAS en cuanto el abuso para (Spamhaus XBL y
+#      CSS, SpamCop, PSBL, UCEPROTECT-1). Pedir la salida no adelanta nada; lo que la
+#      adelanta es cortarle al abonado que emite.
+#   2. Las que si tienen formulario las revisa una persona, y sus condiciones prohiben
+#      el acceso automatizado. Un script pidiendo salidas cuesta el acceso al portal.
+#   3. Y la peor: pedirla con la infeccion viva te REVUELVE a listar, y varias listas
+#      penalizan la reincidencia. Un cron no sabe si el CPE sigue emitiendo; el panel si.
+#
+# Lo que si hace: decir CUANDO se puede pedir (y por que), con que pruebas, y donde.
+# Esa es la parte que nadie mas puede hacer, porque hace falta saber quien lo causo.
+
+# Que toca con cada lista. Va como DATO y no en prosa porque estas politicas cambian:
+# SORBS cerro su servicio en 2024 y el chequeo se quedo consultando al vacio, lo que es
+# peor que no tenerlo (da una tranquilidad que no es real). Conviene repasarlo una vez
+# al año.
+#   "sola"       caduca por si misma al parar el abuso
+#   "formulario" hay que pedirla y la revisa una persona
+#   "pago"       la salida inmediata se cobra; gratis es esperar
+#   "muerta"     el servicio ya no existe
+DNSBL_SALIDA = {
+    "zen.spamhaus.org": ("sola", "https://check.spamhaus.org/",
+                         "XBL y CSS caducan solas en cuanto el equipo deja de emitir. "
+                         "La SBL si hay que pedirla, desde ese mismo enlace."),
+    "bl.spamcop.net": ("sola", "https://www.spamcop.net/bl.shtml",
+                       "Caduca sola poco despues de la ultima denuncia."),
+    "dnsbl.sorbs.net": ("muerta", "",
+                        "SORBS cerro su servicio en 2024: este chequeo ya no dice nada."),
+    "b.barracudacentral.org": ("formulario",
+                               "https://www.barracudacentral.org/rbl/removal-request",
+                               "Formulario con revision humana."),
+    "psbl.surriel.com": ("sola", "https://psbl.org/remove",
+                         "Caduca sola; el enlace permite adelantarlo una vez limpio."),
+    "dnsbl-1.uceprotect.net": ("pago", "https://www.uceprotect.net/en/rblcheck.php",
+                               "El nivel 1 caduca solo tras unos dias sin abuso. "
+                               "La salida inmediata la cobran."),
+}
+DNSBL_DIAS_LIMPIO = 3     # dias seguidos sin abuso saliente antes de pedir la salida
+
+def dias_sin_abuso(met, hoy=None):
+    """Dias seguidos, hacia atras, con CERO abuso saliente.
+
+    Un dia SIN DATO corta la cuenta en vez de sumar. Es la diferencia entre "no paso
+    nada" y "no lo estabamos mirando": si el panel estuvo caido dos dias, eso no es
+    limpieza, y presentarlo como tal haria pedir la salida antes de tiempo."""
+    ahora = hoy if hoy is not None else time.time()
+    n = 0
+    for i in range(1, 366):                 # desde AYER: hoy aun esta a medias
+        dia = time.strftime("%Y-%m-%d", time.localtime(ahora - i * 86400))
+        e = met.get(dia)
+        if not isinstance(e, dict):
+            break
+        if int(e.get("sal", 0)) > 0:
+            break
+        n += 1
+    return n
+
+def dnsbl_tendencia(bl):
+    """Hacia donde va el numero de direcciones listadas, con el historial por dia que ya
+    se guarda. Es la prueba de que cortarle al abonado sirvio: el numero baja solo."""
+    dias = (bl or {}).get("dias") or {}
+    serie = sorted((d, int(n)) for d, n in dias.items())
+    if not serie:
+        return {"serie": [], "pico": 0, "hoy": 0, "dir": "", "desde_pico": 0}
+    pico = max(n for _d, n in serie)
+    hoy = serie[-1][1]
+    prev = serie[-2][1] if len(serie) > 1 else hoy
+    direccion = "baja" if hoy < prev else ("sube" if hoy > prev else "igual")
+    # cuantos dias lleva bajando desde el maximo
+    desde = 0
+    for d, n in reversed(serie):
+        if n >= pico:
+            break
+        desde += 1
+    return {"serie": serie, "pico": pico, "hoy": hoy, "dir": direccion, "desde_pico": desde}
+
+def dnsbl_listas_afectadas(bl):
+    """Las listas en las que estas de verdad, con su politica de salida."""
+    vistas = []
+    for _ip, v in ((bl or {}).get("ips") or {}).items():
+        if v.get("solo_pbl"):
+            continue                        # la PBL en residencial es lo normal
+        for nombre in (v.get("listas") or []):
+            if nombre not in vistas:
+                vistas.append(nombre)
+    salida = []
+    for zona, nom in DNSBL:
+        if nom in vistas:
+            pol, url, nota = DNSBL_SALIDA.get(zona, ("formulario", "", ""))
+            salida.append({"zona": zona, "nombre": nom, "politica": pol,
+                           "url": url, "nota": nota})
+    return salida
+
+def dnsbl_salida(bl, limpio):
+    """Que toca AHORA con esta entrada. `limpio` = dias seguidos sin abuso saliente.
+
+    Devuelve estado, titulo y explicacion:
+      limpio  no estas en ninguna lista
+      espera  estas listado y el abuso es reciente: primero se corta, luego se pide
+      caduca  ya estas limpio pero todas las listas se salen solas: solo esperar
+      pedir   ya estas limpio y hay alguna que exige pedirlo
+    """
+    listas = dnsbl_listas_afectadas(bl)
+    if not int((bl or {}).get("n_listadas", 0)) or not listas:
+        return {"estado": "limpio", "listas": [], "limpio": limpio,
+                "titulo": "No estas en ninguna lista de bloqueo",
+                "detalle": "No hay nada que pedir."}
+    if limpio < DNSBL_DIAS_LIMPIO:
+        return {"estado": "espera", "listas": listas, "limpio": limpio,
+                "titulo": "Todavia no conviene pedir la salida",
+                "detalle": ("Lleva %d dia(s) sin abuso saliente y hacen falta %d. "
+                            "Pedirla con el equipo aun emitiendo te vuelve a listar, y "
+                            "varias listas penalizan la reincidencia: primero se corta "
+                            "al abonado, luego se pide." % (limpio, DNSBL_DIAS_LIMPIO))}
+    hay_que_pedir = [x for x in listas if x["politica"] in ("formulario", "pago")]
+    if not hay_que_pedir:
+        return {"estado": "caduca", "listas": listas, "limpio": limpio,
+                "titulo": "Se salen solas: no hay que pedir nada",
+                "detalle": ("Lleva %d dias sin abuso saliente. Todas las listas en las "
+                            "que estas caducan por su cuenta al parar el abuso; pedirlo "
+                            "no lo adelanta." % limpio)}
+    return {"estado": "pedir", "listas": listas, "limpio": limpio,
+            "titulo": "Se puede pedir la salida",
+            "detalle": ("Lleva %d dias sin abuso saliente. Estas listas no caducan solas: "
+                        "hay que pedirlo." % limpio)}
+
+def dnsbl_expediente(entrada, bl, est, tend, acciones=()):
+    """El texto que piden los formularios, ya montado.
+
+    Va en INGLES a proposito: es lo que espera quien lo lee al otro lado. Lleva lo que
+    esos formularios preguntan siempre (que IP, que se encontro, que se hizo y cuando) y
+    lo que casi nadie puede aportar: que el abuso ya paro y desde cuando."""
+    ips = [k for k, v in ((bl or {}).get("ips") or {}).items() if not v.get("solo_pbl")]
+    lineas = [
+        "Delisting request for %s" % entrada,
+        "",
+        "Network operator: ISP providing residential broadband access.",
+        "Listed addresses: %s" % (", ".join(ips[:12]) or entrada),
+        "Lists: %s" % ", ".join(x["nombre"] for x in est["listas"]),
+        "",
+        "Cause: a customer CPE behind this address was compromised and generating "
+        "outbound abuse. It was detected by our own IDS (Suricata), not by the listing.",
+        "",
+        "Remediation:",
+    ]
+    for a in (acciones or ())[:8]:
+        lineas.append("  - %s" % a)
+    if not acciones:
+        lineas.append("  - The offending customer was isolated at the router.")
+    lineas += [
+        "",
+        "Evidence that the abuse stopped:",
+        "  - %d consecutive days with zero outbound abuse events from this network."
+        % est["limpio"],
+    ]
+    if tend.get("pico"):
+        lineas.append("  - Listed addresses went from %d at peak to %d today."
+                      % (tend["pico"], tend["hoy"]))
+    lineas += ["", "We monitor this network continuously and will isolate any further "
+                   "compromised host. Please remove the listing.", ""]
+    return "\n".join(lineas)
+
+_SAL_COLOR = {"espera": ("#a15c12", "#fdf3e3", "#f0ddb8"),
+              "caduca": ("#1a7f37", "#e9f6ec", "#c7e6cf"),
+              "pedir":  ("#1c5cab", "#eef4fd", "#cfe0fb")}
+_SAL_POL = {"sola": "caduca sola", "formulario": "hay que pedirla",
+            "pago": "salida inmediata de pago", "muerta": "servicio cerrado"}
+
+def _salida_html(entrada, bl, limpio, esc=None):
+    """Que hacer para salir de las listas en las que esta esta entrada.
+
+    No manda nada: dice cuando se puede pedir, con que pruebas y donde. Ver el comentario
+    de DNSBL_SALIDA para por que el envio no se automatiza."""
+    esc = esc or html.escape
+    if not (bl or {}).get("ts"):
+        return ""
+    est = dnsbl_salida(bl, limpio)
+    if est["estado"] == "limpio":
+        return ""
+    tend = dnsbl_tendencia(bl)
+    col, fondo, borde = _SAL_COLOR.get(est["estado"], ("#52514e", "#fafafa", "#eceae6"))
+
+    # La tendencia es la prueba de que cortarle al abonado sirvio, y sale del historial
+    # por dia que la vigilancia ya guardaba sin usarlo para nada.
+    tnd = ""
+    if tend["pico"] and tend["pico"] != tend["hoy"]:
+        tnd = ("<div class=hint style='margin-top:6px'>Direcciones listadas: "
+               f"<b>{tend['pico']}</b> en el peor momento &rarr; <b>{tend['hoy']}</b> hoy"
+               + (f", bajando desde hace {tend['desde_pico']} dia(s)" if tend["desde_pico"] else "")
+               + ".</div>")
+
+    filas = ""
+    for x in est["listas"]:
+        pol = _SAL_POL.get(x["politica"], x["politica"])
+        enl = (f" <a href='{esc(x['url'])}' target=_blank rel='noopener noreferrer'>abrir</a>"
+               if x["url"] else "")
+        filas += (f"<li><b>{esc(x['nombre'])}</b> &mdash; {esc(pol)}{enl}"
+                  f"<div class=hint>{esc(x['nota'])}</div></li>")
+
+    exp = ""
+    if est["estado"] == "pedir":
+        texto = dnsbl_expediente(entrada, bl, est, tend)
+        exp = ("<details style='margin-top:8px'><summary style='cursor:pointer;font-weight:600;"
+               f"color:{col}'>Texto para el formulario</summary>"
+               "<p class=hint style='margin:6px 0 4px'>En ingles, que es lo que piden. "
+               "Lleva lo que esos formularios preguntan y lo que casi nadie puede aportar: "
+               "que el abuso ya paro y desde cuando.</p>"
+               "<textarea readonly rows=14 onclick='this.select()' "
+               "style='width:100%;box-sizing:border-box;font:12px ui-monospace,monospace;"
+               "border:1px solid #d7d6d2;border-radius:8px;padding:9px'>"
+               + esc(texto) + "</textarea></details>")
+
+    return (f"<div style='margin-top:8px;background:{fondo};border:1px solid {borde};"
+            "border-radius:8px;padding:10px 12px'>"
+            f"<b style='color:{col}'>{esc(est['titulo'])}</b>"
+            f"<div class=hint style='margin-top:3px'>{esc(est['detalle'])}</div>"
+            + tnd
+            + "<ul style='margin:7px 0 0;padding-left:18px;font-size:12.5px'>" + filas + "</ul>"
+            + exp + "</div>")
+
 def aidb_probar(key):
     """Valida una clave ANTES de guardarla. (True|False|None, mensaje)."""
     key = (key or "").strip()
@@ -9984,6 +10208,40 @@ miraron.</li>
 <p>Cada publica guarda tambien la <b>serie por dia</b> de cuantas direcciones suyas estan listadas:
 es la prueba de que la limpieza funciona, y lo que se le enseña a quien pide el deslistado.</p>
 
+<h3>Salir de las listas negras</h3>
+<p>Debajo del estado de cada publica, el panel dice <b>que toca hacer ahora</b>. No manda la solicitud
+solo, y es a proposito:</p>
+<ul>
+<li>Las listas que mas duelen <b>caducan solas</b> en cuanto el abuso para (Spamhaus XBL y CSS,
+SpamCop, PSBL, UCEPROTECT-1). Pedir la salida no adelanta nada; lo que la adelanta es cortarle al
+abonado que emite.</li>
+<li>Las que si tienen formulario <b>las revisa una persona</b>, y sus condiciones prohiben el acceso
+automatizado. Un script pidiendo salidas cuesta el acceso al portal.</li>
+<li>Y la peor: pedirla con la infeccion viva <b>te vuelve a listar</b>, y varias listas penalizan la
+reincidencia. Un cron no sabe si el CPE sigue emitiendo; el panel si.</li>
+</ul>
+<p>Asi que automatiza lo de antes, que es donde esta el trabajo. Segun el estado veras:</p>
+<table>
+<tr><th>Estado</th><th>Que significa</th></tr>
+<tr><td><b>Todavia no conviene pedirla</b></td><td>Estas listado y el abuso es reciente. Dice cuantos
+dias limpios llevas y cuantos faltan. Primero se corta al abonado.</td></tr>
+<tr><td><b>Se salen solas</b></td><td>Ya llevas los dias limpios, pero todas las listas en las que
+estas caducan por su cuenta: no hay que rellenar nada, solo esperar.</td></tr>
+<tr><td><b>Se puede pedir</b></td><td>Llevas los dias limpios y hay alguna que no caduca sola. Salen
+el <b>enlace</b> de cada una y el <b>texto del formulario</b> ya montado.</td></tr>
+</table>
+<p>El <b>contador de dias limpios</b> sale del abuso saliente diario. Un dia <b>sin dato</b> corta la
+cuenta en vez de sumar: si el panel estuvo caido, eso no es limpieza, y darlo por bueno haria pedir la
+salida antes de tiempo.</p>
+<p>El <b>texto del formulario</b> va en <b>ingles</b>, que es lo que espera quien lo lee. Lleva lo que
+esos formularios preguntan siempre (que direcciones, que se encontro, que se hizo) y lo que casi nadie
+puede aportar: <b>cuantos dias lleva sin abuso</b> y <b>como ha bajado</b> el numero de direcciones
+listadas desde el peor momento.</p>
+<p><b>SORBS cerro su servicio en 2024.</b> Mientras siga en la lista de consulta, el panel lo marca
+como <b>servicio cerrado</b> para que ese "limpia" no se lea como una buena noticia. Las politicas de
+salida de cada lista viven como <b>dato</b> (<code>DNSBL_SALIDA</code>), no repartidas por el codigo,
+porque cambian: conviene repasarlas una vez al año.</p>
+
 <h3>Cuota y privacidad</h3>
 <ul>
 <li>El plan gratuito da <b>1.000 consultas al dia</b> (se reinicia a medianoche <b>UTC</b>). El panel
@@ -10473,6 +10731,8 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
     decl = cargar_publicas()
     hist = _pub_hist()
     dnsbl = _dnsbl_hist()
+    # los dias sin abuso son de la RED, no de cada entrada: se calcula una sola vez
+    _limpio = dias_sin_abuso(cargar_metricas())
     rs = cargar_routers()
     multi = len(rs) > 1
     bloques = []
@@ -10566,6 +10826,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 n_den = int(dat.get("n_den", 0))
                 den_n = (f"<span class=hint>{n_den:,} de "
                          f"{int(dat.get('hosts', 0)):,} con denuncias</span>")
+            bl_html += _salida_html(ent, bl, _limpio, esc)
             filas.append(
                 "<div style='padding:10px 0;border-top:1px solid #f0efec'>"
                 "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap'>"

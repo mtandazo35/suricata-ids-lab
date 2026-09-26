@@ -52,7 +52,11 @@ PIEZAS = ("FEEDS_CONF", "AIDB_CACHE", "AIDB_ESTADO", "AIDB_TTL_LIMPIA", "AIDB_TT
           "senal_de_categorias", "_cpes_del_nodo", "culpables_de",
           "DNSBL", "DNSBL_HIST", "DNSBL_MAX_IPS", "DNSBL_HILOS", "DNSBL_DIAS",
           "ZEN_COD", "_PBL", "_invertida", "dnsbl_una", "dnsbl_revisar",
-          "_dnsbl_hist", "vigilar_dnsbl")
+          "_dnsbl_hist", "vigilar_dnsbl",
+          # salir de las listas negras
+          "DNSBL_SALIDA", "DNSBL_DIAS_LIMPIO", "dias_sin_abuso", "dnsbl_tendencia",
+          "dnsbl_listas_afectadas", "dnsbl_salida", "dnsbl_expediente",
+          "_SAL_COLOR", "_SAL_POL", "_salida_html")
 
 fallos = 0
 def check(d, c, e=""):
@@ -110,6 +114,8 @@ def entorno(tmp, red):
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
         if nombre in PIEZAS:
             exec(ast.get_source_segment(DASH, n) or "", ns)
+    # la tendencia de abuso saliente tiene su propia prueba; aqui basta con que exista
+    ns.setdefault("cargar_metricas", lambda: {})
     ns["FEEDS_CONF"] = os.path.join(tmp, "feeds.conf")
     ns["PUBLICAS_CONF"] = os.path.join(tmp, "publicas.json")
     ns["PUB_HIST"] = os.path.join(tmp, "pub-hist.json")

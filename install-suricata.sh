@@ -3721,6 +3721,38 @@ def pedir_regen():
     ni mide la salud del sensor."""
     globals()["FORCE_REGEN"] = True
 
+_CONF_CACHE = {}
+_REDES_CACHE = {}
+
+_SELLO_VISTO = {}        # ruta -> (cuando se pregunto al disco, sello)
+_SELLO_CADA = 1.0        # no se vuelve a preguntar antes de esto
+
+def _sello(path):
+    """Identidad del contenido de un archivo: (mtime, tamano).
+
+    Con el mtime solo, dos escrituras dentro del mismo tick del reloj darian por bueno
+    el valor viejo; el tamano casi siempre cambia y tapa ese hueco. Todo lo que el panel
+    guarda se escribe con os.replace(), asi que nunca se lee a medias.
+
+    None cuando el archivo no esta: asi tampoco se da por buena una lectura fallida.
+
+    Y no se pregunta al disco mas de una vez por segundo y archivo: es_mi_cpe() se llama
+    por CADA evento de log al generar el informe, y un stat por evento son millones de
+    llamadas al sistema para enterarse de algo que casi nunca cambia. El precio es que un
+    cambio en el .conf tarda como mucho un segundo en notarse, que para una lista de
+    redes es de sobra."""
+    ahora = time.time()
+    v = _SELLO_VISTO.get(path)
+    if v is not None and ahora - v[0] < _SELLO_CADA:
+        return v[1]
+    try:
+        st = os.stat(path)
+        sello = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        sello = None
+    _SELLO_VISTO[path] = (ahora, sello)
+    return sello
+
 def conf():
     # PROXIES: IPs de los proxies inversos de confianza, separadas por coma. SOLO desde
     #   esas IPs se hace caso a X-Forwarded-For / X-Forwarded-Proto; de cualquier otro
@@ -3728,15 +3760,23 @@ def conf():
     #   de confianza y el bloqueo por intentos se saltan mandando una cabecera).
     # BIND: interfaz donde escucha el panel. 0.0.0.0 = todas (compatibilidad); si lo
     #   pones detras de un proxy HTTPS, 127.0.0.1 deja de exponerlo en claro a la red.
-    d = {"PORT": "5637", "USER": "admin", "PASS": "", "PROXIES": "", "BIND": "0.0.0.0"}
-    try:
-        for l in open(CONF, encoding="utf-8"):
-            l = l.strip()
-            if l and not l.startswith("#") and "=" in l:
-                k, v = l.split("=", 1); d[k.strip()] = v.strip().strip('"').strip("'")
-    except OSError:
-        pass
-    return d
+    clave = _sello(CONF)
+    hecho = _CONF_CACHE.get(clave)
+    if hecho is None:
+        d = {"PORT": "5637", "USER": "admin", "PASS": "", "PROXIES": "", "BIND": "0.0.0.0"}
+        try:
+            for l in open(CONF, encoding="utf-8"):
+                l = l.strip()
+                if l and not l.startswith("#") and "=" in l:
+                    k, v = l.split("=", 1); d[k.strip()] = v.strip().strip('"').strip("'")
+        except OSError:
+            pass
+        _CONF_CACHE.clear()          # una sola version viva: el archivo es uno
+        _CONF_CACHE[clave] = d
+        hecho = d
+    # copia: hay codigo que se guarda el dict y le mete claves suyas, y eso no puede
+    # acabar dentro de la cache
+    return dict(hecho)
 
 CFG = conf()
 # proxies inversos de confianza (ver conf()). Vacio = no se hace caso a X-Forwarded-*.
@@ -4770,6 +4810,23 @@ def destinos_feed(tope=DST_FEED_TOPE):
     if not buenas:
         return []
     dest_ok = _dest_ok_set()
+    # Las publicas declaradas, resueltas UNA vez. es_publica_declarada() las releia del
+    # disco por cada linea del feed: 3,8 s por apertura de Cuarentena, medido.
+    propias = []
+    for _rid, _ents in cargar_publicas().items():
+        for _e in _ents:
+            try:
+                propias.append(ipaddress.ip_network(_e, strict=False))
+            except ValueError:
+                pass
+    mias = mis_redes()
+    def _propia(txt):
+        try:
+            a = ipaddress.ip_address(txt)
+        except ValueError:
+            return False
+        return (any(a.version == n.version and a in n for n in mias)
+                or any(a.version == n.version and a in n for n in propias))
     out = []
     f = os.path.join(os.path.dirname(FEEDS_META), "reputation.lst")
     try:
@@ -4781,8 +4838,7 @@ def destinos_feed(tope=DST_FEED_TOPE):
                 if not ind or fuente not in buenas or ind in dest_ok:
                     continue
                 # nunca lo propio: ni tus redes ni tus publicas declaradas
-                base = ind.split("/", 1)[0]
-                if es_mi_cpe(base) or es_publica_declarada(base):
+                if _propia(ind.split("/", 1)[0]):
                     continue
                 out.append((ind, fuente))
     except OSError:
@@ -5188,11 +5244,16 @@ def cargar_abonados():
     except Exception:
         return {}
 
-def abonado_de(ip, rid=""):
+def abonado_de(ip, rid="", mapa=None):
     """Abonado de una IP. Con varios nodos hay que decir en CUAL, porque la misma IP
     puede ser de dos clientes distintos; si no se dice, se busca por la IP sola (que es
-    lo correcto con un solo router)."""
-    mapa = cargar_abonados().get("mapa") or {}
+    lo correcto con un solo router).
+
+    `mapa` lo pasa quien pinta una tabla: sin el, cada fila releia el JSON entero de
+    abonados, y ademas el rodeo de abajo recorre el mapa completo cuando la IP no esta,
+    que con cientos de filas es cuadratico."""
+    if mapa is None:
+        mapa = cargar_abonados().get("mapa") or {}
     if rid:
         v = mapa.get(clave_cpe(ip, rid))
         if v is not None:
@@ -5317,6 +5378,10 @@ def router_de_clave(clave):
 def mis_redes():
     """Redes que son TUYAS (abonados). MIS_REDES=CIDR,CIDR en el .conf; por defecto las
     privadas RFC1918 + CGNAT. Debe coincidir con lo que usa el generador."""
+    clave = _sello(CONF)
+    hecho = _REDES_CACHE.get(clave)
+    if hecho is not None:
+        return hecho
     redes = []
     for t in (conf().get("MIS_REDES", "") or "").replace(";", ",").split(","):
         t = t.strip()
@@ -5329,6 +5394,10 @@ def mis_redes():
     if not redes:
         for t in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"):
             redes.append(ipaddress.ip_network(t))
+    # tupla y no lista: se comparte entre llamadas y asi nadie puede modificarla por error
+    redes = tuple(redes)
+    _REDES_CACHE.clear()
+    _REDES_CACHE[clave] = redes
     return redes
 
 def es_mi_cpe(ip):
@@ -12712,9 +12781,11 @@ def cuarentena_page(msg="", es_admin=False):
     def _col(b):
         return {"ALTO": "#e34948", "MEDIO": "#e58a00"}.get(b, "#3a9d5d")
 
+    _mapa_ab = cargar_abonados().get("mapa") or {}      # una vez, no por fila
+
     def _cli(ip, rid=""):
         # con varios nodos hace falta decir en CUAL: la misma IP puede ser de dos clientes
-        a = abonado_de(ip, rid)
+        a = abonado_de(ip, rid, _mapa_ab)
         if a and a.get("nombre"):
             return f"<div class='rowmeta'>{esc(a['nombre'])} · {esc(a.get('tipo', ''))}</div>"
         return ""
@@ -12851,7 +12922,9 @@ def cuarentena_page(msg="", es_admin=False):
                     f"<td data-label='Accion'>{marca}{acc}</td></tr>")
         _filas_dst = "".join(_fila_dst(x) for x in (_pend + _ya))
         _reglas_dst = destinos_reglas(m.get("LIST_DST", "suricata-destinos-malos"))
-        _n_feed = len(destinos_feed())
+        # solo hace falta saber SI hay: pedir las 50.000 para un len() era el resto
+        # del coste de esta pagina
+        _n_feed = len(destinos_feed(tope=1))
         if _n_feed:
             # que el router se baje la lista solo: son miles de entradas y meterlas
             # una a una por la API tardaria horas

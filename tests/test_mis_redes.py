@@ -22,9 +22,14 @@ def cargar(nombre, conf):
     """Ejecuta el bloque de redes propias de ese script con la config dada."""
     cuerpo = heredoc(nombre)
     arbol = ast.parse(cuerpo)
+    # mis_redes() cachea por el sello del .conf. Aqui la config la pone la prueba, asi
+    # que el sello es fijo; cada caso arma su propio ns, de modo que la cache no se
+    # arrastra de un caso al siguiente.
     ns = {"_ipm": __import__("ipaddress"), "ipaddress": __import__("ipaddress"),
           "_conf_key": lambda k, d: conf.get(k, d),
-          "conf": lambda: conf}
+          "conf": lambda: conf,
+          "CONF": "(prueba)", "_sello": lambda _p: "fija",
+          "_CONF_CACHE": {}, "_REDES_CACHE": {}}
     trozos = []
     for n in arbol.body:
         seg = ast.get_source_segment(cuerpo, n) or ""

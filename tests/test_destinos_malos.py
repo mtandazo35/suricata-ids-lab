@@ -27,7 +27,8 @@ ARBOL = ast.parse(DASH)
 
 PIEZAS = ("DESTINOS_FILE", "MK_SENT_DST", "DST_CONFIABLES", "cargar_destinos_malos",
           "destino_bloqueable", "destinos_malos", "destinos_reglas",
-          "DST_FEED_OK", "DST_FEED_TOPE", "destinos_feed", "destinos_rsc")
+          "DST_FEED_OK", "DST_FEED_TOPE", "destinos_feed", "destinos_rsc",
+          "cargar_publicas")
 
 fallos = 0
 def check(d, c, e=""):
@@ -45,6 +46,12 @@ def entorno(tmp, enviados=(), confiables=()):
           "cargar_enviados": lambda path=None: {k: 1 for k in enviados},
           "_dest_ok_set": lambda: set(confiables)}
     ns["re"] = __import__("re")
+    # destinos_feed() ya no pregunta IP a IP: resuelve tus redes y tus publicas UNA vez
+    # antes del bucle (abria el JSON de publicas por cada linea del feed). La prueba pasa
+    # a darle esas dos fuentes, que es lo que ahora consume.
+    _ipa = __import__("ipaddress")
+    ns["ipaddress"] = _ipa
+    ns["mis_redes"] = lambda: (_ipa.ip_network("10.0.0.0/8"),)
     ns["es_publica_declarada"] = lambda ip: "190.0.2.7" if ip.startswith("190.0.2.") else ""
     ns["FEEDS_META"] = os.path.join(tmp, "reputation.meta")
     ns["cargar_feeds_meta"] = lambda: {"sources": {
@@ -58,6 +65,9 @@ def entorno(tmp, enviados=(), confiables=()):
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
         if nom in PIEZAS:
             exec(ast.get_source_segment(DASH, n) or "", ns)
+    ns["PUBLICAS_CONF"] = os.path.join(tmp, "publicas.json")
+    json.dump({"nodos": {"r1": ["190.0.2.0/24"]}},
+              open(ns["PUBLICAS_CONF"], "w", encoding="utf-8"))
     ns["DESTINOS_FILE"] = os.path.join(tmp, "destinos.json")
     return ns
 

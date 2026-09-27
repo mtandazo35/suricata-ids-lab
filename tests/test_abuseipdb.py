@@ -47,7 +47,7 @@ PIEZAS = ("FEEDS_CONF", "AIDB_CACHE", "AIDB_ESTADO", "AIDB_TTL_LIMPIA", "AIDB_TT
           "aidb_lote",
           # bloque "Tus IPs publicas" de la pagina
           "PUBLICAS_CONF", "PUB_HIST", "PUB_HIST_DIAS", "PUB_UMBRAL_AVISO", "_PUB_LOCK",
-          "AIDB_SENAL", "cargar_publicas", "guardar_publicas", "publicas_texto",
+          "AIDB_SENAL", "cargar_publicas", "origen_publicas", "guardar_publicas", "publicas_texto",
           "cubrir_publicas", "rid_de_publica", "culpables_ficha_html",
           "culpables_de", "culpables_por_senal", "senal_de_categorias", "AIDB_SENAL",
           "guardar_publicas_de", "_pub_hist", "_guardar_pub_hist", "_peor_de", "_cats_de",

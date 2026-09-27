@@ -7130,10 +7130,30 @@ def cargar_publicas():
         pass
     return {}
 
-def guardar_publicas(d):
+def origen_publicas():
+    """{id_router: {entrada: "mikrotik"|"manual"}}.
+
+    Lo que no aparece aqui es de origen DESCONOCIDO, y eso importa: una entrada declarada
+    antes de que esto existiera no se sabe de donde vino, asi que nunca se borra en
+    bloque. Solo se quita lo que consta como detectado."""
+    try:
+        d = json.load(open(PUBLICAS_CONF, encoding="utf-8"))
+        o = d.get("origen")
+        if isinstance(o, dict):
+            return {k: {str(a): str(b) for a, b in (v or {}).items()} for k, v in o.items()}
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {}
+
+def guardar_publicas(d, origen=None):
+    if origen is None:
+        origen = origen_publicas()
+    # el origen se poda con las entradas: si una ya no esta declarada, sobra su etiqueta
+    origen = {k: {a: b for a, b in (v or {}).items() if a in (d.get(k) or [])}
+              for k, v in origen.items() if k in d}
     tmp = PUBLICAS_CONF + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"nodos": d}, f, ensure_ascii=False, indent=1)
+        json.dump({"nodos": d, "origen": origen}, f, ensure_ascii=False, indent=1)
     os.replace(tmp, PUBLICAS_CONF)
     return d
 
@@ -7197,8 +7217,13 @@ def cubrir_publicas(entradas):
         (sobran if tapado else quedan).append(t)
     return quedan, sobran
 
-def guardar_publicas_de(rid, texto):
-    """Guarda las entradas de un nodo. Devuelve (guardadas, rechazadas)."""
+def guardar_publicas_de(rid, texto, origen_nuevas=""):
+    """Guarda las entradas de un nodo. Devuelve (guardadas, rechazadas, cubiertas).
+
+    `origen_nuevas` etiqueta SOLO las que no estaban antes: "mikrotik" si vienen del
+    boton de detectar, "manual" si las escribio una persona. Las que ya estaban conservan
+    la etiqueta que tuvieran, y las de antes de que esto existiera se quedan sin ella: no
+    se puede saber de donde salieron y adivinarlo seria la forma de borrar algo bueno."""
     ok, mal = [], []
     for t in re.split(r"[\s,;]+", texto or ""):
         t = t.strip()
@@ -7212,11 +7237,23 @@ def guardar_publicas_de(rid, texto):
             (ok.append(t) if v else mal.append(f"{t} ({porque})"))
     ok, tapadas = cubrir_publicas(sorted(set(ok)))
     d = cargar_publicas()
+    antes = set(d.get(rid) or [])
+    org = origen_publicas()
+    prev = org.get(rid, {})
+    nuevo = {}
+    for e in ok:
+        if e in prev:
+            nuevo[e] = prev[e]                 # ya se sabia: no se reescribe
+        elif e not in antes and origen_nuevas:
+            nuevo[e] = origen_nuevas           # entra ahora y se sabe por donde
+        # si no, queda sin etiqueta: origen desconocido
     if ok:
         d[rid] = ok
+        org[rid] = nuevo
     else:
         d.pop(rid, None)
-    guardar_publicas(d)
+        org.pop(rid, None)
+    guardar_publicas(d, org)
     # las tapadas no son un error del usuario: se dicen aparte de las rechazadas
     return ok, mal, tapadas
 
@@ -11537,12 +11574,17 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             # Cada chip es a la vez su propia x (quitar esa) y una casilla (elegir varias).
             # Con trece entradas metidas por una deteccion mala, quitarlas de una en una son
             # trece recargas y "todas" se lleva tambien las buenas.
+            _org = origen_publicas().get(rid, {})
             chips = "".join(
-                "<span class=pchip>"
-                f"<label><input type=checkbox name=entrada value='{esc(e)}' "
-                f"onchange='pmarcar(this)'><span class=mono>{esc(e)}</span></label>"
-                f"<button type=submit formaction='/publicas/quitar' name=solo "
-                f"value='{esc(e)}' title='Quitar solo esta'>&times;</button></span>"
+                "<span class='pchip%s'>"
+                "<label title='%s'><input type=checkbox name=entrada value='%s' "
+                "data-org='%s' onchange='pmarcar(this)'><span class=mono>%s</span></label>"
+                "<button type=submit formaction='/publicas/quitar' name=solo "
+                "value='%s' title='Quitar solo esta'>&times;</button></span>"
+                % (" det" if _org.get(e) == "mikrotik" else "",
+                   {"mikrotik": "detectada del MikroTik",
+                    "manual": "declarada a mano"}.get(_org.get(e, ""), "origen desconocido"),
+                   esc(e), esc(_org.get(e, "")), esc(e), esc(e))
                 for e in entradas)
         acciones = []
         if es_admin:
@@ -11565,7 +11607,10 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             chips = ("<form id='psel-%s' method=post action='/publicas/quitar-varias' "
                      "class=pchips>"
                      "<input type=hidden name=rid value='%s'>%s"
-                     "<a href='#' class=ptodas onclick='return ptodas(this)'>todas</a>"
+                     "<a href='#' class=ptodas onclick=\"return pmarcarorg(this,'mikrotik')\" "
+                     "title='Marca solo las que trajo Detectar del MikroTik'>detectadas</a>"
+                     "<a href='#' class=ptodas onclick=\"return pmarcarorg(this,'')\" "
+                     "title='Marca todas, incluidas las que declaraste a mano'>todas</a>"
                      "<button type=submit class=delbtn id='pselb-%s' disabled "
                      "onclick=\"return confirm('Quitar las entradas marcadas? El historial "
                      "de listas negras no se borra.')\">Quitar marcadas</button></form>"
@@ -11588,12 +11633,15 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 "var b=pbtn(f);if(!b)return;"
                 "b.disabled=(n===0);"
                 "b.textContent=n?('Quitar marcadas ('+n+')'):'Quitar marcadas';}"
-                "function ptodas(a){var f=a.form||a.closest('form');"
-                "var cs=f.querySelectorAll('input[name=entrada]');"
+                "function pmarcarorg(a,org){var f=a.closest('form');"
+                "var sel=org?(\"input[name=entrada][data-org='\"+org+\"']\")"
+                ":'input[name=entrada]';"
+                "var cs=f.querySelectorAll(sel);"
+                "if(!cs.length){alert('No hay ninguna con ese origen.');return false;}"
+                # si ya estan todas marcadas, el segundo clic las desmarca
                 "var faltan=[].some.call(cs,function(x){return !x.checked;});"
                 "[].forEach.call(cs,function(x){x.checked=faltan;});"
-                "a.textContent=faltan?'ninguna':'todas';"
-                "if(cs.length)pmarcar(cs[0]);return false;}"
+                "pmarcar(f.querySelector('input[name=entrada]'));return false;}"
                 "</script>")
     pub_html = ("<h2 style='font-size:17px;margin:18px 0 10px'>Tus IPs publicas</h2>"
                 "<p class=sub2 style='margin:-4px 0 10px'>El sensor no las ve (el espejo es "
@@ -11629,6 +11677,8 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
         ".pchips{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0}"
         ".pchip{cursor:pointer;user-select:none}"
         ".pchip input{margin:0 6px 0 0;vertical-align:middle;cursor:pointer}"
+        # las detectadas se distinguen de un vistazo: son las que se deshacen en bloque
+        ".pchip.det{border-style:dashed}"
         ".ptodas{font-size:12.5px;color:#1c5cab;text-decoration:none;padding:0 4px}"
         ".ptodas:hover{text-decoration:underline}"
         ".pchip:has(input:checked){background:#fdecec;border-color:#f0c9c9}"
@@ -14673,7 +14723,8 @@ class H(BaseHTTPRequestHandler):
             rid = (q.get("rid", [""])[0]).strip()
             if not router_por_id(rid):
                 return self._redirect("/reputacion")
-            ok_l, mal, tap = guardar_publicas_de(rid, q.get("entradas", [""])[0])
+            ok_l, mal, tap = guardar_publicas_de(rid, q.get("entradas", [""])[0],
+                                                 origen_nuevas="manual")
             bitacora("CONFIG-PUBLICAS", f"nodo={rid} {len(ok_l)} entrada(s)"
                                         + (f"; {len(tap)} ya cubiertas" if tap else "")
                                         + (f"; rechazadas: {', '.join(mal[:3])}" if mal else ""))
@@ -14687,7 +14738,8 @@ class H(BaseHTTPRequestHandler):
                 return self._redirect("/reputacion")
             actuales = cargar_publicas().get(rid, [])
             ok_l, mal, tap = guardar_publicas_de(
-                rid, "\n".join(actuales + [q.get("entrada", [""])[0]]))
+                rid, "\n".join(actuales + [q.get("entrada", [""])[0]]),
+                origen_nuevas="manual")
             bitacora("CONFIG-PUBLICAS", f"nodo={rid} +1 ({len(ok_l)} en total)"
                                         + (f"; {len(tap)} ya cubiertas" if tap else "")
                                         + (f"; rechazada: {mal[0]}" if mal else ""))
@@ -14741,7 +14793,8 @@ class H(BaseHTTPRequestHandler):
                     "Si el enlace lo termina otro equipo, agregalas a mano."))
             actuales = cargar_publicas().get(rid, [])
             nuevas = [x for x in halladas if x not in actuales]
-            _ok, _mal, tap = guardar_publicas_de(rid, "\n".join(actuales + nuevas))
+            _ok, _mal, tap = guardar_publicas_de(rid, "\n".join(actuales + nuevas),
+                                                 origen_nuevas="mikrotik")
             bitacora("CONFIG-PUBLICAS", f"nodo={rid} detectadas={len(halladas)} "
                                         f"nuevas={len(nuevas)} cubiertas={len(tap)}")
             if nuevas:

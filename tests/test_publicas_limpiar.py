@@ -25,7 +25,7 @@ _i = SRC.index("cat > /usr/local/bin/suricata-dashboard <<'DASH'")
 DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
 ARBOL = ast.parse(DASH)
 
-PIEZAS = ("PUBLICAS_CONF", "cargar_publicas", "guardar_publicas",
+PIEZAS = ("PUBLICAS_CONF", "cargar_publicas", "origen_publicas", "guardar_publicas",
           "cubrir_publicas", "guardar_publicas_de", "publicas_texto")
 
 fallos = 0
@@ -167,8 +167,10 @@ def main():
           "querySelector('button.delbtn')" in DASH, "")
     check("y las x de los chips son submit, por eso importaba",
           "formaction='/publicas/quitar'" in DASH and "type=submit" in DASH, "")
-    check("hay un atajo para marcarlas todas, ya que no hay boton de limpiar",
-          "function ptodas(" in DASH and "class=ptodas" in DASH, "")
+    check("hay atajos para marcar, ya que no hay boton de limpiar",
+          "function pmarcarorg(" in DASH and "class=ptodas" in DASH, "")
+    check("y el primero es el de las detectadas, que es lo que se deshace",
+          DASH.index("'mikrotik')") < DASH.index("pmarcarorg(this,'')"), "")
 
     # --- el separador salia como texto ----------------------------------------------------
     # Se metia "&middot;" ANTES de escapar, asi que esc() lo convertia en "&amp;middot;" y
@@ -184,6 +186,52 @@ def main():
     # escape como literal, y eso es legitimo: lo que no puede haber es el byte suelto.
     check("no queda ningun byte NUL en el instalador",
           chr(0) not in SRC, SRC.count(chr(0)))
+
+
+    # --- de donde salio cada entrada ------------------------------------------------------
+    # "Detectar del MikroTik" mete de golpe entradas que no son publicas de salida, y
+    # quitarlas se llevaba por delante las declaradas a mano, que son las que importan y
+    # las que tienen historial detras. Para poder deshacer SOLO la deteccion hay que saber
+    # de donde vino cada una.
+    ns2 = entorno(tmp)
+    ns2["guardar_publicas_de"]("r9", "203.0.113.0/24", origen_nuevas="manual")
+    ns2["guardar_publicas_de"]("r9", "203.0.113.0/24 198.51.100.7",
+                               origen_nuevas="mikrotik")
+    org = ns2["origen_publicas"]().get("r9", {})
+    check("lo declarado a mano queda marcado como manual",
+          org.get("203.0.113.0/24") == "manual", org)
+    check("y lo que trajo el router, como detectado",
+          org.get("198.51.100.7") == "mikrotik", org)
+
+    # Una entrada que ya estaba NO cambia de origen porque una deteccion la vuelva a
+    # nombrar: si no, detectar dos veces convertiria en "detectadas" las que pusiste tu.
+    ns2["guardar_publicas_de"]("r9", "203.0.113.0/24 198.51.100.7 198.51.100.8",
+                               origen_nuevas="mikrotik")
+    org = ns2["origen_publicas"]().get("r9", {})
+    check("volver a detectar no reetiqueta lo que ya estaba",
+          org.get("203.0.113.0/24") == "manual", org)
+
+    # Lo declarado antes de que esto existiera no se sabe de donde vino. Adivinarlo seria
+    # la forma de borrar algo bueno, asi que se queda sin etiqueta y nunca entra en un
+    # borrado en bloque.
+    ns2["guardar_publicas_de"]("r8", "192.0.2.0/24")
+    check("sin saber el origen, no se inventa una etiqueta",
+          ns2["origen_publicas"]().get("r8", {}) == {},
+          ns2["origen_publicas"]().get("r8"))
+
+    # Y al quitar una entrada, su etiqueta se va con ella: si no, el archivo acumularia
+    # origenes de cosas que ya no existen.
+    ns2["guardar_publicas_de"]("r9", "203.0.113.0/24")
+    check("la etiqueta se poda con la entrada",
+          "198.51.100.7" not in ns2["origen_publicas"]().get("r9", {}),
+          ns2["origen_publicas"]().get("r9"))
+
+    # --- y en pantalla ----------------------------------------------------------------------
+    check("el chip dice de donde vino", "detectada del MikroTik" in DASH
+          and "declarada a mano" in DASH and "origen desconocido" in DASH, "")
+    check("las detectadas se distinguen a la vista", ".pchip.det" in DASH, "")
+    check("marcar por origen avisa si no hay ninguna",
+          "No hay ninguna con ese origen" in DASH, "")
 
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))

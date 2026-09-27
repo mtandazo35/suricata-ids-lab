@@ -36,7 +36,7 @@ PIEZAS = ("PUBLICAS_CONF", "PUB_HIST", "PUB_HIST_DIAS", "PUB_UMBRAL_AVISO", "_PU
           "aidb_ip_valida", "aidb_red_valida", "_aidb_cache", "_aidb_guardar_cache",
           "_aidb_estado", "_aidb_guardar_estado", "_aidb_pedir", "_aidb_resumen",
           "aidb_consultar", "_aidb_pedir_red", "_aidb_resumen_red", "aidb_consultar_red",
-          "cargar_publicas", "guardar_publicas", "publicas_texto", "cubrir_publicas", "guardar_publicas_de",
+          "cargar_publicas", "origen_publicas", "guardar_publicas", "publicas_texto", "cubrir_publicas", "guardar_publicas_de",
           "_pub_hist", "_guardar_pub_hist", "_peor_de", "_cats_de", "vigilar_publicas",
           "senal_de_categorias", "_cpes_del_nodo", "culpables_de", "es_publica_declarada",
           "DNSBL", "DNSBL_HIST", "DNSBL_MAX_IPS", "DNSBL_HILOS", "DNSBL_DIAS",

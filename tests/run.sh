@@ -64,6 +64,7 @@ correr "receptor TZSP: cada MikroTik a su interfaz" "$PY" tests/test_tzsp_multi.
 correr "instalador: una interfaz por router" bash tests/test_instalador_multi.sh
 correr "instalador: con que valores nace una caja nueva" bash tests/test_instalador_defectos.sh
 correr "MikroTik listo desde el sensor: idempotente y acotado" "$PY" tests/test_mikrotik_init.py
+correr "suricata-espejo: estoy leyendo trafico?" "$PY" tests/test_espejo_estado.py
 correr "cada interfaz de espejo con su cluster-id" "$PY" tests/test_clusterid_unico.py
 correr "identidad (router, IP): dos nodos no se confunden" "$PY" tests/test_identidad_nodo.py
 correr "alta, edicion y baja de nodos" "$PY" tests/test_rutas_nodos.py

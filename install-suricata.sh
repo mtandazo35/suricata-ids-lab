@@ -15968,6 +15968,249 @@ if [ "$TZSP" -eq 1 ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null
   fi
 fi
 
+# ------------------------------------------- estoy leyendo trafico? (un solo comando)
+cat > /usr/local/bin/suricata-espejo <<'ESPEJO'
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Responde a una sola pregunta: este sensor, ahora mismo, esta leyendo trafico?
+
+Nace de un dia entero perdido. El panel iba pesado y se busco donde no era: caches,
+consultas, el GIL. Lo que pasaba estaba en cuatro numeros que nadie miraba juntos —
+cuanto entra por la interfaz, cuanto llega a Suricata, cuanto se tira al entrar y de que
+origenes— y para verlos habia que saber cuatro rutas de memoria.
+
+Lo importante no es cada dato suelto, es la COMPARACION:
+
+  - entra mucho y llega poco  -> el MikroTik espeja sin filtrar; el enlace se llena y el
+    TZSP, que es UDP, no se retrasa: DESAPARECE. Se pierde tambien el espejo bueno.
+  - entra y no llega nada     -> el veth o la captura de Suricata estan rotos.
+  - no entra nada             -> el router no esta espejando, o lo manda a otra IP.
+  - entra y todo se rechaza   -> llega de un origen que no esta autorizado.
+
+Sin argumentos mide 5 segundos y da un veredicto en castellano.
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+
+ESTADO = "/var/log/suricata-tzsp.json"
+EVE = "/var/log/suricata/eve.json"
+MINIMO_MEDIBLE = 2.0    # Mbps por debajo de los cuales la proporcion es ruido
+DESPERDICIO_AVISO = 0.60  # a partir de aqui, el router manda lo que aqui se tira
+MUDO = 600              # segundos sin mandar para considerar callado a un origen
+
+VERDE = "\033[32m"; AMBAR = "\033[33m"; ROJO = "\033[31m"; GRIS = "\033[90m"; FIN = "\033[0m"
+if not sys.stdout.isatty():
+    VERDE = AMBAR = ROJO = GRIS = FIN = ""
+
+
+def rx_bytes(iface):
+    try:
+        with open("/sys/class/net/%s/statistics/rx_bytes" % iface) as f:
+            return int(f.read())
+    except OSError:
+        return None
+
+
+def monitores():
+    """Las interfaces por las que el receptor entrega a Suricata."""
+    try:
+        return sorted(x for x in os.listdir("/sys/class/net") if x.startswith("ids-mon"))
+    except OSError:
+        return []
+
+
+def iface_salida():
+    try:
+        s = subprocess.check_output(["ip", "route", "get", "8.8.8.8"],
+                                    stderr=subprocess.DEVNULL).decode()
+        return s.split("dev ", 1)[1].split()[0]
+    except Exception:
+        return ""
+
+
+def activo(unidad):
+    try:
+        return subprocess.call(["systemctl", "is-active", "--quiet", unidad]) == 0
+    except Exception:
+        return False
+
+
+def alertas_recientes(minutos):
+    """Cuantas alertas hay en los ultimos N minutos, leyendo solo el final del eve."""
+    corte = time.time() - minutos * 60
+    n = 0
+    try:
+        sz = os.path.getsize(EVE)
+        with open(EVE, "rb") as f:
+            f.seek(max(0, sz - 4000000))
+            f.readline()
+            for linea in f:
+                if b'"event_type":"alert"' not in linea:
+                    continue
+                try:
+                    ts = json.loads(linea.decode("utf-8", "replace")).get("timestamp", "")
+                    t = time.mktime(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S"))
+                except Exception:
+                    continue
+                if t >= corte:
+                    n += 1
+    except OSError:
+        return None
+    return n
+
+
+def mbps(antes, despues, seg):
+    if antes is None or despues is None:
+        return None
+    return (despues - antes) * 8.0 / seg / 1e6
+
+
+def fila(etq, valor, nota=""):
+    print("  %-18s %s%s" % (etq, valor, ("   " + GRIS + nota + FIN) if nota else ""))
+
+
+def veredicto(receptor, suri, vistos, rechazados, aceptados,
+              entra, llega, desperdicio, alertas, minutos):
+    """Que pasa y, sobre todo, que hacer. Devuelve (nivel, frase).
+
+    El orden importa: primero lo que deja el sensor inutil, despues lo que lo degrada.
+    Y el desperdicio se mide EN VIVO, nunca con el contador acumulado del receptor: ese
+    sigue marcando lo de antes durante dias despues de arreglar el router, y daria por
+    roto algo que ya funciona."""
+    if not receptor:
+        return "rojo", "El receptor TZSP esta caido. systemctl start tzsp-decap"
+    if not suri:
+        return "rojo", "Suricata esta parado. systemctl start suricata"
+    if not vistos:
+        return "rojo", ("Nadie esta espejando hacia aqui. Revisa las reglas del MikroTik "
+                        "y que sniff-target sea la IP de este sensor.")
+    if rechazados and not aceptados:
+        return "rojo", ("Todo el espejo llega de un origen NO autorizado (%s). Reinstala "
+                        "con -m incluyendo esa IP." % ", ".join(sorted(rechazados))[:60])
+    if min(vistos.values()) > MUDO:
+        return "rojo", ("Ningun origen manda desde hace rato (el mas reciente, hace %d "
+                        "min). El router dejo de espejar." % (min(vistos.values()) // 60))
+    if entra is not None and entra > 1 and llega < 0.05:
+        return "rojo", ("Entra trafico pero no llega nada a Suricata: el veth o la "
+                        "captura estan rotos. journalctl -u tzsp-decap -n 50")
+    if desperdicio is not None and desperdicio >= DESPERDICIO_AVISO:
+        return "ambar", ("Estas leyendo, pero el MikroTik manda el espejo SIN filtrar: "
+                         "el %d%% se tira al entrar. Con el enlace lleno se pierde "
+                         "tambien parte del espejo bueno. Pon connection-bytes=0-10000 "
+                         "en el mangle." % round(100 * desperdicio))
+    if alertas == 0:
+        return "ambar", ("Llega trafico y Suricata lo captura, pero no hay alertas en %d "
+                         "min. Puede ser normal en una red tranquila; confirmalo con "
+                         "./test-alerts.sh" % minutos)
+    return "verde", "Estas leyendo trafico."
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("-s", "--segundos", type=int, default=5, help="cuanto medir (default 5)")
+    p.add_argument("-m", "--minutos", type=int, default=5,
+                   help="ventana para contar alertas (default 5)")
+    p.add_argument("--json", action="store_true", help="salida en JSON, para scripts")
+    a = p.parse_args()
+
+    est = {}
+    try:
+        est = json.load(open(ESTADO, encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+
+    wan = iface_salida()
+    mons = monitores()
+    antes = {i: rx_bytes(i) for i in ([wan] if wan else []) + mons}
+    time.sleep(a.segundos)
+    despues = {i: rx_bytes(i) for i in antes}
+
+    entra = mbps(antes.get(wan), despues.get(wan), a.segundos) if wan else None
+    llega = 0.0
+    for i in mons:
+        v = mbps(antes.get(i), despues.get(i), a.segundos)
+        if v is not None:
+            llega += v
+
+    rx = int(est.get("rx", 0) or 0)
+    rec = int(est.get("recortados", 0) or 0)
+    recorte = int(est.get("recorte_bytes", 0) or 0)
+    # Acumulado desde que arranco el receptor. Sirve de contexto, NO para decidir: despues
+    # de arreglar el router sigue diciendo lo de antes durante dias. Se aprendio cayendo
+    # en ello: el acumulado marcaba 91% cuando en vivo ya no se tiraba casi nada.
+    acumulado = (rec / float(rx)) if (rx and recorte) else None
+
+    # Lo que decide es la comparacion EN VIVO: cuanto entro por la interfaz contra cuanto
+    # llego a Suricata en la misma ventana. Un poco de diferencia es normal (el TZSP
+    # encapsula, y por esa interfaz pasa tambien el trafico del propio servidor); una
+    # diferencia grande es el router mandando lo que aqui se tira.
+    desperdicio = None
+    if entra is not None and entra >= MINIMO_MEDIBLE:
+        desperdicio = max(0.0, 1.0 - (llega / entra))
+    ahora = time.time()
+    vistos = {ip: int(ahora - t) for ip, t in (est.get("ultimo_visto") or {}).items()}
+    rechazados = int(est.get("rechazados", 0) or 0)
+    ven_rech = (est.get("ventana") or {}).get("rechazados") or {}
+    aceptados = (est.get("ventana") or {}).get("aceptados") or {}
+    alertas = alertas_recientes(a.minutos)
+    receptor = activo("tzsp-decap")
+    suri = activo("suricata")
+
+    nivel, txt = veredicto(receptor, suri, vistos, ven_rech, aceptados,
+                           entra, llega, desperdicio, alertas, a.minutos)
+
+    if a.json:
+        print(json.dumps({"entra_mbps": entra, "a_suricata_mbps": round(llega, 2),
+                          "desperdicio": desperdicio, "acumulado": acumulado,
+                          "origenes": vistos,
+                          "rechazados": rechazados, "alertas": alertas,
+                          "receptor": receptor, "suricata": suri,
+                          "nivel": nivel, "veredicto": txt}, ensure_ascii=False))
+        return 0 if nivel == "verde" else 1
+
+    print("\nEspejo del MikroTik  %s\n" % time.strftime("%d/%m %H:%M"))
+    fila("receptor", "activo" if receptor else ROJO + "CAIDO" + FIN)
+    fila("suricata", "activo" if suri else ROJO + "PARADO" + FIN)
+    if vistos:
+        fila("origenes", ", ".join(
+            "%s (hace %s)%s" % (ip, ("%d min" % (s // 60)) if s >= 60 else ("%ds" % s),
+                                "" if s <= MUDO else AMBAR + " CALLADO" + FIN)
+            for ip, s in sorted(vistos.items(), key=lambda x: x[1])))
+    else:
+        fila("origenes", ROJO + "ninguno" + FIN, "nadie espeja hacia aqui")
+    if ven_rech:
+        fila("rechazados", AMBAR + ", ".join(sorted(ven_rech)) + FIN, "no autorizados")
+    fila("entrando (%s)" % (wan or "?"),
+         "%.1f Mbps" % entra if entra is not None else "?")
+    fila("a Suricata", "%.1f Mbps" % llega,
+         " + ".join(mons) if len(mons) > 1 else "")
+    if desperdicio is not None:
+        nota = ("el router manda sin filtrar" if desperdicio >= DESPERDICIO_AVISO
+                else "normal")
+        fila("se tira al entrar", "%d%%" % round(100 * desperdicio), nota)
+    if acumulado is not None:
+        fila("  (acumulado)", "%d%%" % round(100 * acumulado),
+             "desde que arranco el receptor, no lo de ahora")
+    elif recorte == 0:
+        fila("recorte", "apagado", "-b 10000 si el sensor es remoto")
+    fila("alertas (%d min)" % a.minutos,
+         "?" if alertas is None else "{:,}".format(alertas).replace(",", "."))
+
+    col = {"verde": VERDE, "ambar": AMBAR, "rojo": ROJO}[nivel]
+    print("\n  %s%s%s\n" % (col, txt, FIN))
+    return 0 if nivel == "verde" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+ESPEJO
+chmod 755 /usr/local/bin/suricata-espejo
+ok "suricata-espejo instalado (dice si el sensor esta leyendo y que hacer si no)."
+
 # --------------------------------------------------- MikroTik listo desde el sensor
 cat > /usr/local/bin/suricata-mikrotik-init <<'MKINIT'
 #!/usr/bin/env python3
@@ -16345,6 +16588,10 @@ cat <<EOF
   ${c_g}Receptor TZSP (espejo MikroTik)${c_0}
     Escucha    : UDP ${TZSP_PORT} en ${PUB_IP:-<IP>}  ->  ${TZSP_MON} (Suricata la captura)
     Servicio   : tzsp-decap   (journalctl -u tzsp-decap -f  muestra rx/tx cada 60 s)
+    ${c_g}Estoy leyendo?${c_0} : suricata-espejo
+                 Mide 5 s y responde en una linea: cuanto entra, cuanto llega a
+                 Suricata, cuanto se tira y de que origenes. Si algo falla dice
+                 QUE hacer, no solo que pasa. Es lo primero que hay que correr.
     Probar     : ./test-tzsp.sh   (manda una trama TZSP sintetica y espera la alerta)
     Ruido      : reglas "SURICATA *" fuera; eve.json sin flow/dns/quic/anomaly (DNS en dns.json); BPF excluye TZSP en ${IFACE}
     Stream     : midstream=$(grep -cE '^  midstream: true' "$CFG") async-oneside=$(grep -cE '^  async-oneside: true' "$CFG") bypass=$(grep -cE '^  bypass: true' "$CFG") tls-bypass=$(grep -cE '^\s*encryption-handling: bypass' "$CFG") (1 = activo); memcaps segun RAM (${RAM_MB} MB)

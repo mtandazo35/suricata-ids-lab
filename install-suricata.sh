@@ -8096,11 +8096,35 @@ def cargar_empresa():
     return {"nombre": "", "logo": ""}
 
 def panel_actualizado():
-    """Fecha de la ultima actualizacion del panel desde GitHub, o None."""
+    """Fecha de la ultima actualizacion del panel desde GitHub, o None.
+
+    La escribe el actualizador al TERMINAR bien, asi que vale tambien cuando la
+    actualizacion no salio del boton (por SSH, o la del cron): el registro de "de que
+    version a cual y por quien" solo existe si se disparo desde el panel."""
     try:
         return open("/etc/suricata-dashboard.updated", encoding="utf-8").read().strip() or None
     except OSError:
         return None
+
+def panel_actualizado_txt():
+    """La fecha en corto, con cuanto hace. Sin la antiguedad, un panel actualizado hace
+    tres meses se lee igual que uno de esta manana."""
+    t = panel_actualizado()
+    if not t:
+        return ""
+    try:
+        seg = time.time() - time.mktime(time.strptime(t[:19], "%Y-%m-%d %H:%M:%S"))
+    except (ValueError, OverflowError):
+        return t
+    if seg < 0:
+        return t                                  # reloj movido: mejor no inventar
+    if seg < 3600:
+        hace = "hace %d min" % (seg // 60)
+    elif seg < 86400:
+        hace = "hace %d h" % (seg // 3600)
+    else:
+        hace = "hace %d dia(s)" % (seg // 86400)
+    return "%s (%s)" % (t[:16], hace)
 
 def firma_panel():
     """Firma corta del codigo instalado (hash del panel + generador de reportes).
@@ -9095,9 +9119,17 @@ def perfil_page(msg="", ok=False, edit_user=None):
                     "onclick=\"var e=document.getElementById('histwrap');e.hidden=!e.hidden\">Historial de cambios</button>")
         acciones = "<div class=veractions>" + btn_upd + btn_buscar + btn_hist + "</div>"
         linea_last = ""
+        _cuando = panel_actualizado_txt()
         if last.get("from") and local:
             linea_last = (f"<div class=verlast>&#10003; Actualizado de <b>{esc(last['from'][:7])}</b> a "
-                          f"<b>{esc(local[:7])}</b>" + (f" por {esc(last.get('by',''))}" if last.get('by') else "") + ".</div>")
+                          f"<b>{esc(local[:7])}</b>"
+                          + (f" por {esc(last.get('by',''))}" if last.get("by") else "")
+                          + (f" el <b>{esc(_cuando)}</b>" if _cuando else "") + ".</div>")
+        elif _cuando:
+            # actualizado por SSH o por el cron: no hay registro de quien ni de que version,
+            # pero la fecha si, y es lo que hace falta para saber si esto esta al dia
+            linea_last = (f"<div class=verlast>&#10003; Ultima actualizacion: "
+                          f"<b>{esc(_cuando)}</b>.</div>")
         # historial de cambios (colapsable, se abre con el boton 'Historial de cambios')
         if changelog:
             filas = ""

@@ -76,6 +76,7 @@ correr "de me listaron a mira a estos abonados" "$PY" tests/test_culpables_lista
 correr "ver que hace se despliega en la tabla" "$PY" tests/test_ficha_desplegable.py
 correr "detectar publicas: solo lo tuyo, no el DNS de otros" "$PY" tests/test_detectar_publicas.py
 correr "publicas: limpiar todas de una vez" "$PY" tests/test_publicas_limpiar.py
+correr "fecha y hora de la ultima actualizacion" "$PY" tests/test_fecha_actualizacion.py
 correr "AbuseIPDB: cuota, cache, privacidad y categorias" "$PY" tests/test_abuseipdb.py
 correr "denuncias a AbuseIPDB: apagadas por defecto y con frenos" "$PY" tests/test_abuseipdb_denuncia.py
 correr "documentacion: paginas, categorias, buscador y modal" "$PY" tests/test_documentacion.py

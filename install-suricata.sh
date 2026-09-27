@@ -7439,6 +7439,7 @@ def dnsbl_revisar(entrada, tope=DNSBL_MAX_IPS):
     tareas = [(ip, z, nom) for ip in ips for z, nom in DNSBL]
     porip = {}
     rechazadas = set()
+    inciertas = set()          # no se pudo consultar: ni listada ni limpia
     def _uno(t):
         ip, z, nom = t
         est, cods = dnsbl_una(ip, z)
@@ -7447,6 +7448,9 @@ def dnsbl_revisar(entrada, tope=DNSBL_MAX_IPS):
         for ip, nom, est, cods in pool.map(_uno, tareas):
             if est == "rechazada":
                 rechazadas.add(nom)
+                continue
+            if est == "error":
+                inciertas.add(ip)
                 continue
             if est != "listada":
                 continue
@@ -7463,6 +7467,7 @@ def dnsbl_revisar(entrada, tope=DNSBL_MAX_IPS):
     graves = {k: v for k, v in porip.items() if not v["solo_pbl"]}
     return {"ts": int(time.time()), "n_ips": len(ips), "truncado": truncado,
             "rechazadas": sorted(rechazadas), "ips": porip,
+            "inciertas": sorted(inciertas),
             "n_listadas": len(graves), "n_pbl": len(porip) - len(graves)}
 
 def _dnsbl_hist():
@@ -7488,11 +7493,22 @@ def dnsbl_cambios(h, nuevo, ahora=None):
     ahora = int(ahora or time.time())
     evs = list(h.get("eventos") or [])
     antes_ips = h.get("ips")
-    nuevas = {ip: set(v.get("listas") or [])
+
+    def _utiles(listas):
+        """La PBL fuera: en un rango residencial estar ahi es lo NORMAL y correcto. El
+        panel ya la cuenta aparte y no la pinta en rojo; anotar sus idas y venidas llenaria
+        el historial de movimientos que no significan nada y taparia los que si."""
+        return {l for l in (listas or ()) if "PBL" not in l}
+
+    nuevas = {ip: _utiles(v.get("listas"))
               for ip, v in ((nuevo or {}).get("ips") or {}).items()}
     if antes_ips is None:
         return evs                                   # linea base, sin eventos
-    antes = {ip: set(v.get("listas") or []) for ip, v in (antes_ips or {}).items()}
+    antes = {ip: _utiles(v.get("listas")) for ip, v in (antes_ips or {}).items()}
+    # Lo que no se pudo consultar no se toca: si una IP dio error de DNS desaparece del
+    # estado, y sin esto el historial diria que SALIO de la lista. Una buena noticia
+    # inventada es peor que no dar noticia.
+    inciertas = set((nuevo or {}).get("inciertas") or ())
 
     def _desde(ip, lista):
         """Cuando entro: el ultimo movimiento de ese par. Si lo ultimo fue una salida, la
@@ -7503,6 +7519,8 @@ def dnsbl_cambios(h, nuevo, ahora=None):
         return None
 
     for ip in sorted(set(antes) | set(nuevas)):
+        if ip in inciertas:
+            continue
         for lista in sorted(nuevas.get(ip, set()) - antes.get(ip, set())):
             evs.append({"ts": ahora, "ip": ip, "lista": lista, "ev": "entra"})
         for lista in sorted(antes.get(ip, set()) - nuevas.get(ip, set())):
@@ -7596,6 +7614,51 @@ def culpables_lista_html(rid, bl, esc=None, tope=8):
             "ficha antes de cortar.</p>"
             "<ul style='margin:6px 0 0;padding-left:18px;font-size:13px'>%s</ul></details>"
             % (len(culp), esc(por_que), lis))
+
+RANGO_TOPE = 40     # filas que se pintan en linea; el resto, en "ver detalle"
+
+def rango_detalle_html(dat, esc=None, scb=None, tope=RANGO_TOPE):
+    """Las direcciones denunciadas de un rango, en linea y sin tener que pulsar nada.
+
+    Es el dato que se mira siempre: un /28 son 16 direcciones y saber CUAL esta sucia es
+    la mitad del trabajo. Estaba detras de un enlace que abria otra pagina y hacia perder
+    el contexto de las listas negras y el historial, que es justo con lo que hay que
+    cruzarlo."""
+    esc = esc or html.escape
+    # _scb vive dentro de reputacion_page (es su insignia de puntaje): se recibe, no se
+    # copia, para que la escala de colores siga siendo una sola en toda la pagina.
+    scb = scb or (lambda n, corto=False: "%d%%" % int(n))
+    if not (isinstance(dat, dict) and dat.get("tipo") == "red"):
+        return ""
+    den = dat.get("denunciadas") or []
+    hosts = int(dat.get("hosts") or 0)
+    if not den:
+        return ("<div class=hint style='margin-top:6px;color:#1a7f37'>&#10003; Ninguna de "
+                "las %s direcciones de este rango esta denunciada.</div>"
+                % "{:,}".format(hosts).replace(",", ".") if hosts else "")
+    filas = "".join(
+        "<tr><td class=mono>%s</td><td class=num>%s</td><td class=num>%s</td>"
+        "<td class=mono>%s</td><td>%s</td>"
+        "<td><a class=hint href='?ips=%s&amp;volver=%s'>ver que hace</a></td></tr>"
+        % (esc(str(a[0])), scb(int(a[1]), corto=True),
+           "{:,}".format(int(a[2])).replace(",", "."), esc(str(a[3])), esc(str(a[4])),
+           esc(str(a[0])), esc(str(dat.get("red") or "")))
+        for a in den[:tope])
+    peor = sum(1 for a in den if int(a[1]) >= 75)
+    aviso = ("<p class=hint style='margin:8px 0 4px'>Se muestran las %d peores de %s. "
+             "El resto, en <b>ver detalle</b>.</p>"
+             % (tope, "{:,}".format(len(den)).replace(",", "."))) if len(den) > tope else ""
+    return ("<div style='margin-top:8px'>"
+            "<p class=hint style='margin:0 0 6px'><b>%s</b> de <b>%s</b> direcciones "
+            "denunciadas%s. Cada fila es una IP publica tuya por la que se esta atacando.</p>"
+            "<div class=tablewrap><table class=ut style='font-size:12.5px'>"
+            "<thead><tr><th>Direccion</th><th class=num>Abuso</th><th class=num>Denuncias</th>"
+            "<th>Ultima</th><th>Pais</th><th></th></tr></thead>"
+            "<tbody>%s</tbody></table></div>%s</div>"
+            % ("{:,}".format(len(den)).replace(",", "."),
+               "{:,}".format(hosts).replace(",", "."),
+               (", <b style='color:#b52a2a'>%d</b> con 75%% o mas" % peor) if peor else "",
+               filas, aviso))
 
 def vigilar_dnsbl():
     """Revisa las listas negras de todo lo declarado. Solo son consultas DNS: no gasta
@@ -11208,9 +11271,10 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                             "coincide ahora mismo con ese tipo de trafico: puede haberse "
                             "limpiado solo, o el abuso salir por otro nodo.</div>")
                 elif dat.get("tipo") == "red":
-                    det += ("<div class=hint style='margin-top:6px'>Consulta cada direccion "
-                            "denunciada (abajo) para saber por que: el listado de una red no "
-                            "trae las categorias.</div>")
+                    det += ("<div class=hint style='margin-top:6px'>El listado de una red no "
+                            "trae las categorias: pulsa <b>ver que hace</b> en una direccion "
+                            "concreta para saber por que se le denuncia.</div>")
+            det += rango_detalle_html(dat, esc, _scb)
             # --- listas negras: esto es lo que de verdad hace que te bloqueen ---
             bl = dnsbl.get(ent) or {}
             bl_html = ""

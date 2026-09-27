@@ -132,6 +132,32 @@ def main():
     check("sin movimientos no se pinta nada", ns["dnsbl_historial_html"]({}) == "")
     check("ni con la lista vacia", ns["dnsbl_historial_html"]({"eventos": []}) == "")
 
+    # --- lo que NO tiene que ensuciar el historial ------------------------------------
+    # La PBL en un rango residencial es lo NORMAL: el panel ya la cuenta aparte y no la
+    # pinta en rojo. Anotar sus idas y venidas llenaria el historial de movimientos que no
+    # significan nada y taparia los que si. Paso en el piloto: dos lineas de PBL fueron los
+    # dos primeros movimientos que se vieron.
+    PBL = "Spamhaus ZEN - PBL: rango dinamico (normal en residencial)"
+    h7 = {"ips": {}, "eventos": []}
+    check("entrar en la PBL no es un movimiento",
+          cambios(h7, estado(("7.7.7.7", [PBL])), ahora=T0) == [], "")
+    h8 = {"ips": {"7.7.7.7": {"listas": [PBL]}}, "eventos": []}
+    check("ni salir de ella",
+          cambios(h8, estado(), ahora=T0) == [], "")
+    check("pero si la IP tambien esta en una lista de verdad, ESA si se anota",
+          len(cambios(h7, estado(("7.7.7.7", [PBL, XBL])), ahora=T0)) == 1, "")
+
+    # Una consulta DNS que falla no es "limpia": la IP desaparece del estado y sin esto el
+    # historial diria que SALIO de la lista. Una buena noticia inventada es lo peor que
+    # puede dar esto, porque llevaria a pedir el deslistado creyendo que ya esta limpio.
+    h9 = {"ips": {"8.8.8.8": {"listas": [XBL]}}, "eventos": []}
+    nada = dict(estado(), inciertas=["8.8.8.8"])
+    check("si no se pudo consultar, NO se anota que salio",
+          cambios(h9, nada, ahora=T0) == [], cambios(h9, nada, ahora=T0))
+    check("y cuando se puede consultar de verdad, si",
+          len(cambios(h9, estado(), ahora=T0)) == 1, "")
+
+
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0
 

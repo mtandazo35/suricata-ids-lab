@@ -7421,6 +7421,86 @@ def _dnsbl_hist():
     except (OSError, ValueError):
         return {}
 
+DNSBL_EVENTOS_MAX = 400     # por entrada declarada; se poda ademas por DNSBL_DIAS
+
+def dnsbl_cambios(h, nuevo, ahora=None):
+    """Que IPs entraron o salieron de que lista desde la revision anterior.
+
+    Antes solo se guardaba el estado ACTUAL, y se sobreescribia en cada pasada: se veia
+    cuantas direcciones estaban listadas, pero no cuando entro ninguna ni cuanto tardo en
+    salir. Eso es justo lo que hace falta para demostrar que la limpieza funciono, y no se
+    puede reconstruir despues: cada revision que pasaba sin anotarlo era informacion
+    perdida.
+
+    La PRIMERA vez que se ve una entrada no se genera ningun evento. Lo que esta listado
+    hoy puede llevar meses ahi, y apuntarlo como "entro ahora" seria inventarse una fecha
+    y, peor, hacer creer que el problema es nuevo."""
+    ahora = int(ahora or time.time())
+    evs = list(h.get("eventos") or [])
+    antes_ips = h.get("ips")
+    nuevas = {ip: set(v.get("listas") or [])
+              for ip, v in ((nuevo or {}).get("ips") or {}).items()}
+    if antes_ips is None:
+        return evs                                   # linea base, sin eventos
+    antes = {ip: set(v.get("listas") or []) for ip, v in (antes_ips or {}).items()}
+
+    def _desde(ip, lista):
+        """Cuando entro: el ultimo movimiento de ese par. Si lo ultimo fue una salida, la
+        entrada anterior ya se cerro y no cuenta."""
+        for e in reversed(evs):
+            if e.get("ip") == ip and e.get("lista") == lista:
+                return e.get("ts") if e.get("ev") == "entra" else None
+        return None
+
+    for ip in sorted(set(antes) | set(nuevas)):
+        for lista in sorted(nuevas.get(ip, set()) - antes.get(ip, set())):
+            evs.append({"ts": ahora, "ip": ip, "lista": lista, "ev": "entra"})
+        for lista in sorted(antes.get(ip, set()) - nuevas.get(ip, set())):
+            e = {"ts": ahora, "ip": ip, "lista": lista, "ev": "sale"}
+            t0 = _desde(ip, lista)
+            if t0:
+                e["estuvo"] = ahora - int(t0)
+            evs.append(e)
+    corte = ahora - DNSBL_DIAS * 86400
+    evs = [e for e in evs if int(e.get("ts", 0)) >= corte]
+    return evs[-DNSBL_EVENTOS_MAX:]
+
+def _dura(seg):
+    """Cuanto estuvo listada, en algo que se lea de un vistazo."""
+    seg = int(seg or 0)
+    if seg < 3600:
+        return "%d min" % (seg // 60)
+    if seg < 86400:
+        return "%d h" % (seg // 3600)
+    d, h = seg // 86400, (seg % 86400) // 3600
+    return "%d d" % d if not h else "%d d %d h" % (d, h)
+
+def dnsbl_historial_html(bl, esc=None, tope=12):
+    """Los movimientos en listas negras de esa entrada, mas reciente primero."""
+    esc = esc or html.escape
+    evs = list((bl or {}).get("eventos") or [])
+    if not evs:
+        return ""
+    filas = ""
+    for e in reversed(evs[-tope:]):
+        salio = e.get("ev") == "sale"
+        col = "#1a7f37" if salio else "#b52a2a"
+        cuanto = ("  &middot; estuvo %s" % _dura(e["estuvo"])) if salio and e.get("estuvo") else ""
+        filas += ("<tr><td class=mono style='white-space:nowrap'>%s</td>"
+                  "<td class=mono>%s</td>"
+                  "<td style='color:%s;font-weight:700;white-space:nowrap'>%s</td>"
+                  "<td>%s<span class=hint>%s</span></td></tr>"
+                  % (time.strftime("%d/%m %H:%M", time.localtime(int(e.get("ts", 0)))),
+                     esc(e.get("ip", "")), col, "SALIO" if salio else "ENTRO",
+                     esc(e.get("lista", "")), cuanto))
+    return ("<details style='margin-top:8px'><summary style='cursor:pointer;font-size:12.5px;"
+            "color:#52514e'>Historial de listas negras (%d movimiento(s))</summary>"
+            "<p class=hint style='margin:6px 0 4px'>Cuando entro cada direccion, en que lista "
+            "y cuanto tardo en salir. Si una IP entra, sale y vuelve a entrar, la causa no se "
+            "limpio: se corto al abonado equivocado o quedo otro emitiendo.</p>"
+            "<table class=ut style='font-size:12.5px'><tbody>%s</tbody></table></details>"
+            % (len(evs), filas))
+
 def vigilar_dnsbl():
     """Revisa las listas negras de todo lo declarado. Solo son consultas DNS: no gasta
     cuota de AbuseIPDB ni depende de tener clave."""
@@ -7445,6 +7525,8 @@ def vigilar_dnsbl():
             h["dias"][hoy] = r["n_listadas"]
             lim = time.strftime("%Y-%m-%d", time.localtime(time.time() - DNSBL_DIAS * 86400))
             h["dias"] = {k: v for k, v in h["dias"].items() if k >= lim}
+            # ANTES del update: dnsbl_cambios compara con el estado anterior, y update lo pisa
+            h["eventos"] = dnsbl_cambios(h, r)
             h.update(r)
             hist[ent] = h
             if r["n_listadas"] and not antes:
@@ -10436,6 +10518,16 @@ miraron.</li>
 </ul>
 <p>Cada publica guarda tambien la <b>serie por dia</b> de cuantas direcciones suyas estan listadas:
 es la prueba de que la limpieza funciona, y lo que se le enseña a quien pide el deslistado.</p>
+<p>Y debajo, el <b>historial de movimientos</b>: <b>cuando</b> entro cada direccion, <b>en que lista
+y por que</b> (el codigo de Spamhaus va en el texto: SBL, CSS, XBL...) y <b>cuanto tardo en salir</b>.
+Eso es lo que responde "&iquest;cuanto tardo en limpiarse despues de cortar al abonado?", que no se
+puede reconstruir mirando el estado de hoy.</p>
+<p>La <b>primera</b> revision de una entrada no genera movimientos a proposito: lo que esta listado
+hoy puede llevar meses ahi, y apuntarlo como "entro ahora" seria inventarse una fecha y hacer creer
+que el problema es nuevo. Los movimientos empiezan a contar desde la segunda revision.</p>
+<p><b>Si una IP entra, sale y vuelve a entrar, la causa no se limpio</b>: se corto al abonado
+equivocado, o quedo otro emitiendo por esa misma publica. Es el patron que mas conviene vigilar,
+porque pedir el deslistado otra vez con el problema vivo empeora tu reputacion ante esa lista.</p>
 
 <h3>Salir de las listas negras</h3>
 <p>Debajo del estado de cada publica, el panel dice <b>que toca hacer ahora</b>. No manda la solicitud
@@ -11057,6 +11149,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 den_n = (f"<span class=hint>{n_den:,} de "
                          f"{int(dat.get('hosts', 0)):,} con denuncias</span>")
             bl_html += _salida_html(ent, bl, _limpio, esc)
+            bl_html += dnsbl_historial_html(bl, esc)
             filas.append(
                 "<div style='padding:10px 0;border-top:1px solid #f0efec'>"
                 "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap'>"

@@ -53,6 +53,7 @@ PIEZAS = ("FEEDS_CONF", "AIDB_CACHE", "AIDB_ESTADO", "AIDB_TTL_LIMPIA", "AIDB_TT
           "DNSBL", "DNSBL_HIST", "DNSBL_MAX_IPS", "DNSBL_HILOS", "DNSBL_DIAS",
           "ZEN_COD", "_PBL", "_invertida", "dnsbl_una", "dnsbl_revisar",
           "_dnsbl_hist", "vigilar_dnsbl",
+          "DNSBL_EVENTOS_MAX", "dnsbl_cambios", "_dura", "dnsbl_historial_html",
           # salir de las listas negras
           "DNSBL_SALIDA", "DNSBL_DIAS_LIMPIO", "dias_sin_abuso", "dnsbl_tendencia",
           "dnsbl_listas_afectadas", "dnsbl_salida", "dnsbl_expediente",

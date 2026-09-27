@@ -11420,6 +11420,13 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             acciones.append("<form method=post action='/publicas/revisar'>"
                             f"<input type=hidden name=rid value='{esc(rid)}'>"
                             "<button class=cancelbtn type=submit>Revisar ahora</button></form>")
+        if es_admin and entradas:
+            acciones.append(
+                "<form method=post action='/publicas/limpiar'>"
+                f"<input type=hidden name=rid value='{esc(rid)}'>"
+                f"<button class=delbtn type=submit onclick=\"return confirm('Quitar las "
+                f"{len(entradas)} entradas declaradas de este nodo? El historial de listas "
+                f"negras no se borra.')\">Limpiar todas ({len(entradas)})</button></form>")
         editor = ("<div class=pedit>" + chips + "".join(acciones) + "</div>") if (chips or acciones) else ""
         bloques.append(
             "<section class=card style='margin:0 0 12px'>"
@@ -11461,6 +11468,10 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
         ".busca input[name=ips]{padding:7px 11px;border:1px solid #d9d7d2;border-radius:9px;"
         "font:13px ui-monospace,Consolas,monospace;min-width:190px}"
         ".busca .chk{font-size:12.5px;color:#8a8a86;white-space:nowrap}"
+        # destructivo: se ve que lo es antes de pulsarlo
+        ".delbtn{background:#fbeaea;color:#c0392b;border:1px solid #f0c9c9;"
+        "border-radius:8px;padding:7px 12px;font:600 13px system-ui;cursor:pointer}"
+        ".delbtn:hover{background:#f5d5d5}"
         # el editor va ARRIBA de las fichas: con su propio fondo no se confunde con ellas
         ".pedit{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fafaf8;border:1px solid #efeeea;border-radius:10px;padding:10px 12px;margin:0 0 12px}"
         ".pchip{display:inline-flex;align-items:center;gap:6px;background:#f1f1ef;"
@@ -14527,6 +14538,17 @@ class H(BaseHTTPRequestHandler):
             quedan_e = [e for e in cargar_publicas().get(rid, []) if e != fuera]
             guardar_publicas_de(rid, "\n".join(quedan_e))
             bitacora("CONFIG-PUBLICAS", f"nodo={rid} -{fuera}")
+            return self._redirect("/reputacion")
+        if ruta == "/publicas/limpiar":
+            # "Detectar del MikroTik" puede dejar veinte entradas de golpe, y quitarlas de
+            # una en una son veinte recargas. Se borra la lista del nodo, no el historial
+            # ni las listas negras ya medidas: eso sigue ahi si se vuelven a declarar.
+            if not self._admin():
+                return self._deny()
+            rid = (q.get("rid", [""])[0]).strip()
+            _cuantas = len(cargar_publicas().get(rid, []))
+            guardar_publicas_de(rid, "")
+            bitacora("CONFIG-PUBLICAS", f"nodo={rid} vaciada ({_cuantas} entrada(s))")
             return self._redirect("/reputacion")
         if ruta == "/publicas/detectar":
             if not self._admin():

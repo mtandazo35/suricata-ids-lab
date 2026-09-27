@@ -512,6 +512,51 @@ El instalador anade tres cosas utiles para operar sin entrar a la web:
 
 ## Espejo desde MikroTik (TZSP)
 
+### Lo minimo: dos lineas en el router
+
+Si ya tienes una `address-list` con las redes de tus abonados (aqui se llama `Cliente`),
+esto es todo lo que hace falta. Cambia `IP_IDS` por la IP del sensor:
+
+```routeros
+/ip firewall mangle
+add action=sniff-tzsp chain=forward comment=IDS connection-bytes=0-10000 \
+    sniff-target=IP_IDS sniff-target-port=37008 src-address-list=Cliente
+add action=sniff-tzsp chain=forward comment=IDS connection-bytes=0-10000 \
+    sniff-target=IP_IDS sniff-target-port=37008 dst-address-list=Cliente
+```
+
+Y una tercera que **no es opcional**, aunque se olvide siempre:
+
+```routeros
+/ip firewall filter set [find action=fasttrack-connection] src-address-list=!Cliente
+```
+
+Sin ella, con fasttrack activo mangle deja de ver la conexion en cuanto se establece:
+capturarias el SYN y **te perderias el handshake TLS con su SNI**, que es donde se detecta
+botnet y C2. El espejo parece funcionar —hay trafico, hay alertas— y estas ciego a lo que
+importa. Se comprueba mirando si los contadores suben con clientes activos:
+
+```routeros
+/ip firewall mangle print stats where comment=IDS
+```
+
+Tres detalles de esas lineas, por si te preguntas por que son asi:
+
+- **`chain=forward` en las dos**, tambien en la de vuelta. En `prerouting` el des-NAT del
+  retorno todavia no se ha aplicado, asi que el destino sigue siendo tu IP publica y
+  `dst-address-list` **no coincidiria**: perderias el sentido de vuelta entero.
+- **`connection-bytes=0-10000`** espeja solo el arranque de cada conexion. Quitalo si el
+  sensor esta en la misma LAN; dejalo siempre si esta al otro lado de un enlace.
+- **`comment=IDS`** no es decoracion: es lo que te deja encontrarlas y apagarlas luego con
+  `/ip firewall mangle print where comment=IDS`.
+
+Desde el sensor se puede hacer todo esto solo, sin entrar al router:
+`suricata-mikrotik-init -k /root/mk.conf -s <IP_IDS> -e vpn -r <redes>`.
+
+Y para comprobar que de verdad esta llegando: **`suricata-espejo`**.
+
+El resto de esta seccion explica las variantes y el por que de cada cosa.
+
 Para analizar el trafico real de tu red MikroTik hay que **espejarlo** hacia el
 servidor. El camino sin hardware extra es **TZSP**: el router envuelve cada paquete
 en UDP/37008 y lo manda al servidor. Suricata **no** entiende TZSP crudo (solo

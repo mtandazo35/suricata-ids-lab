@@ -10025,7 +10025,38 @@ en <code>/etc/suricata-report.conf</code>. Se envia cada dia a las 07:30.</li>
 <tr><td>Assets del mapa</td><td><code>/var/lib/suricata-mapa/</code> (TopoJSON + topojson-client)</td></tr>
 </table>
 
-<!--CAT:Cuarentena y MikroTik--><h2>Espejo MikroTik y HOME_NET (por que a veces no se ven datos)</h2>
+<!--CAT:Cuarentena y MikroTik--><h2>Las dos lineas del MikroTik</h2>
+<p>Lo minimo para que este sensor reciba trafico, si ya tienes una <code>address-list</code>
+con las redes de tus abonados (aqui <code>Cliente</code>). Cambia <code>IP_IDS</code> por la
+IP de este servidor:</p>
+<pre><code>/ip firewall mangle
+add action=sniff-tzsp chain=forward comment=IDS connection-bytes=0-10000 \
+    sniff-target=IP_IDS sniff-target-port=37008 src-address-list=Cliente
+add action=sniff-tzsp chain=forward comment=IDS connection-bytes=0-10000 \
+    sniff-target=IP_IDS sniff-target-port=37008 dst-address-list=Cliente</code></pre>
+<p>Y una tercera que <b>no es opcional</b>, aunque se olvide siempre:</p>
+<pre><code>/ip firewall filter set [find action=fasttrack-connection] src-address-list=!Cliente</code></pre>
+<p>Sin ella, con fasttrack activo mangle deja de ver la conexion en cuanto se establece:
+capturarias el SYN y <b>te perderias el handshake TLS con su SNI</b>, que es donde se
+detecta botnet y C2. El espejo parece funcionar &mdash;hay trafico, hay alertas&mdash; y
+estas ciego a lo que importa.</p>
+<p>Por que son asi:</p>
+<ul>
+<li><b><code>chain=forward</code> en las dos</b>, tambien en la de vuelta. En
+<code>prerouting</code> el des-NAT del retorno todavia no se aplico, asi que el destino
+sigue siendo tu IP publica y <code>dst-address-list</code> <b>no coincidiria</b>.</li>
+<li><b><code>connection-bytes=0-10000</code></b> espeja solo el arranque de cada conexion,
+que es donde Suricata detecta casi todo. Quitalo si el sensor esta en la misma LAN.</li>
+<li><b><code>comment=IDS</code></b> es lo que te deja encontrarlas despues:
+<code>/ip firewall mangle print where comment=IDS</code>.</li>
+</ul>
+<p>Comprueba que suben los contadores con clientes activos
+(<code>/ip firewall mangle print stats where comment=IDS</code>) y, en el servidor,
+que esta llegando de verdad con <b><code>suricata-espejo</code></b>.</p>
+<p>Todo esto lo puede hacer el sensor solo, sin entrar al router:
+<code>suricata-mikrotik-init -k /root/mk.conf -s &lt;IP_IDS&gt; -e vpn -r &lt;redes&gt;</code>.</p>
+
+<h2>Espejo MikroTik y HOME_NET (por que a veces no se ven datos)</h2>
 <p>Con espejo TZSP desde el MikroTik, el flujo llega al receptor (<code>tzsp-decap</code>)
 y Suricata lo inspecciona. Pero el panel muestra <b>alertas</b>, no trafico normal, y las
 reglas de <b>ataque saliente</b> (escaneo de puertos, Telnet/Mirai, fuerza bruta SSH de un

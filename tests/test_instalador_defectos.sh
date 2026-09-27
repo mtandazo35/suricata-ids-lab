@@ -94,7 +94,12 @@ check "la vuelta va en forward (en prerouting el destino aun es la publica)"    
 check "y la ida tambien"       "$(grep -c 'comment="espejo IDS (ida)"' install-suricata.sh)" "1"
 # el DNS va aparte y SIN connection-bytes: pesa nada y es donde mas se detecta
 check "el DNS se espeja entero, en su propia regla"       "$(grep -c 'add chain=forward src-address-list=ids-vigilados protocol=udp dst-port=53' install-suricata.sh)" "1"
-check "se excluye el fasttrack, sin lo cual mangle solo ve el SYN"       "$(grep -c 'find action=fasttrack-connection' install-suricata.sh)" "2"
+# Se mira DENTRO del bloque que se imprime al terminar, no en todo el archivo: la
+# documentacion del panel tambien lo explica, y un contador global se rompe cada vez que
+# se documenta algo en otro sitio.
+BLOQUE="$(awk '/En el MikroTik.*modo/,/^EOF$/' install-suricata.sh)"
+check "el bloque final excluye el fasttrack en IPv4"       "$(printf '%s' "$BLOQUE" | grep -c '/ip firewall filter set \[find action=fasttrack-connection\]')" "1"
+check "y en IPv6, que en v7 viene activo de fabrica"       "$(printf '%s' "$BLOQUE" | grep -c '/ipv6 firewall filter set \[find action=fasttrack-connection\]')" "1"
 check "se avisa de apagar las reglas viejas que conviven"       "$(grep -c 'APAGALAS' install-suricata.sh)" "1"
 
 

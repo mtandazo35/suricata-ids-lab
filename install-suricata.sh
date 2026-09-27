@@ -7287,10 +7287,60 @@ def _cpes_del_nodo(rid):
             fuera[k] = {**c, **{x: y for x, y in prev.items() if y and not c.get(x)}}
     return list(fuera.items())
 
+# El codigo del listado dice QUE buscar. No es una corazonada: una lista de spam apunta a
+# correo saliente y la XBL a un equipo tomado, y son cosas distintas dentro de tu red.
+DNSBL_SENAL = {
+    "spam": ({"25", "465", "587"},
+             {"Spam", "Envio de correo en volumen"},
+             "correo saliente sin autenticar"),
+    "xbl":  ({"3128", "8080", "1080", "9050"},
+             {"Botnet", "Botnet CnC", "Botnet Mirai", "Botnet Katana", "Troyano",
+              "Trafico de malware", "Proxy abierto"},
+             "equipo tomado o proxy abierto"),
+}
+# Lo que NO es un CPE: la DROP dice que la red esta secuestrada o en manos delictivas. Es
+# un problema de BGP y asignacion, y sacar aqui una lista de abonados mandaria a buscar
+# donde no esta. La PBL en residencial es lo normal y no es un problema.
+_DNSBL_SIN_CULPABLE = ("DROP", "PBL")
+
+def senal_de_listas(bl):
+    """De POR QUE te listaron a que buscar en tus CPEs.
+
+    Devuelve (puertos, firmas, motivos, solo_infra). `solo_infra` es True cuando lo unico
+    que hay es una DROP: ahi no procede senalar a ningun abonado."""
+    etiquetas = []
+    for _ip, v in ((bl or {}).get("ips") or {}).items():
+        if v.get("solo_pbl"):
+            continue
+        etiquetas.extend(v.get("listas") or [])
+    if not etiquetas:
+        return set(), set(), [], False
+    texto = " | ".join(etiquetas)
+    claves = set()
+    if "XBL" in texto:
+        claves.add("xbl")
+    # cualquier otra de estas listas es, en la practica, un problema de correo saliente
+    if any(k in texto for k in ("SBL", "CSS", "SpamCop", "Barracuda", "PSBL", "UCEPROTECT")):
+        claves.add("spam")
+    solo_infra = (not claves) and any(k in texto for k in _DNSBL_SIN_CULPABLE)
+    puertos, firmas, motivos = set(), set(), []
+    for k in sorted(claves):
+        pt, fr, txt = DNSBL_SENAL[k]
+        puertos |= pt; firmas |= fr; motivos.append(txt)
+    return puertos, firmas, motivos, solo_infra
+
 def culpables_de(rid, cats, tope=12):
-    """Ordena los CPEs de ese nodo por cuanto encajan con lo que se denuncia de su IP
-    publica. Devuelve [(clave, cpe, puntos, [motivos])]."""
-    puertos, firmas = senal_de_categorias(cats)
+    """Candidatos segun lo que DENUNCIAN de tu publica (categorias de AbuseIPDB)."""
+    return culpables_por_senal(rid, *senal_de_categorias(cats), tope=tope)
+
+def culpables_por_senal(rid, puertos, firmas, tope=12):
+    """Ordena los CPEs de ese nodo por cuanto encajan con lo que se busca.
+
+    Son CANDIDATOS, no culpables: detras de una publica con NAT hay decenas o cientos de
+    abonados, y nada en el camino une un listado concreto con un CPE concreto. Lo que si
+    se puede hacer es ordenar por quien esta haciendo ESE tipo de abuso.
+
+    Devuelve [(clave, cpe, puntos, [motivos], ya_en_cuarentena)]."""
     if not puertos and not firmas:
         return []
     env = set(cargar_enviados(MK_SENT)) | set(cargar_enviados(MK_SENT_DNS))
@@ -7500,6 +7550,52 @@ def dnsbl_historial_html(bl, esc=None, tope=12):
             "limpio: se corto al abonado equivocado o quedo otro emitiendo.</p>"
             "<table class=ut style='font-size:12.5px'><tbody>%s</tbody></table></details>"
             % (len(evs), filas))
+
+def culpables_lista_html(rid, bl, esc=None, tope=8):
+    """A quien mirar cuando te listan, deducido de POR QUE te listaron.
+
+    El listado dice el tipo de abuso (correo saliente, equipo tomado) y el sensor sabe que
+    CPEs de ese nodo lo estan haciendo. Cruzarlo es la unica pista util que existe: nadie
+    mas la tiene, porque hace falta ver el trafico por dentro.
+
+    Se presentan como CANDIDATOS. Detras de una publica con NAT hay decenas o cientos de
+    abonados y NADA une un listado concreto con un CPE concreto; lo honesto es ordenar por
+    quien encaja, no senalar a uno."""
+    esc = esc or html.escape
+    puertos, firmas, motivos, solo_infra = senal_de_listas(bl)
+    if solo_infra:
+        return ("<div class=hint style='margin-top:6px'>El listado es de <b>red secuestrada "
+                "(DROP)</b>, no de un equipo infectado: va por asignacion y BGP, no por "
+                "ningun abonado. Buscar un CPE aqui es buscar donde no esta.</div>")
+    if not (puertos or firmas):
+        return ""
+    culp = culpables_por_senal(rid, puertos, firmas, tope=tope)
+    por_que = " y ".join(motivos)
+    if not culp:
+        return ("<div class=hint style='margin-top:6px'>Te listan por <b>%s</b>, pero "
+                "ningun CPE de este nodo aparece haciendo eso en la ventana actual. "
+                "Puede haber pasado antes de la ventana, o salir por otro nodo.</div>"
+                % esc(por_que))
+    lis = ""
+    for k, c, _pts, mot, yaesta in culp:
+        accion = ("<span class=hint style='color:#3a9d5d'>&#10003; ya en cuarentena</span>"
+                  if yaesta else
+                  "<form method=post action='/cuarentena/enviar' style='display:inline'>"
+                  "<input type=hidden name=ip value='%s'>"
+                  "<input type=hidden name=score value='%s'>"
+                  "<button class='qbtn send' style='padding:3px 10px;font-size:12px'>"
+                  "Cuarentena</button></form>" % (esc(k), c.get("riesgo", 0)))
+        lis += ("<li style='margin:6px 0'><b class=mono>%s</b> "
+                "<span class=hint>%s</span> %s</li>"
+                % (esc(ip_de(k)), esc(", ".join(mot)), accion))
+    return ("<details open style='margin-top:8px'><summary style='cursor:pointer;"
+            "font-size:13px;font-weight:600'>A quien mirar por este listado (%d)</summary>"
+            "<p class=hint style='margin:6px 0 4px'>Te listan por <b>%s</b>. Estos son los "
+            "CPEs de este nodo que mas encajan con eso, ordenados. Son <b>candidatos</b>: "
+            "con NAT nada une un listado con un abonado concreto, asi que confirma en la "
+            "ficha antes de cortar.</p>"
+            "<ul style='margin:6px 0 0;padding-left:18px;font-size:13px'>%s</ul></details>"
+            % (len(culp), esc(por_que), lis))
 
 def vigilar_dnsbl():
     """Revisa las listas negras de todo lo declarado. Solo son consultas DNS: no gasta
@@ -10525,6 +10621,17 @@ puede reconstruir mirando el estado de hoy.</p>
 <p>La <b>primera</b> revision de una entrada no genera movimientos a proposito: lo que esta listado
 hoy puede llevar meses ahi, y apuntarlo como "entro ahora" seria inventarse una fecha y hacer creer
 que el problema es nuevo. Los movimientos empiezan a contar desde la segunda revision.</p>
+<p><b>A quien mirar.</b> El codigo del listado dice <b>que tipo de abuso</b> es, y el sensor sabe
+que CPEs de ese nodo lo estan haciendo. El panel cruza las dos cosas: una lista de <b>spam</b>
+(SBL, CSS, SpamCop, Barracuda, PSBL, UCEPROTECT) manda a buscar <b>correo saliente</b>; la
+<b>XBL</b> manda a buscar un <b>equipo tomado o proxy abierto</b>. Son cosas distintas dentro de
+tu red y confundirlas hace perder el dia.</p>
+<p>Salen como <b>candidatos</b>, ordenados por cuanto encajan, y no como culpables:
+detras de una publica con NAT hay decenas o cientos de abonados y <b>nada une un listado concreto
+con un CPE concreto</b>. Confirma en la ficha antes de cortarle a nadie.</p>
+<p>Dos listados que <b>no</b> senalan a ningun abonado, a proposito: la <b>DROP</b> dice que la red
+esta secuestrada &mdash;va por asignacion y BGP, no por un equipo infectado&mdash; y la <b>PBL</b>,
+que en un rango residencial es lo normal.</p>
 <p><b>Si una IP entra, sale y vuelve a entrar, la causa no se limpio</b>: se corto al abonado
 equivocado, o quedo otro emitiendo por esa misma publica. Es el patron que mas conviene vigilar,
 porque pedir el deslistado otra vez con el problema vivo empeora tu reputacion ante esa lista.</p>
@@ -11148,6 +11255,8 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 n_den = int(dat.get("n_den", 0))
                 den_n = (f"<span class=hint>{n_den:,} de "
                          f"{int(dat.get('hosts', 0)):,} con denuncias</span>")
+            if int((bl or {}).get("n_listadas", 0)):
+                bl_html += culpables_lista_html(rid, bl, esc)
             bl_html += _salida_html(ent, bl, _limpio, esc)
             bl_html += dnsbl_historial_html(bl, esc)
             filas.append(

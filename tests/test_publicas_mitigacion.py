@@ -42,7 +42,8 @@ PIEZAS = ("PUBLICAS_CONF", "PUB_HIST", "PUB_HIST_DIAS", "PUB_UMBRAL_AVISO", "_PU
           "DNSBL", "DNSBL_HIST", "DNSBL_MAX_IPS", "DNSBL_HILOS", "DNSBL_DIAS",
           "ZEN_COD", "_PBL", "_invertida", "dnsbl_una", "dnsbl_revisar",
           "_dnsbl_hist", "vigilar_dnsbl",
-          "DNSBL_EVENTOS_MAX", "dnsbl_cambios")
+          "DNSBL_EVENTOS_MAX", "dnsbl_cambios",
+          "culpables_por_senal", "DNSBL_SENAL", "_DNSBL_SIN_CULPABLE", "senal_de_listas")
 
 fallos = 0
 def check(d, c, e=""):

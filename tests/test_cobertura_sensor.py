@@ -24,7 +24,8 @@ _i = SRC.index("cat > /usr/local/bin/suricata-dashboard <<'DASH'")
 DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
 ARBOL = ast.parse(DASH)
 
-PIEZAS = ("TZSP_ESTADO", "COBERTURA_MUDO", "COBERTURA_RECHAZO", "cobertura_tzsp")
+PIEZAS = ("TZSP_ESTADO", "COBERTURA_MUDO", "COBERTURA_RECHAZO", "cobertura_tzsp",
+          "DESPERDICIO_AVISO", "desperdicio_espejo")
 
 fallos = 0
 
@@ -107,6 +108,30 @@ def main():
            ["100.64.0.2/32"], edad=900)
     check("se sabe cuando se midio, para no confiar en un dato viejo",
           ns["cobertura_tzsp"](ahora)["edad"] >= 890)
+
+    # --- el espejo que se tira al llegar -------------------------------------------
+    # El dia que el panel iba pesado se busco en el codigo: caches, consultas, GIL. No
+    # era nada de eso. El MikroTik tenia dos juegos de reglas conviviendo y mandaba
+    # 886 Mbps para que el receptor tirase el 91%. El enlace lleno perdia paquetes, y
+    # como el TZSP es UDP no se retrasaba: desaparecia. El dato estaba en los contadores
+    # del receptor desde el principio y nadie lo miraba.
+    d = ns["desperdicio_espejo"]({"rx": 4000000000, "recortados": 3640000000,
+                                  "recorte_bytes": 10000})
+    check("un 91% recortado se reconoce como desperdicio",
+          d["desperdicio_alto"] is True and d["desperdicio"] == 0.91, d)
+
+    d = ns["desperdicio_espejo"]({"rx": 1000, "recortados": 120, "recorte_bytes": 10000})
+    check("un recorte pequeno es normal y no avisa", d["desperdicio_alto"] is False, d)
+
+    # Sin recorte activo el contador no dice nada de lo que manda el router: no se puede
+    # deducir desperdicio de un dato que no se esta midiendo.
+    d = ns["desperdicio_espejo"]({"rx": 4000000000, "recortados": 0, "recorte_bytes": 0})
+    check("sin recorte activo no se inventa un diagnostico", d["desperdicio"] is None, d)
+    d = ns["desperdicio_espejo"]({"rx": 0, "recortados": 0, "recorte_bytes": 10000})
+    check("sin trafico tampoco", d["desperdicio"] is None, d)
+
+    check("el umbral del aviso es explicito y esta por encima de la mitad",
+          0.4 <= ns["DESPERDICIO_AVISO"] <= 0.8, ns["DESPERDICIO_AVISO"])
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

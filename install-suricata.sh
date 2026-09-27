@@ -51,6 +51,14 @@ Uso: sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] 
   -b BYTES     con -t: recorta cada flujo a los primeros BYTES en el propio receptor
                (p.ej. 10000). Para cuando NO se puede filtrar en el MikroTik: el
                espejo llega entero igual, pero no se ahoga al sensor con el payload.
+  -e DONDE     con -t: donde esta el sensor respecto al MikroTik.
+                 local  misma LAN. Hay ancho de banda de sobra, se espeja entero.
+                 vpn    al otro lado de un tunel o de un enlace. Recorta a 10000
+                        bytes por flujo (salvo que pongas -b) y las reglas que se
+                        imprimen al final llevan connection-bytes.
+               Default: local. Elegir mal aqui es el fallo mas caro de todos: un
+               sensor remoto con el espejo entero satura el enlace y, cuando el
+               enlace se llena, el TZSP (que es UDP) no se retrasa, DESAPARECE.
   -m ORIGEN    con -t: IP/CIDR del MikroTik que envia el espejo TZSP (una o varias,
                separadas por coma). Restringe UFW y el receptor a ese origen.
                OBLIGATORIO con -t: sin origen conocido cualquier host de la red podria
@@ -69,14 +77,17 @@ USAGE
 # ----------------------------------------------------------------------------- args
 IFACE=""; HOME_NET=""; HOME_NET_GIVEN=0; WEB=1; WEB_PORT=5636; WEB_PASS=""; TZSP=0; TZSP_PORT=37008; MIRROR_SRC=""
 TZSP_BYTES=0   # recorte por flujo en el receptor (0 = sin recorte)
+TZSP_BYTES_DADO=0
+ESPEJO_DONDE="local"   # local | vpn  (ver -e)
 GESTION=""     # red(es) desde las que se permite llegar a la web (UFW)
-while getopts "i:n:p:P:m:b:a:tWh" opt; do
+while getopts "i:n:p:P:m:b:a:e:tWh" opt; do
   case "$opt" in
     i) IFACE="$OPTARG" ;;
     n) HOME_NET="$OPTARG"; HOME_NET_GIVEN=1 ;;
     p) WEB_PORT="$OPTARG" ;;
     P) WEB_PASS="$OPTARG" ;;
-    b) TZSP_BYTES="$OPTARG" ;;
+    b) TZSP_BYTES="$OPTARG"; TZSP_BYTES_DADO=1 ;;
+    e) ESPEJO_DONDE="$OPTARG" ;;
     a) GESTION="$OPTARG" ;;
     m) MIRROR_SRC="$OPTARG" ;;
     t) TZSP=1 ;;
@@ -85,6 +96,18 @@ while getopts "i:n:p:P:m:b:a:tWh" opt; do
     *) usage; exit 1 ;;
   esac
 done
+case "$ESPEJO_DONDE" in
+  local|vpn) ;;
+  *) die "-e admite 'local' o 'vpn' (recibido: '$ESPEJO_DONDE')." ;;
+esac
+# Con el sensor al otro lado de un enlace, el recorte no es un ajuste fino: es lo que
+# separa ver la red de creer que la ves. Medido en produccion: el espejo entero de un
+# ISP eran 886 Mbps para que el receptor tirase el 91%, y al llenarse el enlace se
+# perdia tambien parte del espejo bueno. Por eso 'vpn' lo pone solo.
+if [ "$ESPEJO_DONDE" = "vpn" ] && [ "$TZSP_BYTES_DADO" -eq 0 ]; then
+  TZSP_BYTES=10000
+fi
+
 # por si el usuario pasa -n "[a,b]": el yaml ya pone los corchetes
 HOME_NET="${HOME_NET#[}"; HOME_NET="${HOME_NET%]}"
 { [[ "$WEB_PORT" =~ ^[0-9]+$ ]] && [ "$WEB_PORT" -ge 1 ] && [ "$WEB_PORT" -le 65535 ]; } || die "Puerto invalido: $WEB_PORT"
@@ -5852,7 +5875,32 @@ def cobertura_tzsp(ahora=None):
             o["mudos"].append(origen)
     esperados = len(d.get("esperados") or [])
     o["cobertura"] = round(100.0 * (esperados - len(o["mudos"])) / esperados, 1) if esperados else None
+    o.update(desperdicio_espejo(d))
     return o
+
+DESPERDICIO_AVISO = 0.50   # a partir de aqui, el router esta mandando lo que no hace falta
+
+def desperdicio_espejo(d):
+    """Cuanto del espejo se tira nada mas llegar, que es cuanto enlace se esta gastando
+    para nada.
+
+    Esto existe por un dia entero perdido. El panel iba pesado, el cambio de pestaña
+    tardaba, y se busco en el codigo: caches, consultas, rendimiento. No era nada de eso.
+    El MikroTik tenia DOS juegos de reglas de espejo conviviendo, uno viejo sin
+    connection-bytes, y mandaba 886 Mbps para que el receptor tirase el 91% al entrar.
+    El enlace lleno perdia paquetes, y como el TZSP es UDP no se retrasaba: DESAPARECIA.
+    A Suricata le llegaba la mitad del espejo bueno.
+
+    El dato estaba ahi desde el principio, en los contadores del propio receptor. Nadie
+    lo estaba mirando. Ahora lo mira el panel: un recorte alto no es una virtud del
+    receptor, es una factura que esta pagando el enlace."""
+    rx = int(d.get("rx", 0) or 0)
+    rec = int(d.get("recortados", 0) or 0)
+    if not rx or not int(d.get("recorte_bytes", 0) or 0):
+        return {"desperdicio": None}          # sin recorte activo no se puede saber
+    frac = rec / float(rx)
+    return {"desperdicio": round(frac, 4),
+            "desperdicio_alto": frac >= DESPERDICIO_AVISO}
 
 def medir_sensor():
     """Mide el estado real del sensor (captura, perdidas, servicios, frescura del reporte).
@@ -5941,6 +5989,14 @@ def medir_sensor():
         o["nivel"] = "warn"
         o["titulo"] = ("Sin espejo de %d nodo(s): %s. Esa parte de la red esta sin vigilar"
                        % (len(cob["mudos"]), ", ".join(cob["mudos"][:2])))
+    elif cob and cob.get("desperdicio_alto"):
+        # No es un fallo del sensor: es el router mandando lo que no hace falta. Y cuando
+        # el enlace se llena, el TZSP es UDP y no se retrasa, DESAPARECE: se pierde parte
+        # del espejo que SI importa. Por eso es aviso y no una nota al pie.
+        o["nivel"] = "warn"
+        o["titulo"] = ("El MikroTik manda el espejo sin filtrar: el %d%% se tira al "
+                       "llegar. Pon connection-bytes=0-10000 en el mangle"
+                       % round(100 * cob["desperdicio"]))
     elif dt > 0 and not hay_trafico:
         o["nivel"], o["titulo"] = "warn", "Sin trafico"
     elif o["memcaps"]:
@@ -15901,6 +15957,33 @@ if [ "$TZSP" -eq 1 ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null
 fi
 
 # ----------------------------------------------------------------------------- resumen
+# Las reglas del MikroTik no son las mismas con el sensor al lado que al otro lado de un
+# tunel, y equivocarse no da error: da un IDS que parece funcionar y no ve.
+MK_CB=""; MK_DNS=""; MK_AVISO=""
+if [ "$ESPEJO_DONDE" = "vpn" ]; then
+  MK_CB="connection-bytes=0-10000 "
+  MK_DNS="
+      # el DNS entero y aparte: pesa nada y es donde mas se detecta (C2, DGA,
+      # tunneling). No lleva connection-bytes para que no se corte nunca.
+      add chain=forward src-address-list=ids-vigilados protocol=udp dst-port=53 \\
+          action=sniff-tzsp sniff-target=${PUB_IP:-<IP>} sniff-target-port=${TZSP_PORT} \\
+          passthrough=yes comment=\"espejo IDS: DNS completo\"
+"
+  MK_AVISO="
+      ${c_y}Si ya tenias reglas de espejo, APAGALAS.${c_0} Convivir con una regla vieja
+      sin connection-bytes es el fallo que mas caro sale: el espejo bueno y el
+      que sobra comparten enlace, el enlace se llena, y el TZSP (que es UDP) no
+      se retrasa sino que DESAPARECE. Visto en produccion: 886 Mbps entrando
+      para que Suricata recibiera la mitad de los 14 Mbps que le tocaban.
+        /ip firewall mangle print where action=sniff-tzsp
+        /ip firewall mangle set [find action=sniff-tzsp && !connection-bytes] disabled=yes"
+else
+  MK_AVISO="
+      Sensor en la misma LAN: se espeja entero, que es lo que da mas deteccion.
+      Si algun dia lo mueves detras de un tunel, reinstala con ${c_g}-e vpn${c_0}: el
+      espejo entero no cabe en un enlace y lo que no cabe se pierde en silencio."
+fi
+
 cat <<EOF
 
 ${c_g}==================================================================${c_0}
@@ -15950,12 +16033,34 @@ cat <<EOF
     Stream     : midstream=$(grep -cE '^  midstream: true' "$CFG") async-oneside=$(grep -cE '^  async-oneside: true' "$CFG") bypass=$(grep -cE '^  bypass: true' "$CFG") tls-bypass=$(grep -cE '^\s*encryption-handling: bypass' "$CFG") (1 = activo); memcaps segun RAM (${RAM_MB} MB)
     Vigila     : grep -E 'reassembly_memuse|kernel_drops' /var/log/suricata/stats.log | tail -2   (memuse debe quedar bajo el memcap)
 
-    En el MikroTik (todo el trafico de una interfaz):
-      /tool sniffer set streaming-enabled=yes streaming-server=${PUB_IP:-<IP>} filter-stream=yes filter-interface=<bridge-o-ether>
-      /tool sniffer start
-      /system scheduler add name=sniffer-start start-time=startup on-event="/tool sniffer start"
-    O selectivo por regla (solo una red de clientes):
-      /ip firewall mangle add chain=prerouting src-address=<red-clientes> action=sniff-tzsp sniff-target=${PUB_IP:-<IP>} sniff-target-port=${TZSP_PORT} passthrough=yes
+    ${c_g}En el MikroTik${c_0} (modo ${ESPEJO_DONDE}; copia y pega, cambiando la red de abonados):
+
+      # 1) la lista de quien se vigila. Anadir o quitar un cliente es tocar
+      #    la lista, no las reglas.
+      /ip firewall address-list
+      add list=ids-vigilados address=<red-de-abonados> comment="abonados vigilados"
+
+      # 2) el espejo, ida y vuelta. Las dos en 'forward' a proposito: en la
+      #    vuelta el dst-nat ya se aplico, asi que el destino es la IP privada
+      #    del CPE y la lista coincide. En 'prerouting' el destino todavia es
+      #    tu IP publica y el sentido de vuelta NO se espejaria.
+      /ip firewall mangle
+      add chain=forward src-address-list=ids-vigilados ${MK_CB}\\
+          action=sniff-tzsp sniff-target=${PUB_IP:-<IP>} sniff-target-port=${TZSP_PORT} \\
+          passthrough=yes comment="espejo IDS (ida)"
+      add chain=forward dst-address-list=ids-vigilados ${MK_CB}\\
+          action=sniff-tzsp sniff-target=${PUB_IP:-<IP>} sniff-target-port=${TZSP_PORT} \\
+          passthrough=yes comment="espejo IDS (vuelta)"
+${MK_DNS}
+      # 3) SIN ESTO NO FUNCIONA: con fasttrack activo, mangle solo ve los
+      #    primeros paquetes. Verias el SYN y te perderias el handshake TLS
+      #    con su SNI, que es donde se detecta botnet y C2.
+      /ip firewall filter set [find action=fasttrack-connection] src-address-list=!ids-vigilados
+      /ipv6 firewall filter set [find action=fasttrack-connection] src-address-list=!ids-vigilados
+
+      # 4) comprueba que suben, con clientes activos:
+      /ip firewall mangle print stats where comment~"espejo IDS"
+${MK_AVISO}
 EOF
 fi
 cat <<EOF

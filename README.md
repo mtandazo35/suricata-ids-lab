@@ -132,9 +132,52 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/in
 #    -W = sin web (solo Suricata + eve.json/fast.log)
 curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -W
 
-# 6) ISP COMPLETO — espejo MikroTik + interfaz fija + TODAS las redes privadas + clave.
-curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -i ens18 -t -m 10.87.87.1 -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 -P 'MiClaveSegura'
+# 6) ISP, SENSOR EN LA MISMA LAN que el MikroTik.
+#    -e local = hay ancho de banda de sobra, se espeja entero (mas deteccion).
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -i ens18 -t -e local \
+  -m 10.87.87.1 -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 \
+  -a 203.0.113.0/24 -P 'MiClaveSegura'
+
+# 7) ISP, SENSOR REMOTO (al otro lado de una VPN o de un enlace).
+#    -e vpn = recorta cada flujo a 10.000 bytes en el receptor Y las reglas que
+#    el instalador imprime al final ya salen con connection-bytes.
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -i ens18 -t -e vpn \
+  -m 10.87.87.1 -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 \
+  -a 203.0.113.0/24 -P 'MiClaveSegura'
 ```
+
+### `-e local` o `-e vpn`: la opcion que mas caro sale equivocar
+
+No es un ajuste fino. Un sensor al otro lado de un enlace con el espejo entero **satura
+el enlace**, y cuando el enlace se llena el TZSP —que es UDP— no se retrasa: **desaparece**.
+Suricata ve medio handshake, no reensambla la sesion y **no alerta**. Un IDS que no alerta
+se parece mucho a una red limpia.
+
+Medido en un ISP en produccion: **886 Mbps** entrando al sensor para que el receptor
+tirase el **91%** nada mas llegar. Con el enlace lleno se perdia tambien parte del espejo
+bueno: el router mandaba 14 Mbps de lo que si hacia falta y a Suricata le llegaban 6,7.
+Al apagar el espejo sin filtrar, la entrada bajo a **22 Mbps** y Suricata paso a recibir
+**17 Mbps**: menos trafico y **mas** deteccion.
+
+| | `-e local` | `-e vpn` |
+|---|---|---|
+| Donde esta el sensor | misma LAN que el router | tras un tunel o un enlace |
+| Recorte en el receptor | no | 10.000 bytes por flujo |
+| Reglas que imprime | espejo entero | con `connection-bytes=0-10000` + DNS aparte |
+| Que se pierde | nada | el payload a mitad de transferencia (con TLS ya era ciego) |
+
+Con `-t` y sin `-e`, el default es `local`. Si mueves el sensor detras de un tunel,
+**reinstala con `-e vpn`**: es idempotente y solo re-configura.
+
+> **Si ya tenias reglas de espejo, apagalas antes.** Convivir con una regla vieja sin
+> `connection-bytes` es el fallo que mas caro sale, porque el espejo bueno y el que sobra
+> comparten enlace. Se ven asi:
+> ```routeros
+> /ip firewall mangle print where action=sniff-tzsp
+> /ip firewall mangle set [find action=sniff-tzsp && !connection-bytes] disabled=yes
+> ```
+> El panel tambien lo avisa solo: si mas de la mitad del espejo se recorta al entrar, la
+> salud del sensor dice que el MikroTik esta mandando sin filtrar.
 
 > **Ojo con el `-n` en modo espejo (`-t`)**: van **las redes de tus clientes** (las IPs
 > de los CPE que espejas), **no** la IP del servidor. Si `HOME_NET` esta mal, las reglas de

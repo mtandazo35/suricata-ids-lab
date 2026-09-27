@@ -77,6 +77,27 @@ check "y sin -a se avisa en vez de abrir" \
 # bloque de firmas ruidosas.
 check "el .card base separa una tarjeta de la siguiente"       "$(grep -cE '\.card\{border:1px solid #e7e6e2;.*margin-bottom:16px\}' install-suricata.sh)" "1"
 
+# --- el modo del espejo: local o por VPN --------------------------------------------
+# Lo que protege: que un sensor remoto NO nazca espejando entero. Medido en produccion:
+# 886 Mbps entrando para que el receptor tirase el 91%, y con el enlace lleno el TZSP
+# (UDP) no se retrasa, DESAPARECE: a Suricata le llegaba la mitad del espejo bueno.
+check "el flag -e esta en getopts"       "$(grep -cE '^while getopts "[^"]*e:[^"]*" opt; do$' install-suricata.sh)" "1"
+check "solo admite local o vpn"       "$(grep -c 'die "-e admite' install-suricata.sh)" "1"
+check "con -e vpn el recorte se pone solo"       "$(grep -c 'TZSP_BYTES=10000' install-suricata.sh)" "1"
+check "y un -b explicito manda sobre el default"       "$(grep -c 'TZSP_BYTES_DADO" -eq 0' install-suricata.sh)" "1"
+
+# --- las reglas que se imprimen al final --------------------------------------------
+# Antes recomendaba justo lo que saturo un enlace real: prerouting, sin connection-bytes,
+# sin el sentido de vuelta y sin excluir el fasttrack.
+check "ya no se recomienda el ejemplo sin recorte ni vuelta"       "$(grep -c 'mangle add chain=prerouting src-address=<red-clientes>' install-suricata.sh)" "0"
+check "la vuelta va en forward (en prerouting el destino aun es la publica)"       "$(grep -c 'add chain=forward dst-address-list=ids-vigilados' install-suricata.sh)" "1"
+check "y la ida tambien"       "$(grep -c 'comment="espejo IDS (ida)"' install-suricata.sh)" "1"
+# el DNS va aparte y SIN connection-bytes: pesa nada y es donde mas se detecta
+check "el DNS se espeja entero, en su propia regla"       "$(grep -c 'add chain=forward src-address-list=ids-vigilados protocol=udp dst-port=53' install-suricata.sh)" "1"
+check "se excluye el fasttrack, sin lo cual mangle solo ve el SYN"       "$(grep -c 'find action=fasttrack-connection' install-suricata.sh)" "2"
+check "se avisa de apagar las reglas viejas que conviven"       "$(grep -c 'APAGALAS' install-suricata.sh)" "1"
+
+
 # --- la ayuda lo cuenta ------------------------------------------------------------
 check "el flag -a esta en getopts" \
       "$(grep -cE '^while getopts "[^"]*a:[^"]*" opt; do$' install-suricata.sh)" "1"

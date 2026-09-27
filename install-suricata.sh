@@ -63,6 +63,12 @@ Uso: sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] 
                separadas por coma). Restringe UFW y el receptor a ese origen.
                OBLIGATORIO con -t: sin origen conocido cualquier host de la red podria
                inyectar tramas forjadas en el IDS, asi que el receptor no arranca.
+  -k ARCHIVO   deja el MikroTik configurado solo: da de alta el router en el panel
+               y le monta el espejo (address-list, reglas de ida y vuelta, DNS y la
+               exclusion del fasttrack). El archivo lleva HOST/PORT/USER/PASS y debe
+               ser chmod 600: la clave NO se pasa por la linea de comandos porque ahi
+               queda en el historial y a la vista en `ps`. Es idempotente: repetirlo
+               actualiza, no duplica. Requiere -t.
   -t           receptor TZSP (UDP 37008) para espejo desde MikroTik (requiere -m)
   -W           sin web (solo Suricata + logs locales)
   -h           esta ayuda
@@ -80,7 +86,8 @@ TZSP_BYTES=0   # recorte por flujo en el receptor (0 = sin recorte)
 TZSP_BYTES_DADO=0
 ESPEJO_DONDE="local"   # local | vpn  (ver -e)
 GESTION=""     # red(es) desde las que se permite llegar a la web (UFW)
-while getopts "i:n:p:P:m:b:a:e:tWh" opt; do
+MK_CRED=""     # archivo con las credenciales del MikroTik (ver -k)
+while getopts "i:n:p:P:m:b:a:e:k:tWh" opt; do
   case "$opt" in
     i) IFACE="$OPTARG" ;;
     n) HOME_NET="$OPTARG"; HOME_NET_GIVEN=1 ;;
@@ -88,6 +95,7 @@ while getopts "i:n:p:P:m:b:a:e:tWh" opt; do
     P) WEB_PASS="$OPTARG" ;;
     b) TZSP_BYTES="$OPTARG"; TZSP_BYTES_DADO=1 ;;
     e) ESPEJO_DONDE="$OPTARG" ;;
+    k) MK_CRED="$OPTARG" ;;
     a) GESTION="$OPTARG" ;;
     m) MIRROR_SRC="$OPTARG" ;;
     t) TZSP=1 ;;
@@ -96,6 +104,10 @@ while getopts "i:n:p:P:m:b:a:e:tWh" opt; do
     *) usage; exit 1 ;;
   esac
 done
+if [ -n "$MK_CRED" ]; then
+  [ "$TZSP" -eq 1 ] || die "-k necesita -t: primero hay que recibir el espejo."
+  [ -r "$MK_CRED" ] || die "No se puede leer el archivo de credenciales: $MK_CRED"
+fi
 case "$ESPEJO_DONDE" in
   local|vpn) ;;
   *) die "-e admite 'local' o 'vpn' (recibido: '$ESPEJO_DONDE')." ;;
@@ -15953,6 +15965,311 @@ if [ "$TZSP" -eq 1 ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null
     # sin origen de espejo NO se abre el puerto: abrirlo a cualquiera permitiria
     # inyectar tramas forjadas en el IDS (el receptor tampoco arranca, ver -m).
     warn "UFW: ${TZSP_PORT}/udp NO se abre sin -m <IP_MikroTik>."
+  fi
+fi
+
+# --------------------------------------------------- MikroTik listo desde el sensor
+cat > /usr/local/bin/suricata-mikrotik-init <<'MKINIT'
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Deja el MikroTik listo desde el sensor: registra el router y monta el espejo.
+
+Existe para no tener que acordarse de nada. Lo que hacia falta hacer a mano eran seis
+cosas, y olvidar una sola deja un IDS que parece funcionar y no ve:
+
+  1. dar de alta el router en el panel (sin eso detecta pero no corta);
+  2. la address-list de a quien se vigila;
+  3. el espejo de IDA y el de VUELTA, los dos en forward;
+  4. el recorte, si el sensor esta al otro lado de un enlace;
+  5. el DNS aparte y entero;
+  6. excluir el fasttrack, sin lo cual mangle solo ve el SYN.
+
+Es IDEMPOTENTE a proposito. Repetirlo no duplica reglas: las nuestras se reconocen por
+su comentario y se actualizan. Un espejo duplicado es justo lo que en produccion metio
+886 Mbps en un enlace para que el receptor tirase el 91%, y con el enlace lleno el TZSP
+(que es UDP) no se retrasa, DESAPARECE.
+
+No se toca nada mas: solo se apagan reglas de espejo que apunten A ESTE sensor. Lo que
+el cliente tenga para otras cosas se queda como esta.
+"""
+import argparse
+import ast
+import hashlib as _hashlib
+import json
+import os
+import socket
+import ssl
+import sys
+import time
+
+DASHBOARD = "/usr/local/bin/suricata-dashboard"
+MK_CONF = "/etc/suricata-mikrotik.conf"
+ROUTERS_CONF = "/etc/suricata-routers.json"
+COMENTARIO = "espejo IDS"          # marca de las reglas nuestras
+
+
+def cliente_api():
+    """El cliente de la API de RouterOS del propio panel, sin duplicar el protocolo."""
+    src = open(DASHBOARD, encoding="utf-8").read()
+    arbol = ast.parse(src)
+    piezas = ("_mk_len", "_mk_word", "_mk_send", "_mk_rlen", "_mk_read", "_mk_reply",
+              "_mk_tls_wrap", "mk_conectar", "_mk_print")
+    ns = {"socket": socket, "_socket": socket, "ssl": ssl, "_ssl": ssl,
+          "time": time, "_hashlib": _hashlib, "sys": sys}
+    for n in arbol.body:
+        nom = getattr(n, "name", None) or (
+            getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
+        if nom in piezas:
+            exec(ast.get_source_segment(src, n) or "", ns)
+    faltan = [p for p in piezas if p not in ns]
+    if faltan:
+        sys.exit("No se encontro el cliente de API en %s (falta %s)" % (DASHBOARD, faltan[0]))
+    return ns
+
+
+def leer_credenciales(ruta):
+    """HOST/PORT/USER/PASS de un archivo, nunca de la linea de comandos.
+
+    La clave en un argumento queda en el historial del shell y visible en `ps` para
+    cualquier usuario de la maquina mientras corre. En un archivo 600, no."""
+    d = {}
+    try:
+        st = os.stat(ruta)
+    except OSError as e:
+        sys.exit("No se puede leer %s: %s" % (ruta, e))
+    if st.st_mode & 0o077:
+        print("  [!] %s es legible por otros (chmod 600 %s)" % (ruta, ruta))
+    for l in open(ruta, encoding="utf-8"):
+        l = l.strip()
+        if l and not l.startswith("#") and "=" in l:
+            k, v = l.split("=", 1)
+            d[k.strip().upper()] = v.strip().strip('"').strip("'")
+    for k in ("HOST", "USER", "PASS"):
+        if not d.get(k):
+            sys.exit("Falta %s en %s" % (k, ruta))
+    d.setdefault("PORT", "8729")
+    d.setdefault("TLS", "1")
+    return d
+
+
+def cmd(ns, s, orden, *args):
+    ns["_mk_send"](s, [orden] + list(args))
+    ok, frases, err = ns["_mk_reply"](s)
+    return ok, frases, err
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("-k", "--credenciales", required=True,
+                   help="archivo con HOST/PORT/USER/PASS del MikroTik (chmod 600)")
+    p.add_argument("-s", "--sensor", required=True,
+                   help="IP de ESTE sensor, a donde el router manda el espejo")
+    p.add_argument("-l", "--lista", default="ids-vigilados",
+                   help="address-list con las redes de abonados a vigilar")
+    p.add_argument("-r", "--redes", default="",
+                   help="redes de abonados a meter en la lista, separadas por coma")
+    p.add_argument("-e", "--donde", choices=("local", "vpn"), default="local",
+                   help="donde esta el sensor respecto al router")
+    p.add_argument("-p", "--puerto", type=int, default=37008, help="puerto TZSP")
+    p.add_argument("--solo-registrar", action="store_true",
+                   help="da de alta el router en el panel y NO toca su firewall")
+    a = p.parse_args()
+
+    d = leer_credenciales(a.credenciales)
+    ns = cliente_api()
+    print("Conectando a %s:%s como %s ..." % (d["HOST"], d["PORT"], d["USER"]))
+    try:
+        s = ns["mk_conectar"](d, timeout=15)
+    except Exception as e:
+        sys.exit("No se pudo conectar: %s" % e)
+
+    # --- que clase de TLS es esto ----------------------------------------------------
+    # Con api-ssl SIN certificado, RouterOS negocia Diffie-Hellman ANONIMO: el trafico va
+    # cifrado pero NO autenticado, asi que no hay huella que fijar y alguien en medio
+    # podria hacerse pasar por el router y quedarse con esta clave.
+    cert = None
+    try:
+        cert = s.getpeercert(binary_form=True)
+    except Exception:
+        pass
+    fp = _hashlib.sha256(cert).hexdigest() if cert else ""
+    if fp:
+        print("  certificado del router: %s..." % fp[:16])
+    else:
+        print("  [!] api-ssl SIN certificado (cifrado anonimo): el canal va cifrado pero")
+        print("      NO autenticado. Ponle un certificado al router y vuelve a correr esto")
+        print("      para fijar su huella:  /certificate add name=api common-name=<router>")
+
+    ident = ""
+    ok, fr, _e = cmd(ns, s, "/system/identity/print")
+    if ok:
+        for f in fr:
+            for x in f:
+                if x.startswith("=name="):
+                    ident = x[6:]
+    print("  conectado a %s" % (ident or d["HOST"]))
+
+    # --- 1) el panel, para que pueda cortar -------------------------------------------
+    nuevo = not os.path.exists(MK_CONF)
+    viejo = {}
+    if not nuevo:
+        for l in open(MK_CONF, encoding="utf-8"):
+            l = l.strip()
+            if l and not l.startswith("#") and "=" in l:
+                k, v = l.split("=", 1)
+                viejo[k.strip()] = v.strip()
+    conf = {"HOST": d["HOST"], "PORT": d["PORT"], "TLS": d.get("TLS", "1"),
+            "USER": d["USER"], "PASS": d["PASS"], "CERT_FP": fp,
+            "LIST": viejo.get("LIST", "suricata-cuarentena"),
+            "TTL": viejo.get("TTL", "1h"),
+            "LIST_DNS": viejo.get("LIST_DNS", "suricata-dns-sospechoso"),
+            "TTL_DNS": viejo.get("TTL_DNS", "1d"),
+            "AUTO_MANTENER": viejo.get("AUTO_MANTENER", "0"),
+            # Se registra, pero NO se activa el envio solo: que el sistema empiece a
+            # cortar clientes tiene que decidirlo una persona mirando el panel.
+            "ENABLED": viejo.get("ENABLED", "0"),
+            "POL_AUTO": viejo.get("POL_AUTO", "0"),
+            "POL_BAJO": viejo.get("POL_BAJO", "nada"),
+            "POL_MEDIO": viejo.get("POL_MEDIO", "nada"),
+            "POL_ALTO": viejo.get("POL_ALTO", "nada")}
+    tmp = MK_CONF + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("# Conexion API al MikroTik para la cuarentena. La clave se usa para\n"
+                "# autenticar (no se puede hashear). Archivo con permisos 600.\n")
+        for k, v in conf.items():
+            f.write("%s=%s\n" % (k, v))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, MK_CONF)
+
+    rs = {"routers": [{"id": "r1", "nombre": ident or d["HOST"], "iface": "ids-mon",
+                       "HOST": d["HOST"], "PORT": d["PORT"], "TLS": d.get("TLS", "1"),
+                       "USER": d["USER"], "PASS": d["PASS"], "CERT_FP": fp,
+                       "LIST": conf["LIST"], "LIST_DNS": conf["LIST_DNS"],
+                       "ENABLED": conf["ENABLED"]}]}
+    if not os.path.exists(ROUTERS_CONF):
+        tmp = ROUTERS_CONF + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rs, f, indent=1, ensure_ascii=False)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, ROUTERS_CONF)
+        print("  router dado de alta en el panel (modo sugerencia: actívalo en Ajustes)")
+    else:
+        print("  ya habia routers dados de alta; no se toca esa lista")
+
+    if a.solo_registrar:
+        print("\n--solo-registrar: no se toca el firewall del router.")
+        return 0
+
+    # --- 2) respaldo antes de tocar el firewall ----------------------------------------
+    marca = time.strftime("%Y%m%d-%H%M")
+    ok, _f, err = cmd(ns, s, "/export", "=file=antes-ids-%s" % marca)
+    print("  respaldo /export antes-ids-%s.rsc: %s" % (marca, "hecho" if ok else "no (%s)" % err))
+
+    # --- 3) la lista de a quien se vigila ----------------------------------------------
+    PROP_AL = ["*", ".id", "list", "address"]
+    ya = {f.get("address") for f in ns["_mk_print"](s, "/ip/firewall/address-list/print", PROP_AL)
+          if f.get("list") == a.lista}
+    nuevas = [r.strip() for r in a.redes.split(",") if r.strip() and r.strip() not in ya]
+    for r in nuevas:
+        cmd(ns, s, "/ip/firewall/address-list/add",
+            "=list=" + a.lista, "=address=" + r, "=comment=abonados vigilados (IDS)")
+    print("  address-list %s: %d ya estaban, %d anadida(s)" % (a.lista, len(ya), len(nuevas)))
+    if not ya and not nuevas:
+        print("  [!] la lista %s esta VACIA: no se espejara nada hasta que metas redes" % a.lista)
+
+    # --- 4) las reglas de espejo, sin duplicar ------------------------------------------
+    cb = "0-10000" if a.donde == "vpn" else ""
+    quiero = [
+        ("%s (ida)" % COMENTARIO,
+         {"chain": "forward", "src-address-list": a.lista}),
+        ("%s (vuelta)" % COMENTARIO,
+         {"chain": "forward", "dst-address-list": a.lista}),
+    ]
+    if a.donde == "vpn":
+        # el DNS entero y sin recorte: pesa nada y es donde mas se detecta
+        quiero.append(("%s: DNS completo" % COMENTARIO,
+                       {"chain": "forward", "src-address-list": a.lista,
+                        "protocol": "udp", "dst-port": "53"}))
+
+    PROP_MG = ["*", ".id", "chain", "action", "comment", "disabled", "connection-bytes",
+               "sniff-target", "src-address-list", "dst-address-list", "protocol", "dst-port"]
+    actuales = ns["_mk_print"](s, "/ip/firewall/mangle/print", PROP_MG)
+    por_comentario = {f.get("comment"): f for f in actuales}
+
+    for comentario, campos in quiero:
+        args = ["=action=sniff-tzsp", "=sniff-target=" + a.sensor,
+                "=sniff-target-port=%d" % a.puerto, "=passthrough=yes",
+                "=comment=" + comentario, "=disabled=no"]
+        for k, v in campos.items():
+            args.append("=%s=%s" % (k, v))
+        # el DNS nunca lleva recorte; las otras solo en modo vpn
+        if cb and "dst-port" not in campos:
+            args.append("=connection-bytes=" + cb)
+        vieja = por_comentario.get(comentario)
+        if vieja:
+            ok, _f, err = cmd(ns, s, "/ip/firewall/mangle/set",
+                              *(["=.id=" + vieja[".id"]] + args))
+            print("  regla %-28s actualizada%s" % (comentario, "" if ok else " FALLO: %s" % err))
+        else:
+            ok, _f, err = cmd(ns, s, "/ip/firewall/mangle/add", *args)
+            print("  regla %-28s creada%s" % (comentario, "" if ok else " FALLO: %s" % err))
+
+    # --- 5) las viejas que apuntan a ESTE sensor y no son nuestras ----------------------
+    mias = {c for c, _ in quiero}
+    sobran = [f for f in actuales
+              if f.get("action") == "sniff-tzsp"
+              and f.get("sniff-target") == a.sensor
+              and (f.get("comment") or "") not in mias
+              and (f.get("disabled") or "false") == "false"]
+    for f in sobran:
+        ok, _fr, err = cmd(ns, s, "/ip/firewall/mangle/set",
+                           "=.id=" + f[".id"], "=disabled=yes")
+        print("  espejo viejo hacia este sensor apagado (comment=%r): %s"
+              % (f.get("comment", ""), "ok" if ok else err))
+    if sobran:
+        print("      (convivian con las nuevas: el enlace cargaba el doble para ver lo mismo)")
+
+    # --- 6) el fasttrack ----------------------------------------------------------------
+    ft = [f for f in ns["_mk_print"](s, "/ip/firewall/filter/print",
+                                     ["*", ".id", "action", "src-address-list", "disabled"])
+          if f.get("action") == "fasttrack-connection"]
+    if not ft:
+        print("  fasttrack: no hay reglas, mangle ve todos los paquetes")
+    for f in ft:
+        if (f.get("src-address-list") or "") == "!" + a.lista:
+            print("  fasttrack: ya excluia %s" % a.lista)
+            continue
+        ok, _fr, err = cmd(ns, s, "/ip/firewall/filter/set",
+                           "=.id=" + f[".id"], "=src-address-list=!" + a.lista)
+        print("  fasttrack: excluido %s %s" % (a.lista, "ok" if ok else "FALLO: " + err))
+        if ok:
+            print("      (sin esto mangle solo ve el SYN y se pierde el handshake TLS)")
+
+    print("\nListo. Comprueba que los contadores suben, con clientes activos:")
+    print("  /ip firewall mangle print stats where comment~\"%s\"" % COMENTARIO)
+    try:
+        s.close()
+    except Exception:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+MKINIT
+chmod 755 /usr/local/bin/suricata-mikrotik-init
+ok "suricata-mikrotik-init instalado (deja el router configurado; -h para ver como)."
+
+if [ -n "$MK_CRED" ]; then
+  info "Configurando el MikroTik desde aqui (-k $MK_CRED)..."
+  # La IP a la que el router tiene que mandar el espejo es la de ESTE sensor. Si se
+  # equivoca, el espejo se va a otra parte y el panel dira "sin trafico" sin mas pista.
+  if /usr/local/bin/suricata-mikrotik-init -k "$MK_CRED" -s "${PUB_IP:-}" \
+       -e "$ESPEJO_DONDE" -p "$TZSP_PORT" -r "$HOME_NET"; then
+    ok "MikroTik configurado: router dado de alta y espejo montado."
+  else
+    warn "No se pudo configurar el MikroTik. El sensor queda igual de operativo:"
+    warn "  reintenta con  suricata-mikrotik-init -k $MK_CRED -s ${PUB_IP:-<IP>} -e $ESPEJO_DONDE"
   fi
 fi
 

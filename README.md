@@ -146,6 +146,61 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/in
   -a 203.0.113.0/24 -P 'MiClaveSegura'
 ```
 
+### `-k`: que el instalador deje el MikroTik configurado solo
+
+Con `-k ARCHIVO` no hay que tocar el router a mano. El instalador da de alta el equipo en
+el panel y le monta el espejo entero: la `address-list`, la regla de ida, la de vuelta, la
+de DNS y la exclusion del fasttrack.
+
+El archivo lleva las credenciales y **debe ser `chmod 600`**:
+
+```bash
+cat > /root/mk.conf <<'FIN'
+HOST=10.87.87.1
+PORT=8729
+USER=ids-sensor
+PASS=la-clave-del-usuario-de-api
+FIN
+chmod 600 /root/mk.conf
+
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh   | sudo bash -s -- -t -e vpn -k /root/mk.conf       -m 10.87.87.1 -n 192.168.0.0/19,172.17.0.0/20 -a 203.0.113.0/24
+```
+
+La clave va en un archivo y **nunca en la linea de comandos**: ahi queda en el historial
+del shell y a la vista en `ps` para cualquier usuario mientras el comando corre.
+
+En el MikroTik basta una cuenta de API **atada a la IP del sensor**, que fuera de ahi no
+sirve para nada:
+
+```routeros
+/user group add name=ids policy=read,write,api,test
+/user add name=ids-sensor group=ids address=<IP-del-sensor>/32 password=<la-que-elijas>
+```
+
+**Es idempotente**: repetirlo actualiza las reglas, no las duplica. Reconoce las suyas por
+el comentario `espejo IDS`. Y **solo apaga espejos que apunten a este sensor** — lo que el
+cliente tenga montado para otras cosas no se toca.
+
+Dos cosas que **no** hace a proposito:
+
+- **No activa el corte.** El router queda dado de alta pero en modo sugerencia
+  (`ENABLED=0`). Que el sistema empiece a cortarle el internet a un abonado lo decide una
+  persona mirando el panel, en Ajustes &rarr; MikroTik.
+- **No inventa la lista de abonados.** Mete en la `address-list` las redes que le pases en
+  `-n`. Si queda vacia lo dice, porque una lista vacia no espeja nada.
+
+Se puede correr aparte en cualquier momento, sin reinstalar:
+
+```bash
+suricata-mikrotik-init -k /root/mk.conf -s <IP-del-sensor> -e vpn -r 192.168.0.0/19
+suricata-mikrotik-init -k /root/mk.conf -s <IP-del-sensor> --solo-registrar   # sin tocar el firewall
+```
+
+> **Si el router usa `api-ssl` sin certificado**, la herramienta lo avisa: RouterOS negocia
+> entonces Diffie-Hellman anonimo, o sea el canal va **cifrado pero no autenticado** y no
+> hay huella que fijar. Ponle un certificado (`/certificate add name=api common-name=...`)
+> y vuelve a correrla para anclarla.
+
 ### `-e local` o `-e vpn`: la opcion que mas caro sale equivocar
 
 No es un ajuste fino. Un sensor al otro lado de un enlace con el espejo entero **satura

@@ -84,6 +84,37 @@ Al terminar imprime la **URL de la web, el usuario `admin` y la clave generada**
 Entra con el navegador a `https://<IP>:5636` (certificado autofirmado: acepta la
 advertencia).
 
+### Y en el MikroTik, dos lineas
+
+Instalar el sensor no basta: alguien tiene que mandarle el trafico. Si ya tienes una
+`address-list` con las redes de tus abonados (aqui se llama `Cliente`), esto es todo.
+Cambia `IP_IDS` por la IP del sensor:
+
+```routeros
+/ip firewall mangle
+add action=sniff-tzsp chain=forward comment=IDS connection-bytes=0-10000 sniff-target=IP_IDS sniff-target-port=37008 src-address-list=Cliente
+add action=sniff-tzsp chain=forward comment=IDS connection-bytes=0-10000 sniff-target=IP_IDS sniff-target-port=37008 dst-address-list=Cliente
+
+/ip firewall filter set [find action=fasttrack-connection] src-address-list=!Cliente
+```
+
+La tercera **no es opcional**: con fasttrack activo, mangle deja de ver la conexion en
+cuanto se establece, capturas el SYN y te pierdes el handshake TLS con su SNI. El espejo
+parece funcionar y estas ciego a lo que importa.
+
+Comprueba que llega:
+
+```bash
+suricata-espejo          # en el sensor: cuanto entra, cuanto llega y que hacer si falla
+```
+```routeros
+/ip firewall mangle print stats where comment=IDS    # en el router: los contadores suben
+```
+
+El sensor puede aplicar esas reglas por si mismo, sin entrar al router, con
+[`-k`](#-k-que-el-instalador-deje-el-mikrotik-configurado-solo). El por que de cada parte
+esta en [Espejo desde MikroTik](#espejo-desde-mikrotik-tzsp).
+
 Opciones (se pasan tras `bash -s --`):
 
 | Opcion | Que hace | Default |
@@ -512,35 +543,11 @@ El instalador anade tres cosas utiles para operar sin entrar a la web:
 
 ## Espejo desde MikroTik (TZSP)
 
-### Lo minimo: dos lineas en el router
+### Por que las reglas son asi
 
-Si ya tienes una `address-list` con las redes de tus abonados (aqui se llama `Cliente`),
-esto es todo lo que hace falta. Cambia `IP_IDS` por la IP del sensor:
-
-```routeros
-/ip firewall mangle
-add action=sniff-tzsp chain=forward comment=IDS connection-bytes=0-10000 \
-    sniff-target=IP_IDS sniff-target-port=37008 src-address-list=Cliente
-add action=sniff-tzsp chain=forward comment=IDS connection-bytes=0-10000 \
-    sniff-target=IP_IDS sniff-target-port=37008 dst-address-list=Cliente
-```
-
-Y una tercera que **no es opcional**, aunque se olvide siempre:
-
-```routeros
-/ip firewall filter set [find action=fasttrack-connection] src-address-list=!Cliente
-```
-
-Sin ella, con fasttrack activo mangle deja de ver la conexion en cuanto se establece:
-capturarias el SYN y **te perderias el handshake TLS con su SNI**, que es donde se detecta
-botnet y C2. El espejo parece funcionar —hay trafico, hay alertas— y estas ciego a lo que
-importa. Se comprueba mirando si los contadores suben con clientes activos:
-
-```routeros
-/ip firewall mangle print stats where comment=IDS
-```
-
-Tres detalles de esas lineas, por si te preguntas por que son asi:
+Las dos lineas que hay que pegar estan arriba, en
+[Quick install](#-quick-install-one-liner). Aqui el motivo de cada parte, que es lo que
+hace falta cuando algo no cuadra.
 
 - **`chain=forward` en las dos**, tambien en la de vuelta. En `prerouting` el des-NAT del
   retorno todavia no se ha aplicado, asi que el destino sigue siendo tu IP publica y

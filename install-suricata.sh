@@ -11435,8 +11435,13 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             det = ""
             if sc:
                 if cats:
-                    det = "<div class=hint style='margin-top:4px'>" + esc(aidb_cats_txt(
-                        [[c, 1] for c in cats], sep=" &middot; ")).replace(" (1)", "") + "</div>"
+                    # el separador va DESPUES de escapar: metido antes, esc() lo
+                    # convertia en &amp;middot; y salia "&middot;" como texto
+                    det = ("<div class=hint style='margin-top:4px'>"
+                           + " &middot; ".join(
+                               esc(x) for x in aidb_cats_txt(
+                                   [[c, 1] for c in cats], sep="|").split("|"))
+                           .replace(" (1)", "") + "</div>")
                 culp = culpables_de(rid, cats) if cats else []
                 if culp:
                     lis = "".join(
@@ -11556,17 +11561,11 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             acciones.append("<form method=post action='/publicas/revisar'>"
                             f"<input type=hidden name=rid value='{esc(rid)}'>"
                             "<button class=cancelbtn type=submit>Revisar ahora</button></form>")
-        if es_admin and entradas:
-            acciones.append(
-                "<form method=post action='/publicas/limpiar'>"
-                f"<input type=hidden name=rid value='{esc(rid)}'>"
-                f"<button class=delbtn type=submit onclick=\"return confirm('Quitar las "
-                f"{len(entradas)} entradas declaradas de este nodo? El historial de listas "
-                f"negras no se borra.')\">Limpiar todas ({len(entradas)})</button></form>")
         if chips:
             chips = ("<form id='psel-%s' method=post action='/publicas/quitar-varias' "
                      "class=pchips>"
                      "<input type=hidden name=rid value='%s'>%s"
+                     "<a href='#' class=ptodas onclick='return ptodas(this)'>todas</a>"
                      "<button type=submit class=delbtn id='pselb-%s' disabled "
                      "onclick=\"return confirm('Quitar las entradas marcadas? El historial "
                      "de listas negras no se borra.')\">Quitar marcadas</button></form>"
@@ -11582,11 +11581,20 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                "Ponlas aqui: el sensor no las ve (el espejo es pre-NAT) y sin ellas no se "
                "puede ligar un baneo con el abonado que lo provoca.</p>")
             + "</section>")
-    _psel_js = ("<script>function pmarcar(c){var f=c.form;"
+    _psel_js = ("<script>"
+                "function pbtn(f){return f.querySelector('button.delbtn');}"
+                "function pmarcar(c){var f=c.form;"
                 "var n=f.querySelectorAll('input[name=entrada]:checked').length;"
-                "var b=f.querySelector('button[type=submit]');"
+                "var b=pbtn(f);if(!b)return;"
                 "b.disabled=(n===0);"
-                "b.textContent=n?('Quitar marcadas ('+n+')'):'Quitar marcadas';}</script>")
+                "b.textContent=n?('Quitar marcadas ('+n+')'):'Quitar marcadas';}"
+                "function ptodas(a){var f=a.form||a.closest('form');"
+                "var cs=f.querySelectorAll('input[name=entrada]');"
+                "var faltan=[].some.call(cs,function(x){return !x.checked;});"
+                "[].forEach.call(cs,function(x){x.checked=faltan;});"
+                "a.textContent=faltan?'ninguna':'todas';"
+                "if(cs.length)pmarcar(cs[0]);return false;}"
+                "</script>")
     pub_html = ("<h2 style='font-size:17px;margin:18px 0 10px'>Tus IPs publicas</h2>"
                 "<p class=sub2 style='margin:-4px 0 10px'>El sensor no las ve (el espejo es "
                 "pre-NAT): declaralas aqui y el panel vigila su reputacion y sus listas negras.</p>"
@@ -11621,6 +11629,8 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
         ".pchips{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0}"
         ".pchip{cursor:pointer;user-select:none}"
         ".pchip input{margin:0 6px 0 0;vertical-align:middle;cursor:pointer}"
+        ".ptodas{font-size:12.5px;color:#1c5cab;text-decoration:none;padding:0 4px}"
+        ".ptodas:hover{text-decoration:underline}"
         ".pchip:has(input:checked){background:#fdecec;border-color:#f0c9c9}"
         ".delbtn{background:#fbeaea;color:#c0392b;border:1px solid #f0c9c9;"
         "border-radius:8px;padding:7px 12px;font:600 13px system-ui;cursor:pointer}"
@@ -14698,8 +14708,9 @@ class H(BaseHTTPRequestHandler):
             bitacora("CONFIG-PUBLICAS", f"nodo={rid} -{fuera}")
             return self._redirect("/reputacion")
         if ruta == "/publicas/quitar-varias":
-            # "Limpiar todas" era demasiado romo: una deteccion mala metia trece entradas
-            # basura y quitarlas se llevaba por delante la buena. Aqui se elige.
+            # Vaciar la lista entera de un boton resulto una trampa: una deteccion mala
+            # metia trece entradas basura y limpiarlas se llevaba por delante la unica
+            # buena, que ademas tenia historial detras. Aqui se elige que se va.
             if not self._admin():
                 return self._deny()
             rid = (q.get("rid", [""])[0]).strip()
@@ -14712,17 +14723,6 @@ class H(BaseHTTPRequestHandler):
             bitacora("CONFIG-PUBLICAS", f"nodo={rid} -{len(fuera)} seleccionada(s)")
             return self._redirect("/reputacion?msg=" + _up.quote(
                 "%d entrada(s) quitada(s). El historial de listas negras se conserva." % len(fuera)))
-        if ruta == "/publicas/limpiar":
-            # "Detectar del MikroTik" puede dejar veinte entradas de golpe, y quitarlas de
-            # una en una son veinte recargas. Se borra la lista del nodo, no el historial
-            # ni las listas negras ya medidas: eso sigue ahi si se vuelven a declarar.
-            if not self._admin():
-                return self._deny()
-            rid = (q.get("rid", [""])[0]).strip()
-            _cuantas = len(cargar_publicas().get(rid, []))
-            guardar_publicas_de(rid, "")
-            bitacora("CONFIG-PUBLICAS", f"nodo={rid} vaciada ({_cuantas} entrada(s))")
-            return self._redirect("/reputacion")
         if ruta == "/publicas/detectar":
             if not self._admin():
                 return self._deny()

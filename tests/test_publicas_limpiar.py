@@ -82,29 +82,14 @@ def main():
     check("y se puede volver a declarar despues",
           ns["cargar_publicas"]().get("r1") == ["203.0.113.0/28"], "")
 
-    # --- lo que la ruta hace y lo que NO --------------------------------------------------
-    r = ruta_limpiar()
-    check("la ruta existe", bool(r), "")
-    check("es solo de administrador: deja al panel sin nada que vigilar",
-          "self._admin()" in r, r[:200])
-    check("vacia el nodo que se pide", 'guardar_publicas_de(rid, "")' in r, "")
-    check("deja constancia en la bitacora", "bitacora(" in r, "")
-    check("y dice cuantas eran, que es lo que no se puede deshacer",
-          "_cuantas" in r, "")
-    # El historial de listas negras y las mediciones no se pueden reconstruir: si se
-    # borraran al limpiar, volver a declarar la red empezaria de cero y se perderia la
-    # prueba de cuanto tardo en salir de cada lista.
-    check("NO toca el historial de listas negras",
-          "DNSBL_HIST" not in r and "_dnsbl" not in r, r[:300])
-    check("ni el historial de reputacion",
-          "PUB_HIST" not in r and "_pub_hist" not in r, "")
-
-    # --- el boton -----------------------------------------------------------------------------
-    check("el boton pide confirmacion antes de borrar",
-          "confirm('Quitar las" in DASH, "")
-    check("y avisa de que el historial no se pierde",
-          "historial de listas" in DASH.split("confirm('Quitar las", 1)[-1][:200], "")
-    check("se ve que es destructivo", "class=delbtn" in DASH, "")
+    # --- "Limpiar todas" se quito ------------------------------------------------------
+    # Lo puse como atajo para quitar entradas redundantes y resulto una trampa: borraba
+    # TODAS, incluida la unica que importaba y que ademas tenia historial detras. El
+    # usuario cayo dos veces. Con la seleccion y el enlace "todas" se hace lo mismo, pero
+    # a proposito.
+    check("ya no existe el boton de limpiar todas",
+          "Limpiar todas" not in DASH, "")
+    check("ni su ruta", '/publicas/limpiar"' not in DASH, "")
 
     # --- lo que ya queda cubierto sobra ------------------------------------------------
     # Cada entrada declarada gasta UNA consulta de AbuseIPDB en cada revision, y
@@ -172,6 +157,33 @@ def main():
     ru = ruta("/publicas/quitar")
     check("la x de un chip usa su propio campo", '"solo"' in ru, ru[:200])
     check("y se lee antes que las marcadas", ru.index('"solo"') < ru.index('"entrada"'), "")
+
+
+    # --- el boton de quitar marcadas se habilitaba solo en el sitio equivocado ----------
+    # querySelector('button[type=submit]') devuelve el PRIMERO del formulario, y las x de
+    # los chips tambien son submit (van por formaction). Asi que se habilitaba la x del
+    # primer chip y "Quitar marcadas" se quedaba muerto para siempre.
+    check("el boton se busca por su clase, no por ser el primer submit",
+          "querySelector('button.delbtn')" in DASH, "")
+    check("y las x de los chips son submit, por eso importaba",
+          "formaction='/publicas/quitar'" in DASH and "type=submit" in DASH, "")
+    check("hay un atajo para marcarlas todas, ya que no hay boton de limpiar",
+          "function ptodas(" in DASH and "class=ptodas" in DASH, "")
+
+    # --- el separador salia como texto ----------------------------------------------------
+    # Se metia "&middot;" ANTES de escapar, asi que esc() lo convertia en "&amp;middot;" y
+    # en pantalla se leia "Bot web abusivo &middot; Ataque DDoS".
+    check("el separador de categorias no se escapa",
+          'sep=" &middot; "' not in DASH, "")
+    check("se junta despues de escapar cada nombre",
+          '" &middot; ".join(' in DASH, "")
+    # Un byte NUL como separador interno convierte el instalador en binario para grep y
+    # para cualquier herramienta de texto.
+    # Un byte NUL real convierte el instalador en binario para grep y para cualquier
+    # herramienta de texto. El cliente de la API de RouterOS SI usa la secuencia de
+    # escape como literal, y eso es legitimo: lo que no puede haber es el byte suelto.
+    check("no queda ningun byte NUL en el instalador",
+          chr(0) not in SRC, SRC.count(chr(0)))
 
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))

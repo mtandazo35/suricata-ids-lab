@@ -11321,7 +11321,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 if n_bl:
                     peores = [(k, v) for k, v in (bl.get("ips") or {}).items()
                               if not v.get("solo_pbl")][:8]
-                    det = "".join(
+                    _li_listas = "".join(
                         f"<li><b class=mono>{esc(k)}</b> &mdash; {esc(', '.join(v.get('listas') or []))}</li>"
                         for k, v in peores)
                     bl_html = ("<div style='margin-top:8px;background:#fdecec;border:1px solid #f3c4c4;"
@@ -11329,7 +11329,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                                f"<b style='color:#b52a2a'>En listas de bloqueo: {n_bl} direccion(es)</b>"
                                " <span class=hint>esto si corta correo y servicios</span>"
                                "<ul style='margin:6px 0 0;padding-left:18px;font-size:12.5px'>"
-                               + det + "</ul></div>")
+                               + _li_listas + "</ul></div>")
                 else:
                     bl_html = ("<div class=hint style='margin-top:8px;color:#1a7f37'>"
                                "&#10003; Ninguna direccion en listas de bloqueo</div>")
@@ -11360,13 +11360,15 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 bl_html += culpables_lista_html(rid, bl, esc)
             bl_html += _salida_html(ent, bl, _limpio, esc)
             bl_html += dnsbl_historial_html(bl, esc)
+            # "ver detalle" ya no va: el rango se pinta desplegado aqui mismo y la ficha
+            # de cada direccion se abre en su fila. Ese enlace solo llevaba a otra pantalla
+            # con lo mismo, y al volver no dejaba donde estabas.
             filas.append(
-                "<div style='padding:10px 0;border-top:1px solid #f0efec'>"
-                "<div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap'>"
+                "<article class=pubent>"
+                "<header class=pubhd>"
                 f"<b class=mono>{esc(ent)}</b>{_scb(sc, verde=(sc == 0 and not n_den))}{den_n}"
-                f"<a class=hint href='?ips={esc(ent)}'>ver detalle</a>"
-                f"<span class=hint style='margin-left:auto'>ultima verificacion: {esc(visto)}</span></div>"
-                + bl_html + det + "</div>")
+                f"<span class=pubver>revisado {esc(visto)}</span></header>"
+                + bl_html + det + "</article>")
         if not entradas and not es_admin:
             continue
         # Las entradas, como fichas pequeñas con su x. Antes era un textarea enorme por
@@ -11402,11 +11404,12 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             "<section class=card style='margin:0 0 12px'>"
             + (f"<h3 style='font-size:14px;margin:0 0 4px;color:#52514e'>Nodo {esc(nom)}</h3>"
                if multi else "")
+            + editor
             + ("".join(filas) if filas else
                "<p class=hint style='margin:8px 0 0'>Todavia no declaraste ninguna. "
                "Ponlas aqui: el sensor no las ve (el espejo es pre-NAT) y sin ellas no se "
                "puede ligar un baneo con el abonado que lo provoca.</p>")
-            + editor + "</section>")
+            + "</section>")
     pub_html = ("<h2 style='font-size:17px;margin:18px 0 10px'>Tus IPs publicas</h2>"
                 "<p class=sub2 style='margin:-4px 0 10px'>El sensor no las ve (el espejo es "
                 "pre-NAT): declaralas aqui y el panel vigila su reputacion y sus listas negras.</p>"
@@ -11416,6 +11419,17 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
         "textarea{width:100%;min-height:84px;padding:10px 12px;border:1px solid #d9d7d2;"
         "border-radius:9px;font:13px ui-monospace,Consolas,monospace;resize:vertical}"
         ".qbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px}"
+        # Cada entrada declarada es una ficha, no una fila separada por una raya: dentro
+        # lleva cajas de colores (listas negras, cuando pedir la salida) y sin un borde
+        # propio esas cajas parecian sueltas en la pagina.
+        ".pubent{border:1px solid #e7e6e2;border-radius:11px;padding:12px 14px;"
+        "margin:10px 0 0;background:#fff}"
+        ".pubent:first-of-type{margin-top:0}"
+        ".pubhd{display:flex;align-items:center;gap:10px;flex-wrap:wrap;"
+        "padding-bottom:9px;margin-bottom:2px;border-bottom:1px solid #f2f1ee}"
+        ".pubhd .mono{font-size:14.5px}"
+        ".pubver{margin-left:auto;font-size:12px;color:#8a8a86;white-space:nowrap}"
+        "@media(max-width:560px){.pubver{margin-left:0;width:100%}}"
         ".volver{display:flex;align-items:center;gap:12px;margin:0 0 14px;flex-wrap:wrap}"
         ".volver a{display:inline-flex;align-items:center;background:#eef4fd;color:#1c5cab;"
         "border:1px solid #cfe0f6;border-radius:9px;padding:7px 14px;text-decoration:none;"
@@ -11426,7 +11440,8 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
         ".busca input[name=ips]{padding:7px 11px;border:1px solid #d9d7d2;border-radius:9px;"
         "font:13px ui-monospace,Consolas,monospace;min-width:190px}"
         ".busca .chk{font-size:12.5px;color:#8a8a86;white-space:nowrap}"
-        ".pedit{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}"
+        # el editor va ARRIBA de las fichas: con su propio fondo no se confunde con ellas
+        ".pedit{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fafaf8;border:1px solid #efeeea;border-radius:10px;padding:10px 12px;margin:0 0 12px}"
         ".pchip{display:inline-flex;align-items:center;gap:6px;background:#f1f1ef;"
         "border:1px solid #e0dfda;border-radius:20px;padding:3px 6px 3px 11px;font-size:12.5px}"
         ".pchip form{display:inline;margin:0}"

@@ -332,7 +332,25 @@ def main():
     # detalle y el otro refresca de verdad
     check("solo hay UN 'Revisar ahora'",
           adm.lower().count("revisar ahora") == 1, adm.lower().count("revisar ahora"))
-    check("y el enlace del detalle dice lo que hace", "ver detalle" in adm)
+    # "ver detalle" se quito: el rango se pinta desplegado en la propia ficha y cada
+    # direccion abre la suya en su fila. Ese enlace llevaba a otra pantalla con lo mismo,
+    # y al volver no dejaba donde estabas.
+    check("ya no se manda a otra pantalla a ver lo mismo", "ver detalle" not in adm)
+    # El editor (chips + Agregar + Detectar + Revisar) va ARRIBA: es lo primero que se
+    # toca en una caja nueva, y estaba al final con la lista entera por medio.
+    check("el editor de rangos va antes que las fichas",
+          adm.find("class=pedit") < adm.find("class=pubent")
+          if "class=pubent" in adm else True,
+          (adm.find("class=pedit"), adm.find("class=pubent")))
+
+    # `det` traia el detalle de AbuseIPDB y la tabla del rango, y el bloque de listas
+    # negras lo REASIGNABA: salia un <li> suelto fuera de su <ul> y, peor, el detalle
+    # desaparecia justo en las entradas listadas, que son las que hay que mirar.
+    check("ningun <li> queda fuera de una lista",
+          adm.count("<li>") == adm.count("</li>")
+          and "</ul>" not in adm.split("<ul", 1)[0],
+          "")
+
 
     # mirando un resultado, el bloque de publicas estorba: para volver esta el boton
     res_adm = ns["reputacion_page"](res=[("1.1.1.1", d, "cache", "")], es_admin=True)

@@ -145,6 +145,35 @@ def main():
           tap == ["203.0.113.5"] and mal == [], (tap, mal))
 
 
+    # --- quitar las marcadas, no todas -------------------------------------------------
+    # "Limpiar todas" resulto demasiado romo: una deteccion mala metio trece entradas
+    # basura y al limpiarlas se llevo por delante la unica buena, que era la que tenia
+    # historial de listas negras detras.
+    def ruta(nombre):
+        for n in ast.walk(ARBOL):
+            if isinstance(n, ast.If):
+                seg = ast.get_source_segment(DASH, n) or ""
+                if seg.startswith('if ruta == "%s"' % nombre):
+                    return seg
+        return ""
+
+    rv = ruta("/publicas/quitar-varias")
+    check("existe la ruta de quitar varias", bool(rv), "")
+    check("es de administrador", "self._admin()" in rv, "")
+    check("quita SOLO las marcadas, no la lista entera",
+          "e not in fuera" in rv, rv[:300])
+    check("si no marcas nada, no borra nada", "No marcaste ninguna" in rv, "")
+    check("y avisa de que el historial se conserva",
+          "historial de listas negras se conserva" in rv, "")
+
+    # La x de un chip manda 'solo'. Va aparte de 'entrada' porque los chips son casillas
+    # con ESE nombre: al pulsar la x el navegador envia tambien todas las marcadas, y sin
+    # distinguirlo quitar una se llevaria las demas por delante.
+    ru = ruta("/publicas/quitar")
+    check("la x de un chip usa su propio campo", '"solo"' in ru, ru[:200])
+    check("y se lee antes que las marcadas", ru.index('"solo"') < ru.index('"entrada"'), "")
+
+
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0
 

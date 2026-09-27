@@ -48,7 +48,9 @@ PIEZAS = ("FEEDS_CONF", "AIDB_CACHE", "AIDB_ESTADO", "AIDB_TTL_LIMPIA", "AIDB_TT
           # bloque "Tus IPs publicas" de la pagina
           "PUBLICAS_CONF", "PUB_HIST", "PUB_HIST_DIAS", "PUB_UMBRAL_AVISO", "_PUB_LOCK",
           "AIDB_SENAL", "cargar_publicas", "guardar_publicas", "publicas_texto",
-          "cubrir_publicas", "guardar_publicas_de", "_pub_hist", "_guardar_pub_hist", "_peor_de", "_cats_de",
+          "cubrir_publicas", "rid_de_publica", "culpables_ficha_html",
+          "culpables_de", "culpables_por_senal", "senal_de_categorias", "AIDB_SENAL",
+          "guardar_publicas_de", "_pub_hist", "_guardar_pub_hist", "_peor_de", "_cats_de",
           "senal_de_categorias", "_cpes_del_nodo", "culpables_de",
           "DNSBL", "DNSBL_HIST", "DNSBL_MAX_IPS", "DNSBL_HILOS", "DNSBL_DIAS",
           "ZEN_COD", "_PBL", "_invertida", "dnsbl_una", "dnsbl_revisar",
@@ -321,7 +323,14 @@ def main():
           "pchip" in adm and "<textarea" not in adm, "textarea=%s" % ("<textarea" in adm))
     check("se agregan de una en una, en un campo pequeño",
           "action='/publicas/agregar'" in adm and "size=20" in adm)
-    check("y cada ficha se puede quitar", "action='/publicas/quitar'" in adm)
+    check("y cada ficha se puede quitar sola",
+          "formaction='/publicas/quitar'" in adm, "")
+    # Con una deteccion mala entran trece entradas basura: quitarlas de una en una son
+    # trece recargas, y "todas" se lleva por delante las buenas.
+    check("se pueden marcar varias y quitarlas de una vez",
+          "action='/publicas/quitar-varias'" in adm and 'type=checkbox name=entrada' in adm, "")
+    check("el boton nace deshabilitado, hasta marcar algo",
+          'class=delbtn' in adm and ' disabled' in adm, "")
     check("el titulo 'Tus IPs publicas' no sale dos veces",
           adm.count("Tus IPs publicas") == 1, adm.count("Tus IPs publicas"))
     check("el buscador es un campo pequeño en la cabecera, no una seccion",

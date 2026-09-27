@@ -11195,6 +11195,68 @@ def log_page(embed=False):
             "<input class=search id=lsearch placeholder='Buscar IP o usuario...' oninput='lfiltrar()'></div>"
             + cuerpo + "</section></main>" + script + "</body></html>")
 
+def rid_de_publica(ip):
+    """De que nodo es esa publica, segun lo declarado. "" si no cae en ninguno.
+
+    Hace falta para saber ENTRE QUE CPEs buscar: los abonados de un nodo no tienen nada
+    que ver con los de otro, y sin esto habria que preguntarselo al usuario cada vez."""
+    try:
+        o = ipaddress.ip_address(ip)
+    except ValueError:
+        return ""
+    for rid, entradas in cargar_publicas().items():
+        for e in entradas:
+            try:
+                if o.version == ipaddress.ip_network(e, strict=False).version and \
+                        o in ipaddress.ip_network(e, strict=False):
+                    return rid
+            except ValueError:
+                continue
+    return ""
+
+def culpables_ficha_html(ip, cats, esc=None, tope=6):
+    """Que CPE privado puede estar detras de lo que se le denuncia a esa publica.
+
+    Es el cruce que da sentido a todo: de "a mi IP publica le denuncian escaneo de
+    puertos" a "y el que escanea es el 192.168.4.77". Fuera de aqui nadie puede hacerlo,
+    porque hace falta ver el trafico por dentro del NAT.
+
+    CANDIDATOS, no culpables: detras de una publica hay decenas o cientos de abonados y
+    nada une una denuncia concreta con un CPE concreto. Lo que si se puede es ordenar por
+    quien esta haciendo ESE tipo de abuso."""
+    esc = esc or html.escape
+    if not cats:
+        return ""
+    # En la ficha las categorias vienen como pares [categoria, cuantas]; el cruce espera
+    # los identificadores sueltos. Pasarle los pares no reventaba a la vista: fallaba
+    # dentro y la seccion desaparecia sin decir nada.
+    ids = [c[0] if isinstance(c, (list, tuple)) else c for c in cats]
+    rid = rid_de_publica(ip)
+    culp = culpables_de(rid, ids, tope=tope)
+    if not culp:
+        return ("<div class=hint style='margin-top:10px'>Ningun CPE de este nodo aparece "
+                "haciendo eso en la ventana actual: pudo pasar antes, o salir por otro "
+                "nodo.</div>")
+    lis = ""
+    for k, c, _pts, mot, yaesta in culp:
+        accion = ("<span class=hint style='color:#3a9d5d'>&#10003; en cuarentena</span>"
+                  if yaesta else
+                  "<form method=post action='/cuarentena/enviar' style='display:inline'>"
+                  "<input type=hidden name=ip value='%s'>"
+                  "<input type=hidden name=score value='%s'>"
+                  "<button class='qbtn send' style='padding:3px 10px;font-size:12px'>"
+                  "Cuarentena</button></form>" % (esc(k), c.get("riesgo", 0)))
+        lis += ("<li style='margin:6px 0'><b class=mono>%s</b> "
+                "<span class=hint>%s</span> %s</li>"
+                % (esc(ip_de(k)), esc(", ".join(mot)), accion))
+    return ("<div style='margin-top:10px'><b style='font-size:13px'>Quien puede estar "
+            "detras, de tu lado del NAT</b>"
+            "<p class=hint style='margin:4px 0 2px'>CPEs de este nodo que estan haciendo "
+            "ese mismo tipo de abuso, ordenados por cuanto encajan. Son candidatos: "
+            "confirma en su ficha antes de cortar.</p>"
+            "<ul style='margin:4px 0 0;padding-left:20px;font-size:13px'>%s</ul></div>"
+            % lis)
+
 def ficha_ip_html(d, ip="", esc=None, scb=None):
     """La ficha de una IP publica: quien es, cuanto se le denuncia y que hay detras.
 
@@ -11249,7 +11311,9 @@ def ficha_ip_html(d, ip="", esc=None, scb=None):
         f"<div style='font-size:13px;margin-bottom:8px'><b>{d.get('reportes', 0):,}</b> denuncias de "
         f"<b>{d.get('denunciantes', 0):,}</b> denunciantes distintos"
         + (f" &middot; ultima {esc(d.get('ultimo'))}" if d.get("ultimo") else "") + "</div>"
-        + chips + arr_html + ejem + "</div>")
+        + chips + arr_html
+    + culpables_ficha_html(d.get("ip") or ip, cats, esc)
+    + ejem + "</div>")
 
 
 def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver=""):
@@ -11465,12 +11529,15 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
         # nodo y encima otro para consultar: dos cajones iguales haciendo cosas distintas.
         chips = ""
         if es_admin and entradas:
+            # Cada chip es a la vez su propia x (quitar esa) y una casilla (elegir varias).
+            # Con trece entradas metidas por una deteccion mala, quitarlas de una en una son
+            # trece recargas y "todas" se lleva tambien las buenas.
             chips = "".join(
-                "<span class=pchip><span class=mono>" + esc(e) + "</span>"
-                "<form method=post action='/publicas/quitar'>"
-                f"<input type=hidden name=rid value='{esc(rid)}'>"
-                f"<input type=hidden name=entrada value='{esc(e)}'>"
-                "<button title='Quitar de la lista'>&times;</button></form></span>"
+                "<span class=pchip>"
+                f"<label><input type=checkbox name=entrada value='{esc(e)}' "
+                f"onchange='pmarcar(this)'><span class=mono>{esc(e)}</span></label>"
+                f"<button type=submit formaction='/publicas/quitar' name=solo "
+                f"value='{esc(e)}' title='Quitar solo esta'>&times;</button></span>"
                 for e in entradas)
         acciones = []
         if es_admin:
@@ -11496,6 +11563,14 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 f"<button class=delbtn type=submit onclick=\"return confirm('Quitar las "
                 f"{len(entradas)} entradas declaradas de este nodo? El historial de listas "
                 f"negras no se borra.')\">Limpiar todas ({len(entradas)})</button></form>")
+        if chips:
+            chips = ("<form id='psel-%s' method=post action='/publicas/quitar-varias' "
+                     "class=pchips>"
+                     "<input type=hidden name=rid value='%s'>%s"
+                     "<button type=submit class=delbtn id='pselb-%s' disabled "
+                     "onclick=\"return confirm('Quitar las entradas marcadas? El historial "
+                     "de listas negras no se borra.')\">Quitar marcadas</button></form>"
+                     % (esc(rid), esc(rid), chips, esc(rid)))
         editor = ("<div class=pedit>" + chips + "".join(acciones) + "</div>") if (chips or acciones) else ""
         bloques.append(
             "<section class=card style='margin:0 0 12px'>"
@@ -11507,10 +11582,15 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                "Ponlas aqui: el sensor no las ve (el espejo es pre-NAT) y sin ellas no se "
                "puede ligar un baneo con el abonado que lo provoca.</p>")
             + "</section>")
+    _psel_js = ("<script>function pmarcar(c){var f=c.form;"
+                "var n=f.querySelectorAll('input[name=entrada]:checked').length;"
+                "var b=f.querySelector('button[type=submit]');"
+                "b.disabled=(n===0);"
+                "b.textContent=n?('Quitar marcadas ('+n+')'):'Quitar marcadas';}</script>")
     pub_html = ("<h2 style='font-size:17px;margin:18px 0 10px'>Tus IPs publicas</h2>"
                 "<p class=sub2 style='margin:-4px 0 10px'>El sensor no las ve (el espejo es "
                 "pre-NAT): declaralas aqui y el panel vigila su reputacion y sus listas negras.</p>"
-                + "".join(bloques)) if bloques else ""
+                + "".join(bloques) + _psel_js) if bloques else ""
 
     css = BASE_CSS + (
         "textarea{width:100%;min-height:84px;padding:10px 12px;border:1px solid #d9d7d2;"
@@ -11538,6 +11618,10 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
         "font:13px ui-monospace,Consolas,monospace;min-width:190px}"
         ".busca .chk{font-size:12.5px;color:#8a8a86;white-space:nowrap}"
         # destructivo: se ve que lo es antes de pulsarlo
+        ".pchips{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0}"
+        ".pchip{cursor:pointer;user-select:none}"
+        ".pchip input{margin:0 6px 0 0;vertical-align:middle;cursor:pointer}"
+        ".pchip:has(input:checked){background:#fdecec;border-color:#f0c9c9}"
         ".delbtn{background:#fbeaea;color:#c0392b;border:1px solid #f0c9c9;"
         "border-radius:8px;padding:7px 12px;font:600 13px system-ui;cursor:pointer}"
         ".delbtn:hover{background:#f5d5d5}"
@@ -14605,11 +14689,29 @@ class H(BaseHTTPRequestHandler):
             if not self._admin():
                 return self._deny()
             rid = (q.get("rid", [""])[0]).strip()
-            fuera = (q.get("entrada", [""])[0]).strip()
+            # 'solo' lo manda la x de un chip. Va aparte de 'entrada' a proposito: los
+            # chips son casillas con ese nombre, y al pulsar la x el navegador envia
+            # TODAS las marcadas. Sin distinguirlo, quitar una se llevaria las marcadas.
+            fuera = (q.get("solo", [""])[0] or q.get("entrada", [""])[0]).strip()
             quedan_e = [e for e in cargar_publicas().get(rid, []) if e != fuera]
             guardar_publicas_de(rid, "\n".join(quedan_e))
             bitacora("CONFIG-PUBLICAS", f"nodo={rid} -{fuera}")
             return self._redirect("/reputacion")
+        if ruta == "/publicas/quitar-varias":
+            # "Limpiar todas" era demasiado romo: una deteccion mala metia trece entradas
+            # basura y quitarlas se llevaba por delante la buena. Aqui se elige.
+            if not self._admin():
+                return self._deny()
+            rid = (q.get("rid", [""])[0]).strip()
+            fuera = set(x.strip() for x in q.get("entrada", []) if x.strip())
+            if not fuera:
+                return self._redirect("/reputacion?msg=" + _up.quote(
+                    "No marcaste ninguna entrada."))
+            quedan_e = [e for e in cargar_publicas().get(rid, []) if e not in fuera]
+            guardar_publicas_de(rid, "\n".join(quedan_e))
+            bitacora("CONFIG-PUBLICAS", f"nodo={rid} -{len(fuera)} seleccionada(s)")
+            return self._redirect("/reputacion?msg=" + _up.quote(
+                "%d entrada(s) quitada(s). El historial de listas negras se conserva." % len(fuera)))
         if ruta == "/publicas/limpiar":
             # "Detectar del MikroTik" puede dejar veinte entradas de golpe, y quitarlas de
             # una en una son veinte recargas. Se borra la lista del nodo, no el historial

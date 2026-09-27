@@ -2825,7 +2825,7 @@ try:
             "pruebas": pruebas_by_src.get(src, []),
             "reputacion": _reputacion_src(src),
         })
-    # ordenar: primero alta confianza, luego por riesgo
+    # ordenar: primero los confirmados (2+ pruebas independientes), luego por riesgo
     cand.sort(key=lambda c: (c["confianza"] == "alta", c["riesgo"], c["alertas_cnc"]), reverse=True)
     # DNS sospechoso: CPEs que consultaron dominios de botnet/C2 (Camino A: alertas DNS)
     def _evidencias_dns(src):
@@ -10171,9 +10171,12 @@ que inspeccionar &mdash; revisa el espejo del MikroTik o los servicios.</li>
 <p>Una coincidencia en una lista o varias alertas repetidas <b>no bastan</b> para confirmar una
 infeccion. Cada candidato lleva un <b>nivel de confianza</b>:</p>
 <ul>
-<li><b>Alta confianza</b>: hay <b>≥2 evidencias independientes</b> (firmas CnC distintas, reputacion
-del destino, persistencia, campana, DNS). Es lo que se envia con "Enviar alta confianza".</li>
-<li><b>Sospechoso</b>: solo repeticion, sin corroboracion &rarr; vigilar, no aislar todavia.</li>
+<li><b>Confirmado</b>: hay <b>&ge;2 pruebas independientes</b> (firmas CnC distintas, reputacion
+del destino, persistencia, campana, DNS). La insignia dice <b>cuantas</b>, porque lo que decide
+no es el volumen de alertas sino cuantas cosas DISTINTAS apuntan al mismo abonado: una firma
+ruidosa que dispara mil veces sigue siendo una sola prueba. Es lo que manda el boton
+"Enviar confirmados".</li>
+<li><b>Sin confirmar</b>: una sola pista, o solo repeticion &rarr; vigilar, no aislar todavia.</li>
 </ul>
 <p>El boton <b>Ver evidencia</b> abre la <b>ficha del CPE</b>, que muestra: el <b>cliente/abonado</b>
 (nombre PPPoE/DHCP tomado del MikroTik), la <b>actividad</b> (a que destinos hablo), las <b>alertas</b>
@@ -12074,8 +12077,10 @@ CPE_INDICIOS = [
      ["DNS sospechoso"], []),
     ("spam", "Envio de correo en volumen", ["Spam"], ["25", "465", "587"]),
 ]
-CONFIANZA = [(4, "alta", "Alta confianza"), (2, "probable", "Probable"),
-             (1, "sospecha", "Sospecha"), (0, "ninguna", "Sin evidencia")]
+# El texto lo lee gente que no es de redes: "Alta confianza" se entiende al reves (un
+# cliente de confianza es alguien fiable). "Confirmado" no admite esa lectura.
+CONFIANZA = [(4, "alta", "Confirmado"), (2, "probable", "Probable"),
+             (1, "sospecha", "Indicio"), (0, "ninguna", "Sin evidencia")]
 
 def indicios_cpe(f, dias_persistencia=2, destinos_muchos=40):
     """Los indicios de un CPE, cada uno con su veredicto: si, detectado o no.
@@ -12756,8 +12761,7 @@ def ficha_page(ip, embed=False):
     else:
         c = c or (ent or {}).get("motivo", {}) or {}
         conf = c.get("confianza", "")
-        conf_b = ("<span class='cfb alta'>Alta confianza</span>" if conf == "alta"
-                  else "<span class='cfb sosp'>Sospechoso</span>" if conf == "sospechoso" else "")
+        conf_b = _cfb(conf, int(c.get("n_evidencias", 0) or 0))
         # Actividad (de las pruebas)
         act = []
         for p in (c.get("pruebas") or [])[:8]:
@@ -12801,9 +12805,11 @@ def ficha_page(ip, embed=False):
         if en_lista:
             decision = f"<b>En cuarentena</b> desde {_fecha((ent or {}).get('cuando', 0))} (lista del MikroTik)"
         elif conf == "alta":
-            decision = "<b>Investigar / poner en cuarentena</b> (alta confianza)"
+            decision = ("<b>Investigar / poner en cuarentena</b>: varias pruebas "
+                        "independientes apuntan al mismo abonado")
         else:
-            decision = "<b>Vigilar</b> (sospechoso; falta corroboracion independiente)"
+            decision = ("<b>Vigilar</b>: una sola pista. Falta que algo distinto lo "
+                        "corrobore antes de cortarle")
         def _row(k, v):
             return f"<tr><th>{k}</th><td>{v}</td></tr>"
         ab = abonado_de(ip)
@@ -12881,6 +12887,20 @@ def ficha_page(ip, embed=False):
             f"<style>{css}</style></head><body>" + ("" if embed else nav("/cuarentena")) +
             "<main><h1>Ficha de evidencia</h1>" + cuerpo + "</main></body></html>")
 
+def _cfb(conf, n=0):
+    """La insignia de confianza, con cuantas pruebas independientes la sostienen.
+
+    El numero importa mas que la palabra: lo que decide no es el volumen de alertas sino
+    cuantas COSAS DISTINTAS apuntan al mismo abonado. Ensenarlo evita el error de cortarle
+    a alguien por una firma ruidosa que disparo mil veces."""
+    if conf == "alta":
+        return ("<span class='cfb alta'>Confirmado%s</span>"
+                % (" &middot; %d pruebas" % n if n else ""))
+    if conf == "sospechoso":
+        return ("<span class='cfb sosp'>Sin confirmar%s</span>"
+                % (" &middot; %d pista" % n if n == 1 else ""))
+    return ""
+
 def cuarentena_page(msg="", es_admin=False):
     """Cuarentena: CPEs INFECTADOS CONFIRMADOS. Si el MikroTik esta configurado y HABILITADO
     y quien mira es admin, aparece el boton Enviar (a la address-list) / Quitar. Si no, dry-run.
@@ -12938,12 +12958,7 @@ def cuarentena_page(msg="", es_admin=False):
                 f"<span class='fw'>{esc(mt.get('conteo', ''))}{(' · ' + fw) if fw else ''}</span>{extra}")
 
     def _conf_badge(c):
-        cf = c.get("confianza")
-        if cf == "alta":
-            return "<span class='cfb alta'>Alta confianza</span>"
-        if cf == "sospechoso":
-            return "<span class='cfb sosp'>Sospechoso</span>"
-        return ""
+        return _cfb(c.get("confianza"), int(c.get("n_evidencias", 0) or 0))
 
     def _ev_html(c):
         ev = c.get("evidencias") or []
@@ -12987,13 +13002,13 @@ def cuarentena_page(msg="", es_admin=False):
             f"<td data-label='Accion'>{_acc(c)}</td></tr>" for c in candidatos)
         if not filas:
             filas = f"<tr><td colspan=7 class='muted' style='padding:18px;text-align:center'>{vacio}</td></tr>"
-        # 'Enviar todos' solo actua sobre ALTA CONFIANZA (evidencia independiente), no sospechosos
+        # 'Enviar todos' solo actua sobre los CONFIRMADOS (2+ pruebas independientes)
         pend_alta = [c for c in pend if c.get("confianza") == "alta"]
         btn = ""
         if es_admin and activo and pend_alta:
             btn = (f"<form method=post action='/{pref}/enviar-todos' style='display:inline;margin-left:auto'>"
-                   f"<button class='qbtn send' onclick=\"return confirm('Enviar los {len(pend_alta)} CPE de ALTA CONFIANZA al MikroTik?')\">"
-                   f"&#9888; Enviar alta confianza ({len(pend_alta)})</button></form>")
+                   f"<button class='qbtn send' onclick=\"return confirm('Enviar al MikroTik los {len(pend_alta)} CPE CONFIRMADOS (2 o mas pruebas independientes)?')\">"
+                   f"&#9888; Enviar confirmados ({len(pend_alta)})</button></form>")
         return (f"<div class='seccion'><div class='shead'><div><h2>{titulo}</h2>"
                 f"<p class='sub'>{sub} · {len(candidatos)} candidato(s).</p></div>{btn}</div>"
                 "<div class='card'><table><thead><tr>"
@@ -13002,9 +13017,11 @@ def cuarentena_page(msg="", es_admin=False):
                 f"</tr></thead><tbody>{filas}</tbody></table></div></div>")
 
     sec_inf = _seccion("Infectados (malware/CnC)",
-                       "<b>Alta confianza</b> = ≥2 evidencias independientes (firmas distintas, reputacion del "
-                       f"destino, persistencia, campana, DNS) → investigar/cuarentena. <b>Sospechoso</b> = solo "
-                       f"repeticion → vigilar. Lista <code>{esc(m.get('LIST',''))}</code>",
+                       "<b>Confirmado</b> = ≥2 pruebas <b>independientes</b> (firmas distintas, reputacion "
+                       "del destino, persistencia, campana, DNS) → investigar/cuarentena. La insignia dice "
+                       "cuantas: lo que decide no es cuantas alertas hay, sino cuantas cosas DISTINTAS "
+                       f"apuntan al mismo abonado. <b>Sin confirmar</b> = una sola pista → vigilar. "
+                       f"Lista <code>{esc(m.get('LIST',''))}</code>",
                        cand, enviados, "cuarentena", m.get("LIST", ""), "alertas_cnc", "alertas CnC", "firmas_cnc",
                        "Sin CPEs con alertas de CnC en la ventana.")
     sec_dns = _seccion("DNS sospechoso (consultan dominios de botnet/C2)",
@@ -14383,7 +14400,7 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 cq = []
             env = cargar_enviados()
-            # masivo: solo ALTA CONFIANZA (evidencia independiente); los sospechosos van a mano
+            # masivo: solo CONFIRMADOS (2+ pruebas independientes); el resto va a mano
             pend = [c for c in cq
                     if clave_cpe(c.get("ip", ""), c.get("router", "")) not in env
                     and c.get("confianza") == "alta"][:50]
@@ -14416,7 +14433,7 @@ class H(BaseHTTPRequestHandler):
                         break   # si el router no responde, no seguir intentando
             guardar_enviados(env)
             if ok_n:
-                enviar_telegram(f"\U0001f6a8 Cuarentena masiva [{_hostname()}]: {ok_n} CPE de alta confianza "
+                enviar_telegram(f"\U0001f6a8 Cuarentena masiva [{_hostname()}]: {ok_n} CPE confirmados (2+ pruebas) "
                                 f"a la lista '{m.get('LIST')}' por {getattr(CTX, 'user', '?')}")
             resumen = f"Enviados {ok_n} a cuarentena" + (f", {err_n} con error ({ult_err})" if err_n else "")
             return self._redirect("/cuarentena?msg=" + _up.quote(resumen))
@@ -14625,7 +14642,7 @@ class H(BaseHTTPRequestHandler):
                         break
             guardar_enviados(env, MK_SENT_DNS)
             if ok_n:
-                enviar_telegram(f"\U0001f6a8 DNS sospechoso masivo [{_hostname()}]: {ok_n} CPE de alta confianza "
+                enviar_telegram(f"\U0001f6a8 DNS sospechoso masivo [{_hostname()}]: {ok_n} CPE confirmados (2+ pruebas) "
                                 f"a la lista '{lst}' por {getattr(CTX, 'user', '?')}")
             return self._redirect("/cuarentena?msg=" + _up.quote(f"Enviados {ok_n} a {lst}" + (f", {err_n} con error ({ult_err})" if err_n else "")))
         return self._html("<h1>No encontrado</h1>", 404)

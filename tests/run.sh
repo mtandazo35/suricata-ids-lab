@@ -69,6 +69,7 @@ correr "cada interfaz de espejo con su cluster-id" "$PY" tests/test_clusterid_un
 correr "identidad (router, IP): dos nodos no se confunden" "$PY" tests/test_identidad_nodo.py
 correr "alta, edicion y baja de nodos" "$PY" tests/test_rutas_nodos.py
 correr "enviar/quitar de cuarentena van por identidad (router, IP)" "$PY" tests/test_cuarentena_identidad.py
+correr "insignia de confianza: Confirmado y cuantas pruebas" "$PY" tests/test_insignia_confianza.py
 correr "AbuseIPDB: cuota, cache, privacidad y categorias" "$PY" tests/test_abuseipdb.py
 correr "denuncias a AbuseIPDB: apagadas por defecto y con frenos" "$PY" tests/test_abuseipdb_denuncia.py
 correr "documentacion: paginas, categorias, buscador y modal" "$PY" tests/test_documentacion.py

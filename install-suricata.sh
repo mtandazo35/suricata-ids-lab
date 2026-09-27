@@ -7617,6 +7617,26 @@ def culpables_lista_html(rid, bl, esc=None, tope=8):
 
 RANGO_TOPE = 40     # filas que se pintan en linea; el resto, en "ver detalle"
 
+# Se carga al ABRIR, no antes: cada ficha gasta una consulta de la cuota de AbuseIPDB, y
+# pintar las nueve de un /28 por si acaso se comeria nueve por mirar una. Ademas se guarda
+# lo ya traido, para que cerrar y volver a abrir no vuelva a gastar.
+_RANGO_JS = """<script>
+function verQueHace(a, ip){
+  var fila = a.closest('tr').nextElementSibling;
+  if(!fila || !fila.classList.contains('fichafila')) return false;
+  var cel = fila.querySelector('.fichacel');
+  if(!fila.hidden){ fila.hidden = true; a.textContent = 'ver que hace'; return false; }
+  fila.hidden = false; a.textContent = 'ocultar';
+  if(cel.dataset.cargado === '1') return false;
+  cel.innerHTML = '<p class=hint>Consultando...</p>';
+  fetch('/reputacion/ficha?ip=' + encodeURIComponent(ip))
+    .then(function(r){ return r.text(); })
+    .then(function(t){ cel.innerHTML = t; cel.dataset.cargado = '1'; })
+    .catch(function(){ cel.innerHTML = '<p class=hint>No se pudo consultar.</p>'; });
+  return false;
+}
+</script>"""
+
 def rango_detalle_html(dat, esc=None, scb=None, tope=RANGO_TOPE):
     """Las direcciones denunciadas de un rango, en linea y sin tener que pulsar nada.
 
@@ -7639,10 +7659,12 @@ def rango_detalle_html(dat, esc=None, scb=None, tope=RANGO_TOPE):
     filas = "".join(
         "<tr><td class=mono>%s</td><td class=num>%s</td><td class=num>%s</td>"
         "<td class=mono>%s</td><td>%s</td>"
-        "<td><a class=hint href='?ips=%s&amp;volver=%s'>ver que hace</a></td></tr>"
+        "<td><a class=hint href='#' onclick=\"return verQueHace(this,'%s')\">"
+        "ver que hace</a></td></tr>"
+        "<tr class=fichafila hidden><td colspan=6 class=fichacel></td></tr>"
         % (esc(str(a[0])), scb(int(a[1]), corto=True),
            "{:,}".format(int(a[2])).replace(",", "."), esc(str(a[3])), esc(str(a[4])),
-           esc(str(a[0])), esc(str(dat.get("red") or "")))
+           esc(str(a[0])))
         for a in den[:tope])
     peor = sum(1 for a in den if int(a[1]) >= 75)
     aviso = ("<p class=hint style='margin:8px 0 4px'>Se muestran las %d peores de %s. "
@@ -7654,11 +7676,14 @@ def rango_detalle_html(dat, esc=None, scb=None, tope=RANGO_TOPE):
             "<div class=tablewrap><table class=ut style='font-size:12.5px'>"
             "<thead><tr><th>Direccion</th><th class=num>Abuso</th><th class=num>Denuncias</th>"
             "<th>Ultima</th><th>Pais</th><th></th></tr></thead>"
+            # el JS va FUERA del %: con la concatenacion dentro, "%" liga mas fuerte que
+            # "+" y el formateo se aplicaba al script en vez de a la tabla (TypeError en
+            # caliente que ni el AST ni pyflakes ven)
             "<tbody>%s</tbody></table></div>%s</div>"
             % ("{:,}".format(len(den)).replace(",", "."),
                "{:,}".format(hosts).replace(",", "."),
                (", <b style='color:#b52a2a'>%d</b> con 75%% o mas" % peor) if peor else "",
-               filas, aviso))
+               filas, aviso)) + _RANGO_JS
 
 def vigilar_dnsbl():
     """Revisa las listas negras de todo lo declarado. Solo son consultas DNS: no gasta
@@ -11080,6 +11105,63 @@ def log_page(embed=False):
             "<input class=search id=lsearch placeholder='Buscar IP o usuario...' oninput='lfiltrar()'></div>"
             + cuerpo + "</section></main>" + script + "</body></html>")
 
+def ficha_ip_html(d, ip="", esc=None, scb=None):
+    """La ficha de una IP publica: quien es, cuanto se le denuncia y que hay detras.
+
+    Sale a funcion para poder servirla SUELTA. Antes solo existia dentro de la pagina,
+    asi que ver el detalle de una direccion obligaba a cambiar de pantalla, y el
+    "volver" no llevaba donde estabas sino a la consulta del rango. Con nueve
+    direcciones denunciadas eso son dieciocho navegaciones para revisar un /28."""
+    esc = esc or html.escape
+    scb = scb or (lambda n, corto=False: "%d%%" % int(n))
+    cats = d.get("cats") or []
+    chips = "".join(
+        "<span style='display:inline-block;background:#f1f1ef;border:1px solid #e0dfda;"
+        "border-radius:20px;padding:3px 10px;margin:0 6px 6px 0;font-size:12.5px'>"
+        + esc(AIDB_CATS.get(int(c), "categoria %d" % int(c)))
+        + f" <b>{int(n)}</b></span>" for c, n in cats) or "<span class=hint>sin denuncias en 90 dias</span>"
+    # que hacer: solo de las categorias que de verdad aparecen
+    arreglos = []
+    for c, _n in cats:
+        t = AIDB_REMEDIO.get(int(c))
+        if t and t not in arreglos:
+            arreglos.append(t)
+    arr_html = ""
+    if arreglos:
+        arr_html = ("<div style='margin-top:10px'><b style='font-size:13px'>Que suele haber detras</b>"
+                    "<ul style='margin:6px 0 0;padding-left:20px;font-size:13px'>"
+                    + "".join(f"<li>{esc(t)}</li>" for t in arreglos[:5]) + "</ul></div>")
+    ejem = ""
+    if d.get("ejemplos"):
+        ejem = ("<details style='margin-top:10px'><summary style='cursor:pointer;font-size:13px'>"
+                "Texto de las denuncias</summary>"
+                "<ul class=mono style='font-size:12px;color:#52514e;margin:6px 0 0;padding-left:20px'>"
+                + "".join(f"<li>{esc(t)}</li>" for t in d["ejemplos"]) + "</ul></details>")
+    extra = []
+    if d.get("tor"):
+        extra.append("nodo Tor")
+    if d.get("blanca"):
+        extra.append("en lista blanca de AbuseIPDB")
+    cuando = time.strftime("%d/%m %H:%M", time.localtime(d.get("ts", 0)))
+    proc = f"ultima verificacion: {cuando}"
+    return (
+        "<div class=card style='margin:0 0 12px'>"
+        f"<div style='display:flex;align-items:center;gap:12px;flex-wrap:wrap'>"
+        f"<b class=mono style='font-size:15px'>{esc(d.get('ip') or ip)}</b>{scb(d.get('score', 0))}"
+        + (f"<span class=hint>{esc(' · '.join(extra))}</span>" if extra else "")
+        + f"<span class=hint style='margin-left:auto'>{esc(proc)}</span></div>"
+        "<div style='font-size:13px;color:#52514e;margin:8px 0 10px'>"
+        + esc(d.get("isp") or "operador desconocido")
+        + (f" &middot; {esc(d.get('pais'))}" if d.get("pais") else "")
+        + (f" &middot; {esc(d.get('uso'))}" if d.get("uso") else "")
+        + (f" &middot; {esc(d.get('dominio'))}" if d.get("dominio") else "")
+        + "</div>"
+        f"<div style='font-size:13px;margin-bottom:8px'><b>{d.get('reportes', 0):,}</b> denuncias de "
+        f"<b>{d.get('denunciantes', 0):,}</b> denunciantes distintos"
+        + (f" &middot; ultima {esc(d.get('ultimo'))}" if d.get("ultimo") else "") + "</div>"
+        + chips + arr_html + ejem + "</div>")
+
+
 def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver=""):
     """Consultar en AbuseIPDB que ataques se le denuncian a una IP publica.
 
@@ -11171,52 +11253,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 f"<div class=card style='margin:0 0 12px'><b class=mono>{esc(ip)}</b> "
                 f"<span style='color:#b52a2a'>&mdash; {esc(err or 'sin datos')}</span></div>")
             continue
-        cats = d.get("cats") or []
-        chips = "".join(
-            "<span style='display:inline-block;background:#f1f1ef;border:1px solid #e0dfda;"
-            "border-radius:20px;padding:3px 10px;margin:0 6px 6px 0;font-size:12.5px'>"
-            + esc(AIDB_CATS.get(int(c), "categoria %d" % int(c)))
-            + f" <b>{int(n)}</b></span>" for c, n in cats) or "<span class=hint>sin denuncias en 90 dias</span>"
-        # que hacer: solo de las categorias que de verdad aparecen
-        arreglos = []
-        for c, _n in cats:
-            t = AIDB_REMEDIO.get(int(c))
-            if t and t not in arreglos:
-                arreglos.append(t)
-        arr_html = ""
-        if arreglos:
-            arr_html = ("<div style='margin-top:10px'><b style='font-size:13px'>Que suele haber detras</b>"
-                        "<ul style='margin:6px 0 0;padding-left:20px;font-size:13px'>"
-                        + "".join(f"<li>{esc(t)}</li>" for t in arreglos[:5]) + "</ul></div>")
-        ejem = ""
-        if d.get("ejemplos"):
-            ejem = ("<details style='margin-top:10px'><summary style='cursor:pointer;font-size:13px'>"
-                    "Texto de las denuncias</summary>"
-                    "<ul class=mono style='font-size:12px;color:#52514e;margin:6px 0 0;padding-left:20px'>"
-                    + "".join(f"<li>{esc(t)}</li>" for t in d["ejemplos"]) + "</ul></details>")
-        extra = []
-        if d.get("tor"):
-            extra.append("nodo Tor")
-        if d.get("blanca"):
-            extra.append("en lista blanca de AbuseIPDB")
-        cuando = time.strftime("%d/%m %H:%M", time.localtime(d.get("ts", 0)))
-        proc = f"ultima verificacion: {cuando}"
-        tarjetas.append(
-            "<div class=card style='margin:0 0 12px'>"
-            f"<div style='display:flex;align-items:center;gap:12px;flex-wrap:wrap'>"
-            f"<b class=mono style='font-size:15px'>{esc(d.get('ip') or ip)}</b>{_scb(d.get('score', 0))}"
-            + (f"<span class=hint>{esc(' · '.join(extra))}</span>" if extra else "")
-            + f"<span class=hint style='margin-left:auto'>{esc(proc)}</span></div>"
-            "<div style='font-size:13px;color:#52514e;margin:8px 0 10px'>"
-            + esc(d.get("isp") or "operador desconocido")
-            + (f" &middot; {esc(d.get('pais'))}" if d.get("pais") else "")
-            + (f" &middot; {esc(d.get('uso'))}" if d.get("uso") else "")
-            + (f" &middot; {esc(d.get('dominio'))}" if d.get("dominio") else "")
-            + "</div>"
-            f"<div style='font-size:13px;margin-bottom:8px'><b>{d.get('reportes', 0):,}</b> denuncias de "
-            f"<b>{d.get('denunciantes', 0):,}</b> denunciantes distintos"
-            + (f" &middot; ultima {esc(d.get('ultimo'))}" if d.get("ultimo") else "") + "</div>"
-            + chips + arr_html + ejem + "</div>")
+        tarjetas.append(ficha_ip_html(d, ip, esc, _scb))
 
     # --- Tus IPs publicas: el puente entre "me banean" y "quien lo causa" -----------
     decl = cargar_publicas()
@@ -14040,6 +14077,21 @@ class H(BaseHTTPRequestHandler):
                 except (ValueError, TypeError):
                     edit = None
             return self._html(exclusiones_page(edit_idx=edit))
+        if path == "/reputacion/ficha":
+            # Devuelve SOLO la ficha de una IP, para desplegarla dentro de la tabla del
+            # rango sin cambiar de pagina. Se consulta a demanda, al abrir: pintar las
+            # nueve de un /28 de golpe gastaria nueve consultas de la cuota por mirar una.
+            if not self._operador():
+                return self._deny()
+            _qf = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            _ip = (_qf.get("ip", [""])[0]).strip()
+            if not aidb_ip_valida(_ip):
+                return self._html("<p class=hint>Direccion no valida.</p>")
+            _d, _org, _err = aidb_consultar(_ip)
+            if not _d:
+                return self._html("<p class=hint>No se pudo consultar: %s</p>"
+                                  % html.escape(_err or "sin respuesta"))
+            return self._html(ficha_ip_html(_d, _ip))
         if path == "/reputacion":
             if not self._operador():
                 return self._deny()

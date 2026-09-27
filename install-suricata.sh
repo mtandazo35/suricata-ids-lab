@@ -9334,8 +9334,8 @@ def exclusiones_page(msg="", ok=False, edit_idx=None):
                       + "".join(f'<option value="{v}"{" selected" if v == "0" else ""}>{t}</option>' for v, t in _vig_opts)
                       + "</select>")
     hid_edit = f'<input type=hidden name=editar value="{edit_idx}">' if ed else ""
+    es_edit = "1" if ed else "0"       # con esto el modal se abre solo al pulsar Editar
     btn_txt = "Guardar cambios" if ed else "Agregar"
-    cancelar = '<a class="cancel" href="/exclusiones">Cancelar</a>' if ed else ""
     body = f"""<!doctype html><html lang=es><head><meta charset=utf-8><link rel=icon type=image/png href=/favicon.ico>
 <meta name=viewport content='width=device-width,initial-scale=1'><title>Suricata</title>
 <style>{BASE_CSS}
@@ -9352,6 +9352,21 @@ button.del:hover{{background:#f5d5d5}}
 a.edit{{background:#eef4fd;color:#1c5cab;border:1px solid #cfe0fb;padding:5px 12px;border-radius:8px;
 text-decoration:none;font-size:13px;font-weight:600}}a.edit:hover{{background:#dceafb}}
 a.cancel{{color:#8a8a86;text-decoration:none;font-size:13px}}a.cancel:hover{{color:#52514e}}
+.exhead{{display:flex;align-items:center;justify-content:space-between;gap:12px;
+flex-wrap:wrap;margin:0 0 12px}}
+.exhead h2{{margin:0}}
+/* El formulario ocupaba media pantalla para algo que se usa de vez en cuando; la lista,
+   que es lo que se consulta, quedaba arrinconada arriba. */
+.exmodal{{position:fixed;inset:0;background:rgba(15,20,26,.55);display:none;z-index:60;
+padding:32px 16px;overflow:auto}}
+.exmodal.on{{display:block}}
+.exbox{{background:#fff;border-radius:14px;padding:22px 22px 20px;max-width:640px;
+margin:0 auto;position:relative;box-shadow:0 18px 50px rgba(0,0,0,.28)}}
+.exbox h2{{margin:0 0 4px}}
+.exx{{position:absolute;top:10px;right:12px;border:0;background:transparent;font-size:24px;
+line-height:1;cursor:pointer;color:#8a8a86;padding:4px 8px}}
+.exx:hover{{color:#33322f}}
+@media(max-width:560px){{.exbox{{padding:18px 16px}}}}
 .eximp-row{{display:flex;gap:14px;align-items:center;flex-wrap:wrap}}
 .eximp-imp{{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0}}
 .eximp-sep{{width:1px;align-self:stretch;background:#eceae6}}
@@ -9378,10 +9393,19 @@ padding:5px 10px 5px 5px;background:#fafbfc;cursor:pointer;max-width:100%}}
 <h1>Exclusiones</h1><p class=sub>IPs que no quieres que aparezcan en el panel ni en los reportes
 (tus DNS, tu monitoreo SNMP, etc.). Se aplica al instante.</p>
 {banner}
+<div class=exhead><h2>Exclusiones activas</h2>
+<button type=button class=primary onclick="abrirEx()">+ Agregar exclusion</button></div>
 <div class=card><table><thead><tr><th>Tipo</th><th>IP</th><th>Puertos</th><th>Firma (SID)</th><th>Vigencia</th><th>Motivo</th><th></th></tr></thead>
 <tbody>{tabla}</tbody></table></div>
+
+<div class=exmodal id=exmodal data-edit="{es_edit}" onclick="if(event.target===this)cerrarEx()">
+<div class=exbox>
+<button type=button class=exx onclick=cerrarEx() title=Cerrar>&times;</button>
 <h2>{titulo_form}</h2>
-<div class=card><form class=add method=post action="/exclusiones">
+<p class=sub style="margin:0 0 16px">Una exclusion silencia lo que elijas <b>en el panel y en los
+reportes</b>. Lo mas fino es acotarla a una firma concreta; dejar la IP sola apaga todo lo que
+pase por ella.</p>
+<form class=add method=post action="/exclusiones">
 <input type=hidden name=accion value=add>{hid_edit}
 <label>Tipo</label><select name=tipo><option value=dst {sel_dst}>Destino (a donde va)</option><option value=src {sel_src}>Origen (de donde sale)</option></select>
 <label>IP</label><input name=ip placeholder="10.66.66.2" value="{val_ip}" required>
@@ -9393,10 +9417,12 @@ padding:5px 10px 5px 5px;background:#fafbfc;cursor:pointer;max-width:100%}}
 <div class=hint>Exclusion temporal: se ignora hasta que venza y luego vuelve a analizarse sola. "Permanente" no vence.</div>
 <label>Motivo</label><input name=motivo placeholder="Falso positivo / DNS interno / monitoreo SNMP" value="{val_mot}">
 <div style="grid-column:2;display:flex;gap:10px;align-items:center;margin-top:4px">
-<button type=submit class=primary>{btn_txt}</button>{cancelar}</div>
-</form></div>
-<p class=sub style="margin-top:16px">Ejemplos: tu DNS interno como <b>Destino</b> puerto <b>53</b>; tu servidor de
+<button type=submit class=primary>{btn_txt}</button>
+<a class=cancel href="#" onclick="cerrarEx();return false">Cancelar</a></div>
+</form>
+<p class=sub style="margin:16px 0 0">Ejemplos: tu DNS interno como <b>Destino</b> puerto <b>53</b>; tu servidor de
 monitoreo como <b>Origen</b> puerto <b>161</b>. Asi quitas el ruido sin perder de vista lo demas que hagan esas IPs.</p>
+</div></div>
 <h2 style="margin-top:30px">Copia de seguridad</h2>
 <div class="card eximp">
 <p class=sub style="margin:0 0 14px">Guarda tus exclusiones en un archivo <code>.json</code> (respaldo o para pasarlas a otro
@@ -9414,7 +9440,18 @@ sensor) o cargalas desde uno. Al importar, <b>reemplazan</b> todas las exclusion
 </form>
 </div>
 </div>
-<script>function leerJSON(i){{var f=i.files&&i.files[0];var n=document.getElementById('fname');
+<script>
+function abrirEx(){{var m=document.getElementById('exmodal');m.classList.add('on');
+document.body.style.overflow='hidden';
+var c=m.querySelector('input[name=ip]');if(c)c.focus();}}
+function cerrarEx(){{var m=document.getElementById('exmodal');
+/* Al editar, la URL lleva ?edit=N: si solo se ocultara el modal, recargar volveria a
+   abrirlo con la regla vieja. Se sale a la lista limpia. */
+if(m.getAttribute('data-edit')==='1'){{location.href='/exclusiones';return;}}
+m.classList.remove('on');document.body.style.overflow='';}}
+document.addEventListener('keydown',function(e){{if(e.key==='Escape'||e.key==='Esc')cerrarEx();}});
+if(document.getElementById('exmodal').getAttribute('data-edit')==='1')abrirEx();
+function leerJSON(i){{var f=i.files&&i.files[0];var n=document.getElementById('fname');
 if(!f){{if(n)n.textContent='ningun archivo';return;}}if(n)n.textContent=f.name;
 var r=new FileReader();r.onload=function(){{document.getElementById('impjson').value=r.result;}};r.readAsText(f);}}</script>
 </main></body></html>"""

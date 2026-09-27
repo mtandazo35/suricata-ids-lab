@@ -26,7 +26,7 @@ DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
 ARBOL = ast.parse(DASH)
 
 PIEZAS = ("PUBLICAS_CONF", "cargar_publicas", "guardar_publicas",
-          "guardar_publicas_de", "publicas_texto")
+          "cubrir_publicas", "guardar_publicas_de", "publicas_texto")
 
 fallos = 0
 
@@ -42,7 +42,7 @@ def entorno(tmp):
     ns = {"os": os, "json": json, "re": __import__("re"),
           "ipaddress": __import__("ipaddress"),
           # la validacion de IP/red tiene su propia prueba; aqui solo estorba
-          "aidb_ip_valida": lambda x: True,
+          "aidb_ip_valida": lambda x: (True, ""),
           "aidb_red_valida": lambda x: (x, "")}
     for n in ARBOL.body:
         nom = getattr(n, "name", None) or (
@@ -105,6 +105,45 @@ def main():
     check("y avisa de que el historial no se pierde",
           "historial de listas" in DASH.split("confirm('Quitar las", 1)[-1][:200], "")
     check("se ve que es destructivo", "class=delbtn" in DASH, "")
+
+    # --- lo que ya queda cubierto sobra ------------------------------------------------
+    # Cada entrada declarada gasta UNA consulta de AbuseIPDB en cada revision, y
+    # "Detectar del MikroTik" saca a la vez la direccion de la interfaz y su red: un /28
+    # acababa acompanado de sus hosts y de media docena de subredes. Veinte consultas para
+    # ver lo que una de red ya trae. Consultar la red no pierde nada: la respuesta incluye
+    # cada direccion denunciada de dentro, que es justo lo que se pinta desplegado.
+    cubrir = ns["cubrir_publicas"]
+
+    quedan, sobran = cubrir(["203.0.113.0/28", "203.0.113.5", "203.0.113.6/31"])
+    check("un host dentro de un rango declarado sobra",
+          quedan == ["203.0.113.0/28"], (quedan, sobran))
+    check("y se dice cuales se quitaron, no se tiran en silencio",
+          sorted(sobran) == ["203.0.113.5", "203.0.113.6/31"], sobran)
+
+    quedan, _s = cubrir(["203.0.113.0/24", "203.0.113.0/28"])
+    check("entre dos redes se queda la que cubre", quedan == ["203.0.113.0/24"], quedan)
+
+    quedan, sobran = cubrir(["203.0.113.0/28", "198.51.100.0/24"])
+    check("dos rangos que no se tocan se quedan los dos", len(quedan) == 2, quedan)
+    check("y no sobra ninguno", sobran == [], sobran)
+
+    check("una sola entrada no se quita a si misma",
+          cubrir(["203.0.113.0/28"])[0] == ["203.0.113.0/28"], "")
+    check("dos iguales dejan una",
+          len(cubrir(["203.0.113.7", "203.0.113.7"])[0]) == 1, "")
+
+    # Lo que no se sabe leer no se toca: tirarlo en silencio seria perder una entrada que
+    # alguien escribio a proposito.
+    quedan, _s = cubrir(["203.0.113.0/28", "esto-no-es-una-ip"])
+    check("lo que no se puede interpretar se conserva",
+          "esto-no-es-una-ip" in quedan, quedan)
+
+    # --- y al guardar, lo mismo -----------------------------------------------------------
+    ok, mal, tap = ns["guardar_publicas_de"]("r3", "203.0.113.0/28 203.0.113.5")
+    check("guardar tambien descarta lo cubierto", ok == ["203.0.113.0/28"], ok)
+    check("y lo devuelve aparte de lo rechazado, que es otra cosa",
+          tap == ["203.0.113.5"] and mal == [], (tap, mal))
+
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

@@ -36,7 +36,7 @@ PIEZAS = ("PUBLICAS_CONF", "PUB_HIST", "PUB_HIST_DIAS", "PUB_UMBRAL_AVISO", "_PU
           "aidb_ip_valida", "aidb_red_valida", "_aidb_cache", "_aidb_guardar_cache",
           "_aidb_estado", "_aidb_guardar_estado", "_aidb_pedir", "_aidb_resumen",
           "aidb_consultar", "_aidb_pedir_red", "_aidb_resumen_red", "aidb_consultar_red",
-          "cargar_publicas", "guardar_publicas", "publicas_texto", "guardar_publicas_de",
+          "cargar_publicas", "guardar_publicas", "publicas_texto", "cubrir_publicas", "guardar_publicas_de",
           "_pub_hist", "_guardar_pub_hist", "_peor_de", "_cats_de", "vigilar_publicas",
           "senal_de_categorias", "_cpes_del_nodo", "culpables_de", "es_publica_declarada",
           "DNSBL", "DNSBL_HIST", "DNSBL_MAX_IPS", "DNSBL_HILOS", "DNSBL_DIAS",
@@ -138,14 +138,14 @@ def main():
     ns["aidb_set"]("CLAVE-DE-PRUEBA-NO-REAL")
 
     # --- 1) declarar las publicas del cliente ---
-    ok, mal = ns["guardar_publicas_de"]("r1", "200.0.0.0/24\n190.0.2.7")
+    ok, mal, _tap = ns["guardar_publicas_de"]("r1", "200.0.0.0/24\n190.0.2.7")
     check("se declaran IPs y redes publicas del nodo",
           ns["cargar_publicas"]().get("r1") == ["190.0.2.7", "200.0.0.0/24"] and not mal,
           (ns["cargar_publicas"](), mal))
     check("y se releen tal cual para editarlas",
           set(ns["publicas_texto"]("r1").split()) == {"190.0.2.7", "200.0.0.0/24"},
           ns["publicas_texto"]("r1"))
-    ok2, mal2 = ns["guardar_publicas_de"]("r2", "10.0.0.0/8, 192.168.1.5, basura")
+    ok2, mal2, _tap = ns["guardar_publicas_de"]("r2", "10.0.0.0/8, 192.168.1.5, basura")
     check("las privadas y la basura se rechazan", ok2 == [] and len(mal2) == 3, (ok2, mal2))
     check("y se explica cada rechazo", all("(" in m for m in mal2), mal2)
 

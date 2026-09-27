@@ -7162,6 +7162,41 @@ def es_publica_declarada(ip):
 def publicas_texto(rid):
     return "\n".join(cargar_publicas().get(rid, []))
 
+def cubrir_publicas(entradas):
+    """Quita lo que ya queda dentro de otra entrada. Devuelve (quedan, sobran).
+
+    No es cosmetica: cada entrada declarada gasta UNA consulta de AbuseIPDB en cada
+    revision, y "Detectar del MikroTik" saca a la vez la direccion de la interfaz y su
+    red, asi que un /28 acababa acompanado de sus dieciseis hosts y de media docena de
+    subredes. Veinte consultas para ver lo que una de red ya trae, y la lista ilegible.
+
+    Consultar la red que los cubre no pierde nada: la respuesta trae dentro cada
+    direccion denunciada, que es justo lo que se pinta desplegado."""
+    redes, vistas = [], set()
+    for t in entradas:
+        if t in vistas:
+            continue                          # el mismo texto dos veces es uno
+        vistas.add(t)
+        try:
+            red = ipaddress.ip_network(t, strict=False)
+        except ValueError:
+            redes.append((None, t))          # lo que no se sabe leer, no se toca
+            continue
+        if any(o is not None and o == red for o, _x in redes):
+            continue                          # la misma red escrita de otra forma
+        redes.append((red, t))
+    quedan, sobran = [], []
+    for red, t in redes:
+        if red is None:
+            quedan.append(t)
+            continue
+        # cubierto por OTRA entrada distinta y mas amplia
+        tapado = any(otra is not None and otra != red
+                     and red.version == otra.version and red.subnet_of(otra)
+                     for otra, _o in redes)
+        (sobran if tapado else quedan).append(t)
+    return quedan, sobran
+
 def guardar_publicas_de(rid, texto):
     """Guarda las entradas de un nodo. Devuelve (guardadas, rechazadas)."""
     ok, mal = [], []
@@ -7175,13 +7210,15 @@ def guardar_publicas_de(rid, texto):
         else:
             v, porque = aidb_ip_valida(t)
             (ok.append(t) if v else mal.append(f"{t} ({porque})"))
+    ok, tapadas = cubrir_publicas(sorted(set(ok)))
     d = cargar_publicas()
     if ok:
-        d[rid] = sorted(set(ok))
+        d[rid] = ok
     else:
         d.pop(rid, None)
     guardar_publicas(d)
-    return ok, mal
+    # las tapadas no son un error del usuario: se dicen aparte de las rechazadas
+    return ok, mal, tapadas
 
 def _pub_hist():
     try:
@@ -14510,8 +14547,9 @@ class H(BaseHTTPRequestHandler):
             rid = (q.get("rid", [""])[0]).strip()
             if not router_por_id(rid):
                 return self._redirect("/reputacion")
-            ok_l, mal = guardar_publicas_de(rid, q.get("entradas", [""])[0])
+            ok_l, mal, tap = guardar_publicas_de(rid, q.get("entradas", [""])[0])
             bitacora("CONFIG-PUBLICAS", f"nodo={rid} {len(ok_l)} entrada(s)"
+                                        + (f"; {len(tap)} ya cubiertas" if tap else "")
                                         + (f"; rechazadas: {', '.join(mal[:3])}" if mal else ""))
             threading.Thread(target=vigilar_publicas, daemon=True).start()
             return self._redirect("/reputacion")
@@ -14522,9 +14560,10 @@ class H(BaseHTTPRequestHandler):
             if not router_por_id(rid):
                 return self._redirect("/reputacion")
             actuales = cargar_publicas().get(rid, [])
-            ok_l, mal = guardar_publicas_de(
+            ok_l, mal, tap = guardar_publicas_de(
                 rid, "\n".join(actuales + [q.get("entrada", [""])[0]]))
             bitacora("CONFIG-PUBLICAS", f"nodo={rid} +1 ({len(ok_l)} en total)"
+                                        + (f"; {len(tap)} ya cubiertas" if tap else "")
                                         + (f"; rechazada: {mal[0]}" if mal else ""))
             if not mal:
                 threading.Thread(target=vigilar_dnsbl, daemon=True).start()
@@ -14568,13 +14607,17 @@ class H(BaseHTTPRequestHandler):
                     "Si el enlace lo termina otro equipo, agregalas a mano."))
             actuales = cargar_publicas().get(rid, [])
             nuevas = [x for x in halladas if x not in actuales]
-            guardar_publicas_de(rid, "\n".join(actuales + nuevas))
-            bitacora("CONFIG-PUBLICAS", f"nodo={rid} detectadas={len(halladas)} nuevas={len(nuevas)}")
+            _ok, _mal, tap = guardar_publicas_de(rid, "\n".join(actuales + nuevas))
+            bitacora("CONFIG-PUBLICAS", f"nodo={rid} detectadas={len(halladas)} "
+                                        f"nuevas={len(nuevas)} cubiertas={len(tap)}")
             if nuevas:
                 threading.Thread(target=vigilar_dnsbl, daemon=True).start()
                 threading.Thread(target=vigilar_publicas, daemon=True).start()
             return self._redirect("/reputacion?msg=" + _up.quote(
-                f"{len(nuevas)} publica(s) nueva(s) del MikroTik" if nuevas
+                (f"{len(nuevas)} publica(s) nueva(s) del MikroTik"
+                 + (f"; {len(tap)} descartada(s) por estar dentro de un rango ya declarado "
+                    "(una consulta de red las cubre todas)" if tap else ""))
+                if nuevas
                 else "El MikroTik no tiene ninguna publica que no estuviera ya"))
         if ruta == "/publicas/revisar":
             if not self._operador():

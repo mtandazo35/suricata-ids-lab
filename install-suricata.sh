@@ -4683,26 +4683,47 @@ def mk_publicas_detectadas(router=None):
     """Las IPs publicas de salida segun el propio MikroTik.
 
     Dos fuentes: las direcciones configuradas en sus interfaces (de ahi sale el
-    masquerade) y el to-addresses de las reglas de src-nat (de ahi salen los pools)."""
+    masquerade) y el to-addresses de las reglas de SRC-NAT (de ahi salen los pools).
+
+    Solo srcnat, y esto importa: en dstnat el to-addresses es a donde REDIRIGES, o sea
+    el servidor de otro. Los ISP suelen forzar el DNS de sus clientes con un dstnat, asi
+    que sin este filtro la deteccion traia 1.1.1.1, 9.9.9.9 y 208.67.220.123 como si
+    fueran IPs publicas del cliente. Declararlas seria pedirle al panel que vigile la
+    reputacion de Cloudflare."""
     d = cargar_mk_de(router) if router else cargar_mk()
     s_ = mk_conectar(d)
     encontradas = []
-    try:
-        for cmd, campo in (("/ip/address/print", "=address="),
-                           ("/ip/firewall/nat/print", "=to-addresses=")):
-            try:
-                _mk_send(s_, [cmd, "=.proplist=" + campo.strip("=")])
-                _ok, frases, _err = _mk_reply(s_)
-            except Exception:
+
+    def _sumar(txt):
+        for c in _a_cidr(txt):            # _a_cidr ya descarta lo privado
+            if c not in encontradas:
+                encontradas.append(c)
+
+    def _filas(cmd, props):
+        try:
+            _mk_send(s_, [cmd, "=.proplist=" + ",".join(props)])
+            _ok, frases, _err = _mk_reply(s_)
+        except Exception:
+            return []
+        out = []
+        for f in frases:
+            if not (f and f[0] == "!re"):
                 continue
-            for f in frases:
-                if not (f and f[0] == "!re"):
-                    continue
-                for a in f:
-                    if a.startswith(campo):
-                        for c in _a_cidr(a[len(campo):]):
-                            if c not in encontradas:
-                                encontradas.append(c)
+            fila = {}
+            for a in f:
+                if a.startswith("=") and "=" in a[1:]:
+                    k, v = a[1:].split("=", 1)
+                    fila[k] = v
+            out.append(fila)
+        return out
+
+    try:
+        for fila in _filas("/ip/address/print", ["address"]):
+            _sumar(fila.get("address", ""))
+        for fila in _filas("/ip/firewall/nat/print", ["chain", "to-addresses"]):
+            if (fila.get("chain") or "").lower() != "srcnat":
+                continue
+            _sumar(fila.get("to-addresses", ""))
     finally:
         try: s_.close()
         except OSError: pass

@@ -74,6 +74,7 @@ correr "exclusiones: el alta va en un modal" "$PY" tests/test_exclusiones_modal.
 correr "historial de listas negras: cuando entro y cuanto estuvo" "$PY" tests/test_dnsbl_historial.py
 correr "de me listaron a mira a estos abonados" "$PY" tests/test_culpables_listado.py
 correr "ver que hace se despliega en la tabla" "$PY" tests/test_ficha_desplegable.py
+correr "detectar publicas: solo lo tuyo, no el DNS de otros" "$PY" tests/test_detectar_publicas.py
 correr "AbuseIPDB: cuota, cache, privacidad y categorias" "$PY" tests/test_abuseipdb.py
 correr "denuncias a AbuseIPDB: apagadas por defecto y con frenos" "$PY" tests/test_abuseipdb_denuncia.py
 correr "documentacion: paginas, categorias, buscador y modal" "$PY" tests/test_documentacion.py

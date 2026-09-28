@@ -1465,9 +1465,12 @@ patron_src = defaultdict(set)      # (sig,dport) -> CPEs que lo comparten (corre
 inf_hits = Counter()               # alertas CnC/botnet por CPE (para confirmar infeccion)
 inf_sids = defaultdict(set)        # firmas CnC distintas por CPE (SID o texto)
 inf_sig = {}                       # firma CnC mas reciente por CPE (para el motivo)
+inf_sig_ts = {}                    # y cuando fue: leyendo de nuevo a viejo, "la ultima
+                                   # leida" seria la mas ANTIGUA. Se ancla al timestamp.
 dns_hits = Counter()               # alertas de DNS sospechoso por CPE
 dns_sids = defaultdict(set)        # firmas DNS distintas por CPE
 dns_sig = {}                       # firma DNS mas reciente por CPE
+dns_sig_ts = {}                    # idem: la mas reciente por tiempo, no por orden
 pruebas_by_src = defaultdict(list)  # evidencia por alerta (SID/rev/flow_id/dst/ts) por CPE, tope 8
 MAX_CARD = 2500                    # tope por set (el score satura mucho antes; protege RAM)
 total = 0
@@ -1514,14 +1517,36 @@ def dominio_malo(dom):
             return s
     return ""
 
-files = sorted(glob.glob(f"{LOGDIR}/eve.json*") + glob.glob(f"{LOGDIR}/dns.json*"),
-               key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
-for p in files:
-    try:
-        if os.path.getmtime(p) < cutoff - 3600:
+def logs_de_la_ventana(logdir, corte):
+    """Los logs que tocan la ventana, del MAS NUEVO al mas viejo.
+
+    El orden no es un detalle. MAX_LINES es un presupuesto GLOBAL y los rotados `.gz` no
+    se pueden posicionar (`abrir_desde` solo bisecciona los vivos), asi que se leen
+    enteros. Leyendolos primero se llevaban el presupuesto y el log vivo se quedaba sin
+    turno: el informe perdia lo MAS RECIENTE, que es lo unico que el panel necesita.
+    (cafanet, 2026-09-28: cuatro rotados consumieron 19,5 de los 20 M de lineas y las
+    barras se quedaron clavadas cinco horas atras con el sensor alertando 37.000 veces
+    por hora.) Del reves, si el tope corta se pierde el extremo VIEJO de la ventana, y eso
+    el indicador de cobertura ya lo declara en vez de callarlo.
+
+    El filtro aprovecha que el mtime de un `.gz` es cuando logrotate lo cerro, o sea el
+    instante de su ultimo registro: si cae antes de la ventana, el archivo entero esta
+    fuera y no hay nada que leer. El margen de una hora solo hace falta para los vivos,
+    cuyo mtime es "ahora" y no dice nada de donde empiezan."""
+    fs = []
+    for p in glob.glob(f"{logdir}/eve.json*") + glob.glob(f"{logdir}/dns.json*"):
+        try:
+            m = os.path.getmtime(p)
+        except OSError:
             continue
-    except OSError:
-        continue
+        if corte and m < (corte if p.endswith(".gz") else corte - 3600):
+            continue
+        fs.append((m, p))
+    fs.sort(reverse=True)
+    return [p for _, p in fs]
+
+files = logs_de_la_ventana(LOGDIR, cutoff)
+for p in files:
     try:
         for line in abrir_desde(p, cutoff):
             seen += 1
@@ -1554,7 +1579,9 @@ for p in files:
                             # no cambia ninguna decision.
                             if len(dns_sids[_s]) < MAX_CARD:
                                 dns_sids[_s].add("dom:" + _dom[:80])
-                            dns_sig[_s] = "DNS a dominio malo: " + _dom[:60]
+                            if (_tv or 0) >= dns_sig_ts.get(_s, 0):
+                                dns_sig[_s] = "DNS a dominio malo: " + _dom[:60]
+                                dns_sig_ts[_s] = _tv or 0
             if '"event_type":"alert"' not in line:
                 continue
             g = campos(line)
@@ -1631,11 +1658,15 @@ for p in files:
             if _es_cnc:                           # firma de infeccion (CnC/botnet/troyano)
                 inf_hits[src] += 1
                 inf_sids[src].add(g("sid") or sig)
-                inf_sig[src] = sig
+                if (ts or 0) >= inf_sig_ts.get(src, 0):
+                    inf_sig[src] = sig
+                    inf_sig_ts[src] = ts or 0
             if _es_dns:                            # consulta DNS a dominio malicioso
                 dns_hits[src] += 1
                 dns_sids[src].add(g("sid") or sig)
-                dns_sig[src] = sig
+                if (ts or 0) >= dns_sig_ts.get(src, 0):
+                    dns_sig[src] = sig
+                    dns_sig_ts[src] = ts or 0
             # evidencia por alerta (para la ficha): guardar hasta 8 registros por CPE
             if (_es_cnc or _es_dns) and len(pruebas_by_src[src]) < 8:
                 pruebas_by_src[src].append({

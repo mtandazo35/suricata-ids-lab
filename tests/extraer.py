@@ -7,6 +7,7 @@ directorio los artefactos que usan las pruebas:
 
   sort.js         ordenamiento de tablas (_SORT_JS)
   pos.js          posicion de la pagina al recargar (_POS_JS)
+  ask.js          modal de confirmacion y aviso (_ASK)
   masivo.js       script de la pagina de Cuarentena (seleccion y quitado masivo)
   mapa.js         mapa del reporte (mapa_ataques_section)
   ruta_uno.py     cuerpo de la ruta /cuarentena/quitar-uno
@@ -89,6 +90,10 @@ def main():
     for var, archivo in (("_SORT_JS", "sort.js"), ("_POS_JS", "pos.js")):
         js = literal(asignacion(arbol, var).value)
         escribir(archivo, js.replace("<script>", "").replace("</script>", ""))
+
+    # el modal de confirmacion: aqui sale solo el JS; el markup lo comprueba aparte
+    ask = literal(asignacion(arbol, "_ASK").value)
+    escribir("ask.js", re.findall(r"<script>(.*?)</script>", ask, re.S)[0])
 
     pag = funcion(arbol, "cuarentena_page")
     cuerpo = [x for x in ast.walk(pag) if isinstance(x, ast.Assign)

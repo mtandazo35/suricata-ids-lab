@@ -231,7 +231,7 @@ def main():
           and "declarada a mano" in DASH and "origen desconocido" in DASH, "")
     check("las detectadas se distinguen a la vista", ".pchip.det" in DASH, "")
     check("marcar por origen avisa si no hay ninguna",
-          "No hay ninguna con ese origen" in DASH, "")
+          "No hay ninguna entrada con ese origen" in DASH, "")
 
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))

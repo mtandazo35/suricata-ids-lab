@@ -2226,8 +2226,8 @@ def top_origenes_section(n_src=5, n_sub=8):
         "body:'ajax=1&ip='+encodeURIComponent(ip)+'&score='+encodeURIComponent(sc)})"
         ".then(function(r){return r.text();}).then(function(t){"
         "if(t.indexOf('OK')===0){b.outerHTML=\"<span class='qsent' title='Ya en cuarentena'>\\u2713 En cuarentena</span>\";}"
-        "else{b.disabled=false;b.innerHTML=o;alert(t.replace(/^ERR: /,''));}})"
-        ".catch(function(e){b.disabled=false;b.innerHTML=o;alert('Error: '+e);});}</script>"
+        "else{b.disabled=false;b.innerHTML=o;aviso('No se pudo enviar',t.replace(/^ERR: /,''));}})"
+        ".catch(function(e){b.disabled=false;b.innerHTML=o;aviso('No se pudo enviar','Error: '+e);});}</script>"
         "<section class=\"card\"><h2>Top 5 IPs origen que mas peticionan</h2>"
         "<p class=\"muted\" style=\"margin:0 0 12px\">Quien ataca mas, hacia que IP destino, desde que puerto origen y hacia que puerto destino. "
         "La columna <b>Dueño / organización</b> viene del DNS inverso (PTR) de la IP destino: "
@@ -2646,8 +2646,9 @@ def entrantes_section(n_src=8, n_sub=6, max_src=5000, max_det=60):
         "address-list de CPEs no bloquearia nada util. Lo que corresponde es <b>cortarlos en el borde</b> "
         "(firewall de entrada) o <b>cerrar la exposicion</b> del equipo atacado: si algo tuyo recibe "
         "escaneo constante desde internet, casi siempre es que tiene un puerto publicado que no hacia falta.</p>"
-        + ("<script>function qden(b,ip,f,dp,pr,n){if(!confirm('Denunciar '+ip+' a AbuseIPDB?\\n\\n"
-           "Es publico y queda a tu nombre. No se envia ninguna IP tuya.'))return;"
+        + ("<script>function qden(b,ip,f,dp,pr,n){"
+           "if(!ask(b,'Denunciar a AbuseIPDB','Se denuncia '+ip+' publicamente y queda a tu "
+           "nombre. No se envia ninguna IP tuya.','Denunciar','danger'))return;"
            "b.disabled=true;var o=b.innerHTML;b.textContent='enviando...';"
            "fetch('/reputacion/denunciar',{method:'POST',credentials:'same-origin',"
            "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
@@ -2655,8 +2656,8 @@ def entrantes_section(n_src=8, n_sub=6, max_src=5000, max_det=60):
            "encodeURIComponent(dp)+'&proto='+encodeURIComponent(pr)+'&n='+encodeURIComponent(n)})"
            ".then(function(r){return r.text();}).then(function(t){"
            "if(t.indexOf('OK')===0){b.outerHTML=\"<span class='qsent'>\\u2713 Denunciado</span>\";}"
-           "else{b.disabled=false;b.innerHTML=o;alert(t.replace(/^ERR: /,''));}})"
-           ".catch(function(e){b.disabled=false;b.innerHTML=o;alert('Error: '+e);});}</script>"
+           "else{b.disabled=false;b.innerHTML=o;aviso('No se pudo denunciar',t.replace(/^ERR: /,''));}})"
+           ".catch(function(e){b.disabled=false;b.innerHTML=o;aviso('No se pudo denunciar','Error: '+e);});}</script>"
            if _AIDB_REPORTAR else "")
         + f"<div class=\"topwrap\">{''.join(cards)}</div></section>")
 
@@ -2897,6 +2898,10 @@ try:
 except Exception:
     pass
 
+# el mismo modal que el panel: este informe es una pagina suelta y no hereda su barra
+_ASK = ('<style>.askov{display:none;position:fixed;inset:0;background:rgba(11,11,11,.55);z-index:160;align-items:center;justify-content:center;padding:24px}.askov .askbox{background:#fff;color:#0b0b0b;border-radius:14px;max-width:460px;width:100%;padding:22px 24px;box-shadow:0 16px 54px rgba(0,0,0,.45)}.askov h3{margin:0 0 8px;font-size:19px}.askov p{margin:0 0 18px;color:#52514e;font-size:14px;line-height:1.5}.askov .askacts{display:flex;gap:10px;justify-content:flex-end}.askov .askno{background:#eef0f2;color:#33322f;border:1px solid #d7d6d2;padding:10px 16px;border-radius:9px;font:600 14px system-ui;cursor:pointer}.askov .askno:hover{background:#e2e5e8}.askov .askok{background:#2a78d6;color:#fff;border:0;padding:10px 18px;border-radius:9px;font:600 14px system-ui;cursor:pointer}.askov .askok:hover{background:#1c5cab}.askov .askok.danger{background:#c0392b}.askov .askok.danger:hover{background:#9c2f22}</style><div id=askov class=askov onclick="if(event.target===this)askNo()"><div class=askbox role=dialog aria-modal=true aria-labelledby=asktit><h3 id=asktit></h3><p id=asktxt></p><div class=askacts><button type=button class=askno id=askno onclick=askNo()>Cancelar</button><button type=button class=askok id=askok>Confirmar</button></div></div></div>'
+        "<script>var _askE=null;function askNo(){var m=document.getElementById('askov');if(m)m.style.display='none';_askE=null;}function _askAbrir(t,x,ok,tono,solo){document.getElementById('asktit').textContent=t;document.getElementById('asktxt').textContent=x||'';var k=document.getElementById('askok'),n=document.getElementById('askno');k.textContent=ok||'Confirmar';k.className='askok'+(tono?' '+tono:'');n.style.display=solo?'none':'';document.getElementById('askov').style.display='flex';k.focus();}function ask(e,t,x,ok,tono){if(e.dataset.ok){e.dataset.ok='';return true;}_askE=e;_askAbrir(t,x,ok,tono,0);return false;}function aviso(t,x){_askE=null;_askAbrir(t,x,'Entendido','',1);}document.getElementById('askok').addEventListener('click',function(){var e=_askE;askNo();if(!e)return;if(e.tagName==='FORM'){e.submit();return;}e.dataset.ok='1';e.click();});document.addEventListener('keydown',function(ev){if(ev.key==='Escape')askNo();});</script>")
+
 doc = f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reporte de ataques - {esc(host)}</title>
@@ -3082,7 +3087,7 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
     </script>
     <p class="muted">Top {len(filas)} flujos por numero de alertas. Se excluye ruido informativo (ET INFO).</p>
   </section>
-</main></body></html>"""
+{_ASK}</main></body></html>"""
 
 out = os.path.join(LOGDIR, "report-" + datetime.now(TZ_EC).strftime("%Y%m%d-%H%M") + ".html")
 # Escritura atomica (.tmp + replace), como el resto del script. Si no, el archivo existe
@@ -8654,6 +8659,7 @@ border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0
 .updask .updaskno:hover{background:#e2e5e8}
 .updask .updaskok{background:#2a78d6;color:#fff;border:0;padding:10px 18px;border-radius:9px;font:600 14px system-ui;cursor:pointer}
 .updask .updaskok:hover{background:#1c5cab}
+.askov{display:none;position:fixed;inset:0;background:rgba(11,11,11,.55);z-index:160;align-items:center;justify-content:center;padding:24px}.askov .askbox{background:#fff;color:#0b0b0b;border-radius:14px;max-width:460px;width:100%;padding:22px 24px;box-shadow:0 16px 54px rgba(0,0,0,.45)}.askov h3{margin:0 0 8px;font-size:19px}.askov p{margin:0 0 18px;color:#52514e;font-size:14px;line-height:1.5}.askov .askacts{display:flex;gap:10px;justify-content:flex-end}.askov .askno{background:#eef0f2;color:#33322f;border:1px solid #d7d6d2;padding:10px 16px;border-radius:9px;font:600 14px system-ui;cursor:pointer}.askov .askno:hover{background:#e2e5e8}.askov .askok{background:#2a78d6;color:#fff;border:0;padding:10px 18px;border-radius:9px;font:600 14px system-ui;cursor:pointer}.askov .askok:hover{background:#1c5cab}.askov .askok.danger{background:#c0392b}.askov .askok.danger:hover{background:#9c2f22}
 .empbar{background:#fff;border-bottom:1px solid #ececec}
 .empbar .empwrap{max-width:1360px;margin:0 auto;padding:7px 28px;display:flex;justify-content:flex-end;align-items:center;gap:10px}
 .empbar .elogo{height:30px;width:auto;max-width:150px;object-fit:contain;display:block}
@@ -8671,7 +8677,7 @@ border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0
 @media(prefers-color-scheme:dark){.wpend{background:#2e2712;border-color:#5c4d1c;color:#f0d78c}}
  .nav .out{margin-left:8px;padding:7px 12px;font-size:14px}
  .nav .updbtn{margin-left:8px;padding:7px 11px;font-size:13px}
- .updov,.updask{padding:14px}
+ .updov,.updask,.askov{padding:14px}
  .empbar .empwrap{padding:6px 14px}
  /* base compartida: margen lateral comodo en movil para TODOS los apartados
     (_NAV_CSS se inyecta despues del <style> de cada pagina, asi que manda) */
@@ -8834,7 +8840,9 @@ def nav(active=""):
             "document.addEventListener('keydown',function(e){if(e.key==='Escape')updaskHide();});</script>")
     navbar = ('<div class="nav"><div class="navwrap">' + brand + '<span class="push"></span>'
               + "".join(parts) + '<span class="push"></span>' + upd_btn
-              + '<a href="/logout" class="out">Salir</a></div></div>' + upd_modal + updask)
+              + '<a href="/logout" class="out">Salir</a></div></div>' + upd_modal + updask
+              # el modal de confirmacion/aviso: sustituye a confirm() y alert() del navegador
+              + _ASK)
     # marca de la empresa (logo + nombre) en una franja debajo, alineada a la derecha (bajo Salir)
     emp = cargar_empresa()
     tiene_logo = emp.get("logo", "").startswith("data:image/")
@@ -8844,6 +8852,12 @@ def nav(active=""):
         enom = f'<span class="en">{html.escape(emp["nombre"])}</span>' if emp.get("nombre") else ""
         empbar = f'<div class="empbar"><div class="empwrap">{elogo}{enom}</div></div>'
     return _NAV_CSS + _SORT_JS + _POS_JS + navbar + empbar
+
+# confirmaciones y avisos del panel, en un modal propio: el dialogo del navegador sale
+# con el nombre del host delante, no cabe explicar que pasa despues de aceptar y no se
+# puede distinguir una accion que corta a un abonado de una que no.
+_ASK = ('<div id=askov class=askov onclick="if(event.target===this)askNo()"><div class=askbox role=dialog aria-modal=true aria-labelledby=asktit><h3 id=asktit></h3><p id=asktxt></p><div class=askacts><button type=button class=askno id=askno onclick=askNo()>Cancelar</button><button type=button class=askok id=askok>Confirmar</button></div></div></div>'
+        "<script>var _askE=null;function askNo(){var m=document.getElementById('askov');if(m)m.style.display='none';_askE=null;}function _askAbrir(t,x,ok,tono,solo){document.getElementById('asktit').textContent=t;document.getElementById('asktxt').textContent=x||'';var k=document.getElementById('askok'),n=document.getElementById('askno');k.textContent=ok||'Confirmar';k.className='askok'+(tono?' '+tono:'');n.style.display=solo?'none':'';document.getElementById('askov').style.display='flex';k.focus();}function ask(e,t,x,ok,tono){if(e.dataset.ok){e.dataset.ok='';return true;}_askE=e;_askAbrir(t,x,ok,tono,0);return false;}function aviso(t,x){_askE=null;_askAbrir(t,x,'Entendido','',1);}document.getElementById('askok').addEventListener('click',function(){var e=_askE;askNo();if(!e)return;if(e.tagName==='FORM'){e.submit();return;}e.dataset.ok='1';e.click();});document.addEventListener('keydown',function(ev){if(ev.key==='Escape')askNo();});</script>")
 
 # compat: algunas plantillas todavia interpolan {NAV} (barra sin pestana activa marcada)
 NAV = nav()
@@ -8993,8 +9007,10 @@ def _form_nodo(r, nuevo=False):
         "<div class=nodoacts><button class=savebtn type=submit>Guardar nodo</button>"
         + ("" if nuevo else
            "<button class=cancelbtn type=submit formaction='/routers/quitar' "
-           "onclick=\"return confirm('Quitar este nodo del panel? Sus CPEs en cuarentena seguiran "
-           "bloqueados en ese MikroTik.')\">Quitar nodo</button>")
+           "onclick=\"return ask(this,'Quitar el nodo',"
+           "'El nodo sale del panel. Sus CPEs en cuarentena SIGUEN bloqueados en ese "
+           "MikroTik: el panel deja de verlos, el router no los suelta.',"
+           "'Quitar nodo','danger')\">Quitar nodo</button>")
         + "</div></form>")
 
 def _card_nodos():
@@ -9386,7 +9402,9 @@ def perfil_page(msg="", ok=False, edit_user=None):
                 f"data-user='{un}' data-nombre=\"{esc(nombre)}\" data-correo=\"{esc(correo)}\" "
                 f"data-role='{rl}'>{_IC_EDIT}</button>"
                 "<form method=post action='/perfil' class=inl "
-                f"onsubmit=\"return confirm('Eliminar al usuario {un}?')\">"
+                f"onsubmit=\"return ask(this,'Eliminar usuario','{un} dejara de poder "
+                f"entrar al panel. No se borra nada de lo que haya hecho.',"
+                f"'Eliminar','danger')\">"
                 f"<input type=hidden name=accion value=del_user><input type=hidden name=user value='{un}'>"
                 f"<button class='ic danger' title=Eliminar type=submit>{_IC_DEL}</button></form>"
                 "</td></tr>")
@@ -9824,7 +9842,7 @@ sensor) o cargalas desde uno. Al importar, <b>reemplazan</b> todas las exclusion
 <a class="ebtn exp" href="/exclusiones/export" download="exclusiones.json">&#8681;&nbsp; Exportar JSON</a>
 <span class=eximp-sep></span>
 <form class=eximp-imp method=post action="/exclusiones"
- onsubmit="if(!document.getElementById('impjson').value){{alert('Elige un archivo JSON primero.');return false;}}">
+ onsubmit="if(!document.getElementById('impjson').value){{aviso('Falta el archivo','Elige primero el archivo JSON que quieres importar.');return false;}}">
 <input type=hidden name=accion value=import>
 <input type=hidden name=json id=impjson>
 <label class=filepick><span class=filebtn>Elegir archivo</span><span id=fname class=fname>ningun archivo</span>
@@ -11612,8 +11630,9 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                      "<a href='#' class=ptodas onclick=\"return pmarcarorg(this,'')\" "
                      "title='Marca todas, incluidas las que declaraste a mano'>todas</a>"
                      "<button type=submit class=delbtn id='pselb-%s' disabled "
-                     "onclick=\"return confirm('Quitar las entradas marcadas? El historial "
-                     "de listas negras no se borra.')\">Quitar marcadas</button></form>"
+                     "onclick=\"return ask(this,'Quitar las marcadas',"
+                     "'Salen de las publicas declaradas de este nodo. El historial de listas "
+                     "negras NO se borra.','Quitar','danger')\">Quitar marcadas</button></form>"
                      % (esc(rid), esc(rid), chips, esc(rid)))
         editor = ("<div class=pedit>" + chips + "".join(acciones) + "</div>") if (chips or acciones) else ""
         bloques.append(
@@ -11637,7 +11656,8 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
                 "var sel=org?(\"input[name=entrada][data-org='\"+org+\"']\")"
                 ":'input[name=entrada]';"
                 "var cs=f.querySelectorAll(sel);"
-                "if(!cs.length){alert('No hay ninguna con ese origen.');return false;}"
+                "if(!cs.length){aviso('Nada que marcar',"
+                "'No hay ninguna entrada con ese origen.');return false;}"
                 # si ya estan todas marcadas, el segundo clic las desmarca
                 "var faltan=[].some.call(cs,function(x){return !x.checked;});"
                 "[].forEach.call(cs,function(x){x.checked=faltan;});"
@@ -13579,7 +13599,9 @@ def cuarentena_page(msg="", es_admin=False):
                 cuando = time.strftime("%d/%m %H:%M", time.localtime(env_map[k].get("cuando", 0)))
                 quitar = (f"<form method=post action='/{pref}/quitar' style='display:inline'>"
                           f"<input type=hidden name=ip value='{esc(k)}'>"
-                          f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de la lista {esc(lista_name)}?')\">Quitar</button></form>"
+                          f"<button class='qbtn quit' onclick=\"return ask(this,"
+                          f"'Sacar de la lista','{esc(ip)} sale de {esc(lista_name)} en el "
+                          f"MikroTik y vuelve a tener salida.','Quitar','danger')\">Quitar</button></form>"
                           ) if es_admin else ""
                 meta = _rev(env_map[k])
                 meta_html = f"<div class='rowmeta'>desde {cuando}{(' · ' + meta) if meta else ''}</div>"
@@ -13587,7 +13609,10 @@ def cuarentena_page(msg="", es_admin=False):
             if es_admin and activo:
                 return (f"<form method=post action='/{pref}/enviar' style='display:inline'>"
                         f"<input type=hidden name=ip value='{esc(k)}'><input type=hidden name=score value='{c.get('riesgo',0)}'>"
-                        f"<button class='qbtn send' onclick=\"return confirm('Enviar {esc(ip)} a la lista {esc(lista_name)} del MikroTik?')\">Enviar</button></form>")
+                        f"<button class='qbtn send' onclick=\"return ask(this,"
+                        f"'Enviar al MikroTik','{esc(ip)} entra en la lista {esc(lista_name)}. "
+                        f"Lo que le pase a ese CPE depende de la regla que uses con esa "
+                        f"lista.','Enviar')\">Enviar</button></form>")
             return "<span class='dry' title='Configura y habilita el MikroTik en Ajustes para activar el envio'>solo sugerencia</span>"
         filas = "".join(
             f"<tr><td data-label='CPE' class='mono ipx'>{esc(c.get('ip',''))}"
@@ -13607,7 +13632,11 @@ def cuarentena_page(msg="", es_admin=False):
         btn = ""
         if es_admin and activo and pend_alta:
             btn = (f"<form method=post action='/{pref}/enviar-todos' style='display:inline;margin-left:auto'>"
-                   f"<button class='qbtn send' onclick=\"return confirm('Enviar al MikroTik los {len(pend_alta)} CPE CONFIRMADOS (2 o mas pruebas independientes)?')\">"
+                   f"<button class='qbtn send' onclick=\"return ask(this,"
+                   f"'Enviar los confirmados',"
+                   f"'Entran de golpe {len(pend_alta)} CPE con "
+                   f"2 o mas pruebas independientes en la lista {esc(lista_name)}.',"
+                   f"'Enviar {len(pend_alta)}','danger')\">"
                    f"&#9888; Enviar confirmados ({len(pend_alta)})</button></form>")
         return (f"<div class='seccion'><div class='shead'><div><h2>{titulo}</h2>"
                 f"<p class='sub'>{sub} · {len(candidatos)} candidato(s).</p></div>{btn}</div>"
@@ -13645,8 +13674,10 @@ def cuarentena_page(msg="", es_admin=False):
                 else:
                     acc = ("<form method=post action='/cuarentena/destino/bloquear' style='display:inline'>"
                            f"<input type=hidden name=ip value='{esc(x['ip'])}'>"
-                           f"<button class='qbtn send' onclick=\"return confirm('Bloquear la salida hacia "
-                           f"{esc(x['ip'])} en TODOS los nodos?')\">Bloquear</button></form>")
+                           f"<button class='qbtn send' onclick=\"return ask(this,"
+                           f"'Bloquear el destino','Se corta la salida hacia {esc(x['ip'])} "
+                           f"en TODOS los nodos, para todos los abonados a la vez.',"
+                           f"'Bloquear','danger')\">Bloquear</button></form>")
             elif not activo:
                 acc = "<span class=dry>solo sugerencia</span>"
             marca = ("<span class='enq'>Bloqueado</span> " if x["enviado"] else "")
@@ -13713,7 +13744,9 @@ def cuarentena_page(msg="", es_admin=False):
         _rev_ts = mm.get("last_eval", 0)
         quitar = (f"<form method=post action='/{pref}/quitar' style='display:inline'>"
                   f"<input type=hidden name=ip value='{esc(clave)}'>"
-                  f"<button class='qbtn quit' onclick=\"return confirm('Quitar {esc(ip)} de {esc(lista)}?')\">Quitar</button></form>"
+                  f"<button class='qbtn quit' onclick=\"return ask(this,'Sacar de la lista',"
+                  f"'{esc(ip)} sale de {esc(lista)} y vuelve a tener salida.',"
+                  f"'Quitar','danger')\">Quitar</button></form>"
                   ) if es_admin else ""
         # sin motivo guardado: decir de donde vino en vez de afirmar "manual", que era
         # falso justo para los que envio la politica (la fila mostraba Por=politica y

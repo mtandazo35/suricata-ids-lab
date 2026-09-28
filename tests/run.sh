@@ -53,6 +53,7 @@ if [ "$SIN_NODE" = 0 ]; then
   correr "pagina: conserva la posicion tras una accion" node tests/test_posicion.js "$TMPD/pos.js"
   correr "quitado masivo: seleccion y contenido del modal" node tests/test_masivo_ui.js "$TMPD/masivo.js"
   correr "quitado masivo: avance, fallo a mitad y cierre" node tests/test_masivo_progreso.js "$TMPD/masivo.js"
+  correr "modal propio: confirmar repite la pulsacion, no la pierde" node tests/test_modal_confirm.js "$TMPD/ask.js"
 fi
 
 # --- rutas del panel (dobles, sin MikroTik ni disco) ---
@@ -71,6 +72,7 @@ correr "alta, edicion y baja de nodos" "$PY" tests/test_rutas_nodos.py
 correr "enviar/quitar de cuarentena van por identidad (router, IP)" "$PY" tests/test_cuarentena_identidad.py
 correr "insignia de confianza: Confirmado y cuantas pruebas" "$PY" tests/test_insignia_confianza.py
 correr "exclusiones: el alta va en un modal" "$PY" tests/test_exclusiones_modal.py
+correr "ningun dialogo del navegador: todo va por el modal" "$PY" tests/test_sin_dialogos_nativos.py
 correr "historial de listas negras: cuando entro y cuanto estuvo" "$PY" tests/test_dnsbl_historial.py
 correr "de me listaron a mira a estos abonados" "$PY" tests/test_culpables_listado.py
 correr "ver que hace se despliega en la tabla" "$PY" tests/test_ficha_desplegable.py

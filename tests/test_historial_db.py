@@ -11,6 +11,12 @@ Lo que protege, en orden de importancia:
     marca de agua no se respetara, reingerir el mismo log doblaria todos los numeros y
     nadie lo notaria: los graficos saldrian igual de bonitos, solo que mintiendo.
   - que tampoco pierda: lo escrito despues de la marca tiene que entrar entero.
+  - que AVANCE aunque el log sea enorme. Esto se rompio en produccion (cafanet,
+    2026-09-27): la ingesta abria cada archivo por el principio y descartaba por marca
+    de tiempo DESPUES de contar la linea contra su tope, asi que con dns.json en 2,9 GB
+    el tope se agotaba releyendo lo mismo, la marca no avanzaba nunca y el grafico se
+    quedo clavado con 100 minutos de atraso, al 48% de CPU y sin que un reinicio lo
+    moviera. Releer no es un problema de rendimiento: es el contador parado del todo.
   - que la poda recorte la cola larga y no lo mas consultado.
 """
 import ast
@@ -29,7 +35,8 @@ ARBOL = ast.parse(DASH)
 
 PIEZAS = ("HIST_DB", "HIST_DIAS", "HIST_TOP", "HIST_CADA", "CONDUCTA_DIAS",
           "CONDUCTA_TOPE", "_cd_abrir", "_CD_TS", "_cd_ts", "_cd_top",
-          "_hist_con", "hist_marca", "hist_ingerir", "hist_podar", "hist_conducta")
+          "_hist_con", "hist_marca", "_hist_huella", "_hist_offsets", "hist_ingerir",
+          "hist_podar", "hist_conducta")
 
 fallos = 0
 
@@ -142,6 +149,63 @@ def main():
     check("la poda acota cuantas claves guarda por CPE", n <= ns2["HIST_TOP"], n)
     check("y conserva las mas frecuentes, no las primeras que llegaron",
           "10.0.0.1" in quedan and "10.0.0.39" not in quedan, quedan)
+
+    # --- LO QUE FALLO EN PRODUCCION: log grande, tope agotado, contador parado ------
+    # Marcas de tiempo distintas, como en un log real: con todas iguales no se puede
+    # distinguir lo ya contado de lo nuevo y la prueba no probaria nada.
+    tmp2 = tempfile.mkdtemp()
+    ns3 = entorno(tmp2)
+    escribir(tmp2, [ev("192.168.3.7", 120 - i, dest_ip="8.8.8.8", dest_port=53,
+                       alert={"signature": "ET SCAN viejo"}) for i in range(60)])
+    ns3["hist_ingerir"](limite_lineas=20)          # no cabe todo en una pasada
+    n1 = alertas_de(ns3, "192.168.3.7")
+    ns3["hist_ingerir"](limite_lineas=20)
+    n2 = alertas_de(ns3, "192.168.3.7")
+    check("con el tope agotado, la pasada siguiente AVANZA en vez de releer lo mismo",
+          n2 > n1, (n1, n2))
+    for _ in range(4):
+        ns3["hist_ingerir"](limite_lineas=20)
+    check("y acaba contandolo todo, por grande que sea el log",
+          alertas_de(ns3, "192.168.3.7") == 60, alertas_de(ns3, "192.168.3.7"))
+
+    # --- rotacion: el archivo nuevo empieza por el principio --------------------------
+    # El de antes tenia 60 lineas; el nuevo tiene 4. Si la posicion se guardara por
+    # NOMBRE se saltaria hasta el byte del viejo, que en el nuevo ya es el final, y no
+    # se leeria ni una linea. Por eso la posicion va por inodo.
+    os.rename(os.path.join(tmp2, "eve.json"), os.path.join(tmp2, "eve.json.1"))
+    escribir(tmp2, [ev("192.168.3.8", 1, dest_ip="9.9.9.9", dest_port=443,
+                       alert={"signature": "ET SCAN nuevo"}) for _ in range(4)])
+    ns3["hist_ingerir"]()
+    check("tras rotar, el log nuevo se lee desde el principio",
+          alertas_de(ns3, "192.168.3.8") == 4, alertas_de(ns3, "192.168.3.8"))
+
+    # --- truncado: el archivo encoge y hay que volver al principio --------------------
+    escribir(tmp2, [ev("192.168.3.9", 0.5, dest_ip="9.9.9.9", dest_port=80,
+                       alert={"signature": "ET SCAN tras truncar"}) for _ in range(3)])
+    ns3["hist_ingerir"]()
+    check("si truncan el log en caliente, se vuelve a leer desde el principio",
+          alertas_de(ns3, "192.168.3.9") == 3, alertas_de(ns3, "192.168.3.9"))
+
+    # --- la posicion se guarda, tambien cuando no hay nada nuevo ----------------------
+    ruta = os.path.join(tmp2, "eve.json")
+    st = os.stat(ruta)
+    k = "%d:%d" % (st.st_dev, st.st_ino)
+    c = ns3["_hist_con"]()
+    try:
+        antes = ns3["_hist_offsets"](c)
+    finally:
+        c.close()
+    check("se guarda por que byte va el log en curso", (antes.get(k) or [0])[0] > 0, antes)
+    ns3["hist_ingerir"]()                          # pasada sin novedades
+    c = ns3["_hist_con"]()
+    try:
+        despues = ns3["_hist_offsets"](c)
+    finally:
+        c.close()
+    # si una pasada en vacio olvidara la posicion, la siguiente releeria el archivo
+    # entero: exactamente el atasco que se acaba de arreglar
+    check("y una pasada sin novedades no la pierde",
+          despues.get(k) == antes.get(k), (antes.get(k), despues.get(k)))
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

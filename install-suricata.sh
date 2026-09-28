@@ -11988,26 +11988,108 @@ def hist_marca(c, nueva=None):
               "ON CONFLICT(clave) DO UPDATE SET valor=excluded.valor", (str(nueva),))
     return nueva
 
+def _hist_huella(ruta):
+    """Firma barata del arranque del archivo: dice si el contenido sigue siendo el mismo.
+
+    El tamaño no sirve para esto. Un log truncado que vuelve a crecer por encima de la
+    posicion guardada pasa de largo cualquier control de tamaño, y entonces se reanuda
+    en un byte que en el contenido nuevo cae a media linea: se pierde todo el principio
+    sin que nada lo denuncie."""
+    import zlib
+    try:
+        with open(ruta, "rb") as f:
+            return zlib.crc32(f.read(512)) & 0xFFFFFFFF
+    except OSError:
+        return 0
+
+def _hist_offsets(c, nuevos=None):
+    """Por que byte va cada archivo ya leido: {"dev:inodo": [posicion, tamaño]}.
+
+    La clave es el INODO y no el nombre. Al rotar, `eve.json` pasa a ser un archivo
+    nuevo con el mismo nombre: si la marca fuera por nombre se seguiria leyendo desde
+    el byte del archivo viejo y se perderia todo el principio del nuevo.
+
+    El tamaño guardado sirve para detectar un truncado (el archivo encogio): entonces
+    hay que volver al principio. Para los .gz se guarda el tamaño solo, como señal de
+    'este ya se leyo entero': un rotado no cambia nunca mas."""
+    if nuevos is None:
+        f = c.execute("SELECT valor FROM estado WHERE clave='offsets'").fetchone()
+        try:
+            d = json.loads(f[0]) if f else {}
+            return d if isinstance(d, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+    c.execute("INSERT INTO estado(clave,valor) VALUES('offsets',?) "
+              "ON CONFLICT(clave) DO UPDATE SET valor=excluded.valor",
+              (json.dumps(nuevos),))
+    return nuevos
+
 def hist_ingerir(limite_lineas=4000000):
-    """Mete en la base lo ocurrido desde la ultima marca. Incremental: solo lee las
-    lineas nuevas, asi que cuesta lo mismo lo lleve corriendo un dia o un mes."""
+    """Mete en la base lo ocurrido desde la ultima marca.
+
+    De verdad incremental: cada archivo se reanuda por donde se quedo. Antes se abria
+    por el principio y se descartaba por marca de tiempo despues de contar la linea,
+    asi que con un log grande el tope de lineas se agotaba releyendo lo mismo y el
+    historial no volvia a avanzar nunca."""
     c = _hist_con()
     try:
         desde = hist_marca(c)
         if not desde:
             desde = time.time() - HIST_DIAS * 86400
         res, det, tope, leidos = {}, {}, desde, 0
-        archivos = sorted(set(glob.glob(f"{LOGDIR}/eve.json*") + glob.glob(f"{LOGDIR}/dns.json*")))
+        offs = _hist_offsets(c)
+        vistos = {}
+
+        def _mt(p):
+            try:
+                return os.path.getmtime(p)
+            except OSError:
+                return 0.0
+
+        # por mtime ascendente: si el tope de lineas corta la pasada, lo que se queda
+        # sin leer es lo MAS nuevo, que entra en la siguiente. Al reves (lo viejo sin
+        # leer) la marca ya habria pasado de largo y esos eventos se perderian.
+        archivos = sorted(set(glob.glob(f"{LOGDIR}/eve.json*") + glob.glob(f"{LOGDIR}/dns.json*")),
+                          key=_mt)
         for ruta in archivos:
             try:
-                if os.path.getmtime(ruta) < desde:
+                st = os.stat(ruta)
+                if st.st_mtime < desde:
                     continue
+                gz = ruta.endswith(".gz")
+                clave = "%d:%d" % (st.st_dev, st.st_ino)
+                previo = offs.get(clave) or [0, 0]
+                if gz:
+                    # un rotado no cambia: leerlo una vez y no volver a tocarlo. Sin
+                    # esto se relee entero en cada pasada durante la hora siguiente a
+                    # la rotacion, que es justo cuando mas ocupado esta el sensor.
+                    if previo[1] == st.st_size:
+                        vistos[clave] = previo
+                        continue
+                    pos = 0
+                else:
+                    # mismo inodo no significa mismo contenido: si lo truncaron y lo
+                    # reescribieron, la firma del arranque cambia y hay que empezar de cero
+                    huella = _hist_huella(ruta)
+                    pos = int(previo[0] or 0)
+                    if st.st_size < (previo[1] or 0) or huella != (
+                            previo[2] if len(previo) > 2 else None):
+                        pos = 0
                 fh = _cd_abrir(ruta)
             except OSError:
                 continue
             with fh:
-                for linea in fh:
+                if pos:
+                    try:
+                        fh.seek(pos)
+                    except (OSError, ValueError):
+                        pos = 0
+                        fh.seek(0)
+                while True:
                     if leidos >= limite_lineas:
+                        break
+                    linea = fh.readline()   # readline y no 'for linea in fh': iterar
+                    if not linea:           # deja tell() prohibido en modo texto
                         break
                     leidos += 1
                     try:
@@ -12046,7 +12128,17 @@ def hist_ingerir(limite_lineas=4000000):
                     if dp:
                         k = (dia, ip, "puerto", str(dp))
                         det[k] = det.get(k, 0) + 1
+                try:
+                    vistos[clave] = [fh.tell(), st.st_size]
+                except (OSError, ValueError):
+                    vistos[clave] = [pos, st.st_size]
+                if not gz:
+                    vistos[clave].append(huella)
+        # lo que no se abrio en esta pasada se olvida: son inodos que ya no existen
+        _hist_offsets(c, vistos)
         if not res and not det:
+            # aunque no haya nada que contar hay que guardar por donde se llego, o la
+            # pasada siguiente vuelve a leer lo mismo y el contador no avanza jamas
             hist_marca(c, tope)
             c.commit()
             return 0

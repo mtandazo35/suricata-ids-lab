@@ -13824,9 +13824,13 @@ def cuarentena_page(msg="", es_admin=False):
         return _cfb(c.get("confianza"), int(c.get("n_evidencias", 0) or 0))
 
     def _ev_html(c):
+        # etiquetas en linea y no una lista con vinetas: son dos o tres frases cortas y
+        # ocupaban tres lineas de alto cada fila. El texto va entero, no abreviado: es lo
+        # que justifica cortarle el internet a alguien.
         ev = c.get("evidencias") or []
         if ev:
-            return "<ul class='evlist'>" + "".join(f"<li>{esc(e)}</li>" for e in ev) + "</ul>"
+            return "<div class='evps'>" + "".join(f"<span class='evp'>{esc(e)}</span>"
+                                                  for e in ev) + "</div>"
         return "<div class='rowmeta'>sin evidencia independiente (solo repeticion)</div>"
 
     def _seccion(titulo, sub, candidatos, env_map, pref, lista_name, cnt_key, cnt_lbl, fir_key, vacio):
@@ -13862,9 +13866,16 @@ def cuarentena_page(msg="", es_admin=False):
             f"{_chip_nodo_panel(_k(c))}{_cli(c.get('ip',''))}</td>"
             f"<td data-label='Riesgo'><span class='rb' style='background:{_col(c.get('banda',''))}'>{c.get('riesgo',0)} · {esc(c.get('banda',''))}</span>"
             f"<div style='margin-top:4px'>{_conf_badge(c)}</div></td>"
-            f"<td data-label='Motivo' class='mot'>{c.get(cnt_key,0)} {cnt_lbl} · {c.get(fir_key,0)} firma(s)<br>"
-            f"<span class='fw'>{esc((c.get('firma','') or '')[:70])}</span>{_ev_html(c)}"
-            f"<button type=button class=evbtn onclick=\"verFicha('{esc(c.get('ip',''))}')\">Ver evidencia</button></td>"
+            # la firma primero: es el QUE. El recuento es el cuanto y va debajo, mas
+            # discreto. Entera en el title, porque recortada a 70 se pierde justo el final,
+            # que es donde la firma dice de que familia habla.
+            f"<td data-label='Motivo' class='mot'>"
+            f"<span class='fw' title='{esc(c.get('firma','') or '')}'>"
+            f"{esc(c.get('firma','') or '')}</span>"
+            f"<div class='motn'>{c.get(cnt_key,0)} {cnt_lbl} &middot; {c.get(fir_key,0)} firma(s)"
+            f" &middot; <button type=button class=evlink "
+            f"onclick=\"verFicha('{esc(c.get('ip',''))}')\">ver evidencia</button></div>"
+            f"{_ev_html(c)}</td>"
             f"<td data-label='Destinos' class='num'>{c.get('destinos',0)}</td><td data-label='Puertos' class='num'>{c.get('puertos',0)}</td>"
             f"<td data-label='Alertas' class='num'>{c.get('total_alertas',0):,}</td>"
             f"<td data-label='Accion'>{_acc(c)}</td></tr>" for c in candidatos)
@@ -13885,7 +13896,11 @@ def cuarentena_page(msg="", es_admin=False):
                 f"<p class='sub'>{sub} · {len(candidatos)} candidato(s).</p></div>{btn}</div>"
                 "<div class='card'><table><thead><tr>"
                 "<th>CPE (IP origen)</th><th>Riesgo / confianza</th><th>Motivo y evidencia</th>"
-                "<th class='num'>Destinos</th><th class='num'>Puertos</th><th class='num'>Alertas</th><th>Accion</th>"
+                "<th class='num'>Destinos</th><th class='num'>Puertos</th>"
+                # la columna es el TOTAL del CPE; el motivo cuenta solo las de su
+                # categoria. Ver "380 alertas DNS" al lado de un 382 despista si no se dice.
+                "<th class='num' title='Todas las alertas de este CPE en la ventana, "
+                "no solo las de esta categoria'>Alertas</th><th>Accion</th>"
                 f"</tr></thead><tbody>{filas}</tbody></table></div></div>")
 
     sec_inf = _seccion("Infectados (malware/CnC)",
@@ -14090,15 +14105,23 @@ def cuarentena_page(msg="", es_admin=False):
            ".card{overflow:hidden}"
            ".ipx{font-weight:700}"
            ".rb{color:#fff;font-weight:800;font-size:12px;padding:2px 9px;border-radius:20px;white-space:nowrap}"
-           ".fw{color:#7a4a12;font-size:12px}.mot{max-width:300px}"
+           # una sola linea con puntos suspensivos: el texto completo esta en el title
+           ".fw{color:#7a4a12;font-size:12.5px;font-weight:600;display:block;"
+           "white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+           ".mot{max-width:380px}"
+           ".motn{font-size:11.5px;color:#6b6a66;margin-top:2px}"
            ".rowmeta{font-size:11.5px;color:#6b6a66;margin-top:3px}.muted{color:#9a9a95}"
            ".cfb{font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:20px;white-space:nowrap}"
            ".cfb.alta{background:#fdecec;color:#b52a2a;border:1px solid #f3c4c4}"
            ".cfb.sosp{background:#fff7ed;color:#7a4a12;border:1px solid #f2d3ad}"
-           ".evlist{margin:6px 0 0;padding-left:16px;font-size:11.5px;color:#3f7d55;line-height:1.5}"
-           ".evlist li{margin:1px 0}"
-           ".evbtn{margin-top:7px;border:1px solid #cfe0f6;background:#eef4fd;color:#2a5fa0;border-radius:7px;padding:4px 10px;font:600 12px system-ui;cursor:pointer}"
-           ".evbtn:hover{background:#dbe9fb}"
+           ".evps{margin-top:5px}"
+           ".evp{display:inline-block;background:#eef7f1;color:#2f6b47;border:1px solid #cfe6da;"
+           "border-radius:20px;padding:1px 9px;font-size:11px;font-weight:600;"
+           "margin:0 4px 4px 0;line-height:1.6}"
+           # enlace y no boton: un boton en bloque anadia una linea entera a cada fila
+           ".evlink{border:0;background:0;padding:0;font:inherit;font-size:11.5px;"
+           "color:#2a5fa0;text-decoration:underline;cursor:pointer}"
+           ".evlink:hover{color:#1c5cab}"
            ".fichaov{display:none;position:fixed;inset:0;background:rgba(11,11,11,.5);z-index:120;align-items:center;justify-content:center;padding:20px}"
            ".fichabox{position:relative;background:#fcfcfb;border-radius:14px;max-width:880px;width:100%;height:min(88vh,820px);box-shadow:0 14px 50px rgba(0,0,0,.4);overflow:hidden}"
            ".fichax{position:absolute;top:8px;right:8px;z-index:2;border:0;background:#eceae6;width:30px;height:30px;border-radius:50%;font-size:19px;line-height:1;cursor:pointer}.fichax:hover{background:#e34948;color:#fff}"

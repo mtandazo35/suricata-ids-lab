@@ -90,6 +90,23 @@ def main():
     check("y al confirmar dice por que son confirmados",
           "2 o mas pruebas independientes" in DASH, "")
 
+    # --- la fila tiene que dejar comparar dos candidatos sin hacer scroll -------------
+    # La celda del motivo apilaba recuento, firma partida en dos lineas, lista con vinetas
+    # y un boton: 190 px por fila. Y aqui se decide a quien se le corta el internet
+    # comparando unos con otros, asi que el alto de la fila no es un detalle estetico.
+    check("las evidencias van en linea, no en una lista con vinetas",
+          "class='evp'" in DASH and "<ul class='evlist'>" not in DASH, "")
+    check("la firma ocupa una sola linea",
+          "text-overflow:ellipsis" in DASH and ".fw{" in DASH, "")
+    # recortarla a 70 se comia el final, que es donde la firma dice de que familia habla;
+    # ahora va entera y el corte lo hace el navegador, con el texto completo en el title
+    check("y va entera en el title, no cortada a 70 caracteres",
+          "or '')[:70]" not in DASH, "")
+    check("ver evidencia es un enlace, no un boton en bloque",
+          "class=evlink" in DASH and "evbtn" not in DASH, "")
+    check("la columna de alertas aclara que es el total del CPE",
+          "no solo las de esta categoria" in DASH, "")
+
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0
 

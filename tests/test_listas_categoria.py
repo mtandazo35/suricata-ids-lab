@@ -22,7 +22,8 @@ DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
 ARBOL = ast.parse(DASH)
 
 PIEZAS = ("CAT_CPE", "CAT_OTROS", "_CPES_CACHE", "_cpes_de_reporte",
-          "lista_de_categoria", "nombre_categoria", "categoria_cpe", "listas_cpe_reglas")
+          "lista_de_categoria", "nombre_categoria", "categoria_cpe", "listas_cpe_reglas",
+          "ros_lista", "_RE_ROS_RARO")
 
 fallos = 0
 def check(d, c, e=""):
@@ -33,7 +34,7 @@ def check(d, c, e=""):
 
 
 def entorno(tmp, globales=None):
-    ns = {"json": json, "os": os, "time": __import__("time"),
+    ns = {"json": json, "os": os, "time": __import__("time"), "re": __import__("re"),
           "LOGDIR": tmp,
           "clave_cpe": lambda ip, rid: (rid + "|" + ip) if rid else ip,
           "_mk_globales": lambda: dict(globales or {})}

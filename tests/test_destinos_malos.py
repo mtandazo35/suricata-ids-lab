@@ -27,6 +27,7 @@ ARBOL = ast.parse(DASH)
 
 PIEZAS = ("DESTINOS_FILE", "MK_SENT_DST", "DST_CONFIABLES", "cargar_destinos_malos",
           "destino_bloqueable", "destinos_malos", "destinos_reglas",
+          "ros_lista", "_RE_ROS_RARO",
           "DST_FEED_OK", "DST_FEED_TOPE", "destinos_feed", "destinos_rsc",
           "cargar_publicas")
 

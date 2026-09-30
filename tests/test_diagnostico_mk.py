@@ -18,7 +18,7 @@ _i = SRC.index("cat > /usr/local/bin/suricata-dashboard <<'DASH'")
 DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
 ARBOL = ast.parse(DASH)
 
-PIEZAS = ("_mk_print", "mk_diagnostico")
+PIEZAS = ("_mk_print", "mk_diagnostico", "ros_lista", "_RE_ROS_RARO")
 
 fallos = 0
 def check(d, c, e=""):
@@ -28,12 +28,12 @@ def check(d, c, e=""):
         fallos += 1
 
 
-def entorno(tablas):
+def entorno(tablas, listas=None):
     """mk_diagnostico contra un router de mentira que devuelve las tablas dadas."""
-    ns = {"cargar_mk_de": lambda r: {"LIST": "suricata-cuarentena",
-                                     "LIST_GRAD": "suricata-graduada"},
-          "cargar_mk": lambda: {"LIST": "suricata-cuarentena",
-                                "LIST_GRAD": "suricata-graduada"},
+    _l = listas or {"LIST": "suricata-cuarentena", "LIST_GRAD": "suricata-graduada"}
+    ns = {"re": __import__("re"),
+          "cargar_mk_de": lambda r: dict(_l),
+          "cargar_mk": lambda: dict(_l),
           "mk_conectar": lambda d: type("S", (), {"close": lambda self: None})(),
           "_mk_send": lambda s, w: None,
           "_mk_reply": lambda s: (True, [], ""),
@@ -41,7 +41,8 @@ def entorno(tablas):
           # la IP (eso es tests/test_ip_sensor.py)
           "ip_del_sensor": lambda hacia="": "10.0.0.9"}
     for n in ARBOL.body:
-        nom = getattr(n, "name", None)
+        nom = getattr(n, "name", None) or (
+            getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
         if nom in PIEZAS:
             exec(ast.get_source_segment(DASH, n) or "", ns)
     ns["_mk_print"] = lambda s_, cmd, props: tablas.get(cmd, [])
@@ -64,6 +65,27 @@ def main():
     fix = [f for _e, t, _d, f in c if "cuarentena NO corta" in t][0]
     check("con la regla exacta para arreglarlo",
           "src-address-list=suricata-cuarentena" in fix and "action=drop" in fix, fix)
+    # --- una lista con espacios en el nombre -------------------------------------------
+    # "Cliente Virus" es un nombre real de un ISP. Sin comillas RouterOS corta el comando
+    # en el espacio: intenta usar la lista `Cliente` y se atraganta con `Virus`. O sea que
+    # justo la regla que el panel dice que hace falta para cortar de verdad es la unica que
+    # no se puede copiar, y el error del router no menciona el espacio por ningun lado.
+    ns2 = entorno({}, {"LIST": "Cliente Virus", "LIST_GRAD": "suricata-graduada"})
+    c2 = ns2["mk_diagnostico"]()
+    fix2 = [f for _e, t, _d, f in c2 if "cuarentena NO corta" in t][0]
+    check("una lista con espacios sale entrecomillada",
+          'src-address-list="Cliente Virus"' in fix2, fix2)
+    check("y no partida, que es lo que hacia fallar el comando",
+          "src-address-list=Cliente Virus" not in fix2, fix2)
+    # y el caso normal no se ensucia de comillas
+    check("un nombre sin espacios sigue sin comillas",
+          "src-address-list=suricata-graduada" in
+          [f for _e, t, _d, f in c2 if "graduada NO corta" in t][0], "")
+
+    ros = ns2["ros_lista"]
+    check("las comillas de dentro se escapan", ros('a"b') == '"a\\"b"', ros('a"b'))
+    check("y un nombre vacio no revienta", ros("") == '""' and ros(None) == '""', "")
+
     check("se avisa del origen falsificado", any("falsificada" in t for _e, t, _d, _f in c), txt)
     check("y de que el router no detecta escaneos",
           any("no detecta escaneos" in t for _e, t, _d, _f in c), txt)

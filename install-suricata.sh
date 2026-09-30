@@ -3922,6 +3922,22 @@ GRUPOS_CONDUCTA = [
      "nuevas hacia esos puertos en vez de cortarlos del todo."),
 ]
 
+_RE_ROS_RARO = re.compile(r"[^A-Za-z0-9_.:-]")
+
+def ros_lista(nombre):
+    """El nombre de una address-list tal y como hay que escribirlo en una linea de RouterOS.
+
+    Los nombres los pone el ISP y suelen llevar espacios ("Cliente Virus"). Sin comillas,
+    RouterOS corta el comando en el espacio: intenta usar la lista `Cliente` y se atraganta
+    con `Virus`. Justo la regla que el panel dice que falta para cortar de verdad es la que
+    no se puede pegar, y el error del router no menciona el espacio por ningun lado.
+
+    Se entrecomilla solo si hace falta, para no ensuciar el caso normal."""
+    n = str(nombre or "")
+    if n and not _RE_ROS_RARO.search(n):
+        return n
+    return '"%s"' % n.replace("\\", "\\\\").replace('"', '\\"')
+
 def reglas_conducta_texto(clave, redes=None, permitidos="suricata-salida-permitida"):
     """Las reglas de MikroTik para una conducta. Texto listo para pegar."""
     redes = redes or [str(r) for r in mis_redes()]
@@ -3931,13 +3947,13 @@ def reglas_conducta_texto(clave, redes=None, permitidos="suricata-salida-permiti
             "/ip firewall filter",
             "# 1) el que prueba muchos puertos seguidos (psd = detector de escaneo de RouterOS)",
             f'add chain=forward protocol=tcp psd=21,3s,3,1 {origen} '
-            f'src-address-list=!{permitidos} action=add-src-to-address-list '
+            f'src-address-list=!{ros_lista(permitidos)} action=add-src-to-address-list '
             'address-list=suricata-escaneo address-list-timeout=1d '
             'comment="Suricata: escaneo de puertos saliente"',
             "",
             "# 2) el que abre demasiadas conexiones nuevas (barrido de muchas IPs)",
             f'add chain=forward connection-state=new {origen} '
-            f'src-address-list=!{permitidos} action=jump jump-target=det-barrido '
+            f'src-address-list=!{ros_lista(permitidos)} action=jump jump-target=det-barrido '
             'comment="Suricata: medir ritmo de conexiones nuevas"',
             'add chain=det-barrido limit=50,100:packet action=return '
             'comment="Suricata: ritmo normal, seguir"',
@@ -3956,7 +3972,7 @@ def reglas_conducta_texto(clave, redes=None, permitidos="suricata-salida-permiti
         "# limitar el ritmo de intentos hacia puertos de acceso remoto y correo",
         f'add chain=forward connection-state=new protocol=tcp '
         f'dst-port=22,23,21,3389,5900,5060,25 {origen} '
-        f'src-address-list=!{permitidos} action=jump jump-target=det-fuerza '
+        f'src-address-list=!{ros_lista(permitidos)} action=jump jump-target=det-fuerza '
         'comment="Suricata: medir intentos de credenciales"',
         'add chain=det-fuerza limit=10,20:packet action=return '
         'comment="Suricata: ritmo normal, seguir"',
@@ -4017,14 +4033,14 @@ def reglas_p2p_texto(puertos, redes=None, permitidos="suricata-salida-permitida"
         "# 1) puertos clasicos de BitTorrent. Caza al cliente por defecto; uno configurado",
         "#    a mano con puerto aleatorio y cifrado NO cae aqui.",
         f'add chain=forward protocol=tcp dst-port={pts} {origen} '
-        f'src-address-list=!{permitidos} action=drop comment="Suricata: P2P (TCP)"',
+        f'src-address-list=!{ros_lista(permitidos)} action=drop comment="Suricata: P2P (TCP)"',
         f'add chain=forward protocol=udp dst-port={pts} {origen} '
-        f'src-address-list=!{permitidos} action=drop comment="Suricata: P2P (UDP/DHT)"',
+        f'src-address-list=!{ros_lista(permitidos)} action=drop comment="Suricata: P2P (UDP/DHT)"',
         "",
         "# 2) esto es lo que de verdad le duele: un cliente de torrent abre CIENTOS de",
         "#    conexiones simultaneas. Un tope alto no molesta a quien navega.",
         f'add chain=forward protocol=tcp connection-state=new {origen} '
-        f'src-address-list=!{permitidos} connection-limit=150,32 action=drop '
+        f'src-address-list=!{ros_lista(permitidos)} connection-limit=150,32 action=drop '
         'comment="Suricata: tope de conexiones simultaneas por abonado"',
         "",
         "# NOTA: bloquear P2P del todo es una pelea perdida (cifrado, puertos aleatorios,",
@@ -4130,7 +4146,7 @@ def regla_salida(grupo, redes=None, permitidos="suricata-salida-permitida"):
     puertos = ",".join(grupo["puertos"])
     out = []
     for red in (redes or ["0.0.0.0/0"]):
-        out.append(f'add chain=forward src-address={red} src-address-list=!{permitidos} '
+        out.append(f'add chain=forward src-address={red} src-address-list=!{ros_lista(permitidos)} '
                    f'protocol={grupo["proto"]} dst-port={puertos} action=drop '
                    f'comment="Suricata salida: {grupo["titulo"]}"')
     return "\n".join(out)
@@ -4150,7 +4166,7 @@ def grad_reglas_texto(lista):
     NADA: es el mismo fallo silencioso que tener la lista de cuarentena sin su drop."""
     out = ["/ip firewall filter"]
     for proto, puertos, por in GRAD_REGLAS:
-        out.append(f'add chain=forward src-address-list={lista} protocol={proto} '
+        out.append(f'add chain=forward src-address-list={ros_lista(lista)} protocol={proto} '
                    f'dst-port={puertos} action=drop comment="Suricata graduada: {por}"')
     return "\n".join(out)
 
@@ -4957,12 +4973,12 @@ def destinos_reglas(lista="suricata-destinos-malos"):
         "# aqui no se bloquea a un abonado, se bloquea A DONDE va.",
         "/ip firewall filter",
         'add chain=forward dst-address-list=%s action=drop '
-        'comment="Suricata: destinos de mala reputacion"' % lista,
+        'comment="Suricata: destinos de mala reputacion"' % ros_lista(lista),
         "",
         "# y que ni siquiera cree la conexion (mas barato con muchas entradas):",
         "/ip firewall raw",
         'add chain=prerouting dst-address-list=%s action=drop '
-        'comment="Suricata: destinos de mala reputacion"' % lista,
+        'comment="Suricata: destinos de mala reputacion"' % ros_lista(lista),
     ])
 
 def cargar_entrantes():
@@ -5069,9 +5085,9 @@ def blocklist_reglas(lista=BL_LISTA):
         "#    abonado, y el cliente se queda sin acceso a sitios legitimos.",
         "/ip firewall filter",
         'add chain=forward connection-state=new src-address-list=%s action=drop '
-        'comment="Suricata: atacantes de internet"' % lista,
+        'comment="Suricata: atacantes de internet"' % ros_lista(lista),
         'add chain=input connection-state=new src-address-list=%s action=drop '
-        'comment="Suricata: atacantes contra el router"' % lista,
+        'comment="Suricata: atacantes contra el router"' % ros_lista(lista),
     ])
 
 def _mk_print(s_, cmd, props):
@@ -5174,7 +5190,8 @@ def mk_diagnostico(router=None):
             out.append(("falta", f"La lista de {que} NO corta nada",
                         f"El panel mete CPEs en '{lista}', pero ninguna regla del firewall la "
                         "usa: el abonado sigue atacando y el panel dice 'enviado'.",
-                        f"/ip firewall filter add chain=forward src-address-list={lista} "
+                        f"/ip firewall filter add chain=forward "
+                        f"src-address-list={ros_lista(lista)} "
                         f'action=drop comment="Suricata: {que}"'))
 
     # 3) el origen falsificado no lo ve NINGUN IDS
@@ -5218,7 +5235,7 @@ def mk_diagnostico(router=None):
                     "Con muchas IPs en cuarentena conviene cortar en raw: se descarta antes "
                     "de crear la conexion y la tabla de conntrack no se llena.",
                     "/ip firewall raw add chain=prerouting "
-                    f"src-address-list={d.get('LIST', 'suricata-cuarentena')} "
+                    f"src-address-list={ros_lista(d.get('LIST', 'suricata-cuarentena'))} "
                     'action=drop comment="Suricata: cortar antes de conntrack"'))
     return out
 
@@ -5709,7 +5726,8 @@ def categoria_cpe(clave):
 def listas_cpe_reglas():
     """Las reglas de cada lista. No todas se tratan igual, que es el motivo de separarlas."""
     def L(c):
-        return lista_de_categoria(c)
+        # entrecomillado aqui: por L() pasan las siete reglas de categoria
+        return ros_lista(lista_de_categoria(c))
     return "\n".join([
         "# ORDEN: estas reglas de drop van ANTES de la regla de fasttrack-connection y",
         "# antes de los accept. Con fasttrack activo una conexion ya establecida deja de",
@@ -13255,6 +13273,20 @@ def historico_page(dias_n=30):
     # --- Que le falta al router para poder CORTAR ------------------------------------
     # Con un espejo, Suricata no bloquea nunca: ve una copia y el paquete ya paso. El que
     # corta es el router, asi que lo primero es saber si esta en condiciones de hacerlo.
+    def _diag_cuando(ts):
+        """Cuando se tomo esta medicion, y que se refresca sola.
+
+        El panel consulta el router en segundo plano cada 10 minutos, asi que lo que se ve
+        puede ser de hace un rato. Sin decirlo, una regla recien pegada parece no haber
+        funcionado."""
+        if not ts:
+            return ""
+        _m = int(max(0, time.time() - ts) // 60)
+        _c = ("hace un momento" if _m < 1 else
+              "hace 1 minuto" if _m == 1 else "hace %d minutos" % _m)
+        return ("<span class=diagts> &middot; comprobado %s (%s), se repite cada 10 min"
+                "</span>" % (_c, time.strftime("%H:%M", time.localtime(ts))))
+
     def _diag_html(r, nom, multi):
         # de la cache que llena el hilo de fondo: consultar el router aqui dejaba la
         # pagina esperando 4 llamadas a su API
@@ -13288,6 +13320,9 @@ def historico_page(dias_n=30):
                   "ve una copia y el paquete ya paso. El que corta es el router. "
                 + (f"<b style='color:#b52a2a'>Le faltan {faltan} cosas.</b>" if faltan
                    else "<b style='color:#1a7f37'>Esta en condiciones de cortar.</b>")
+                # de cuando es esta foto: sin esto, quien acaba de pegar la regla no puede
+                # distinguir "la regla fallo" de "todavia no lo he vuelto a mirar"
+                + _diag_cuando(_d.get("ts", 0))
                 + "</p>" + filas + "</section>")
 
     # --- Reglas de salida: de los eventos que ve el sensor a lo que hay que pegar ----
@@ -14111,6 +14146,7 @@ def cuarentena_page(msg="", es_admin=False):
            ".mot{max-width:380px}"
            ".motn{font-size:11.5px;color:#6b6a66;margin-top:2px}"
            ".rowmeta{font-size:11.5px;color:#6b6a66;margin-top:3px}.muted{color:#9a9a95}"
+           ".diagts{color:#8a8a86;font-weight:400}"
            ".cfb{font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:20px;white-space:nowrap}"
            ".cfb.alta{background:#fdecec;color:#b52a2a;border:1px solid #f3c4c4}"
            ".cfb.sosp{background:#fff7ed;color:#7a4a12;border:1px solid #f2d3ad}"

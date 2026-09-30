@@ -91,7 +91,7 @@ def main():
     tmp = tempfile.mkdtemp()
     d = piezas(DASH, ("ACCIONES_FILE", "ACCIONES_DIAS", "_ACC_LOCK", "cargar_acciones",
                       "contar_accion", "METRICAS_FILE", "cargar_metricas", "_serie",
-                      "_media", "_grafico", "historico_page",
+                      "_media", "tendencia_txt", "_grafico", "historico_page",
                       "GRUPOS_SALIDA", "_CPES_CACHE", "_cpes_de_reporte", "analisis_salida",
                       "DIAG_FILE", "diagnostico_de",
                       "regla_salida", "reglas_salida_texto",

@@ -11908,6 +11908,31 @@ def _serie(dias, n):
         out.append((f, dias.get(f) or {}))
     return out
 
+def tendencia_txt(ult7, prev7, dias_prev, n_dias):
+    """El cuadro de tendencia: (valor, aclaracion).
+
+    Comparar con la semana anterior solo dice algo si esa semana existe. Con `prev7 > 0`
+    bastaba UN dia con veinte eventos para dividir por el, y salia un porcentaje de seis
+    cifras: no es que el abuso se haya multiplicado por tres mil, es que no hay con que
+    comparar. Y un numero asi ni siquiera cabe en el cuadro."""
+    if prev7 > 0 and dias_prev >= 4:
+        var = (ult7 - prev7) / prev7 * 100.0
+        col = "#3a9d5d" if var < 0 else ("#e34948" if var > 0 else "#8a8a86")
+        flecha = "&darr;" if var < 0 else ("&uarr;" if var > 0 else "&rarr;")
+        if abs(var) >= 1000:
+            # pasado este punto el porcentaje deja de leerse: se dice cuantas VECES, que
+            # es como lo diria una persona, y ademas cabe
+            veces = (ult7 / prev7) if var > 0 else (prev7 / ult7 if ult7 else 0)
+            val = "%s &times;%s" % (flecha, format(veces, ",.0f"))
+        else:
+            # espacio duro: con uno normal el "%" se iba solo a la linea siguiente
+            val = "%s %s&nbsp;%%" % (flecha, format(abs(var), ".0f"))
+        return ("<span style='color:%s'>%s</span>" % (col, val),
+                "frente a los 7 dias anteriores")
+    return ("<span style='color:#8a8a86'>&mdash;</span>",
+            "el periodo anterior casi no tiene datos" if n_dias >= 14
+            else "hacen falta 14 dias de datos")
+
 def _media(serie, clave="sal"):
     vals = [int((d or {}).get(clave, 0)) for _f, d in serie]
     return (sum(vals) / len(vals)) if vals else 0.0
@@ -13182,14 +13207,12 @@ def historico_page(dias_n=30):
     ayer = int((serie[-2][1] or {}).get("sal", 0)) if len(serie) > 1 else 0
     ult7 = _media(serie[-7:]) if len(serie) >= 7 else _media(serie)
     prev7 = _media(serie[-14:-7]) if len(serie) >= 14 else 0.0
-    if prev7 > 0:
-        var = (ult7 - prev7) / prev7 * 100.0
-        col = "#3a9d5d" if var < 0 else ("#e34948" if var > 0 else "#8a8a86")
-        flecha = "&darr;" if var < 0 else ("&uarr;" if var > 0 else "&rarr;")
-        var_html = (f"<span style='color:{col};font-weight:700'>{flecha} {abs(var):.0f} %</span>"
-                    f"<div class=kh>media de 7 dias frente a los 7 anteriores</div>")
-    else:
-        var_html = "<span style='color:#8a8a86'>&mdash;</span><div class=kh>hacen falta 14 dias de datos</div>"
+    # Cuantos de los 7 dias anteriores tienen algo. Con `prev7 > 0` bastaba UN dia con
+    # veinte eventos para dividir por el, y salia un porcentaje de seis cifras que no
+    # significa nada: no es que el abuso se haya multiplicado, es que no hay con que
+    # comparar.
+    dias_prev = sum(1 for _f, d in serie[-14:-7] if int((d or {}).get("sal", 0)) > 0)
+    var_val, var_hint = tendencia_txt(ult7, prev7, dias_prev, len(serie))
 
     total = sum(int((d or {}).get("sal", 0)) for _f, d in serie)
     ruido = sum(int((d or {}).get("ruido", 0)) for _f, d in serie)
@@ -13206,7 +13229,7 @@ def historico_page(dias_n=30):
     kpis = ("<div class=kpis>"
             + _kpi(f"{hoy:,}", "ataques salientes hoy", f"ayer: {ayer:,}")
             + _kpi(f"{ult7:,.0f}", "media diaria (7 dias)")
-            + f"<div class=kpi><div class=kv>{var_html}</div><div class=kt>tendencia</div></div>"
+            + _kpi(var_val, "tendencia", var_hint)
             + _kpi(f"{cpes_pico:,}", "CPEs distintos atacando", "maximo en el periodo")
             + _kpi(f"{ruido:,}", "no abusivo", "P2P, chequeos de conectividad: no banean")
             + _kpi(f"{enviados:,}", "puestos en cuarentena", f"liberados: {liberados:,}")
@@ -13419,11 +13442,18 @@ def historico_page(dias_n=30):
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
             "<title>Suricata</title><style>" + BASE_CSS +
             "main{max-width:1100px;padding:20px}a{color:#2a78d6}"
-            ".kpis{display:flex;gap:14px;flex-wrap:wrap;margin:0 0 18px}"
-            ".kpi{flex:1;min-width:150px;background:#fff;border:1px solid #e7e6e2;border-radius:12px;padding:14px 16px}"
-            ".kpi .kv{font-size:26px;font-weight:800;line-height:1.1;color:#33322f}"
+            # rejilla y no flex: con flex, seis cuadros de contenido desigual salian de
+            # anchos distintos y las etiquetas a alturas distintas. auto-fit los reparte
+            # iguales y los recoloca solo al estrechar la ventana.
+            ".kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));"
+            "gap:14px;margin:0 0 18px}"
+            ".kpi{background:#fff;border:1px solid #e7e6e2;border-radius:12px;padding:14px 16px;"
+            "display:flex;flex-direction:column}"
+            # nowrap: un numero largo partido en dos lineas descuadra la fila entera
+            ".kpi .kv{font-size:26px;font-weight:800;line-height:1.1;color:#33322f;white-space:nowrap}"
             ".kpi .kt{font-size:12.5px;color:#52514e;margin-top:4px}"
-            ".kpi .kh{font-size:11.5px;color:#8a8a86;margin-top:2px}"
+            # al fondo, para que las aclaraciones queden a la misma altura en todos
+            ".kpi .kh{font-size:11.5px;color:#8a8a86;margin-top:auto;padding-top:6px}"
             ".rango{display:flex;gap:8px;margin:0 0 12px;flex-wrap:wrap}"
             ".rango a{font:13px system-ui;padding:5px 12px;border:1px solid #d7d6d2;border-radius:20px;"
             "text-decoration:none;color:#52514e;background:#fff}"
@@ -13517,6 +13547,38 @@ def _salud_html():
                   f"<span class='stit'>&mdash; medido hace {hace}s</span></div>"
                   f"<div class='saludb'>{chip_html}</div></div>")
 
+def agrupar_pruebas(pruebas):
+    """Las pruebas guardadas de un CPE, agrupadas por firma y ordenadas por frecuencia.
+
+    Cada entrada: {sid, rev, sig, n, ini, fin, dst, flow}. La ficha sacaba una fila por
+    alerta, asi que una firma que dispara ocho veces la llenaba con ocho filas identicas
+    que solo cambiaban en el flow_id. Lo que decide si se corta a un abonado no es cuantas
+    alertas hay, sino cuantas cosas DISTINTAS le apuntan, y eso era justo lo que tapaba."""
+    gr = {}
+    orden = []
+    for p in (pruebas or []):
+        k = (str(p.get("sid") or "-"), str(p.get("rev") or "-"), p.get("sig", ""))
+        if k not in gr:
+            gr[k] = {"sid": k[0], "rev": k[1], "sig": k[2],
+                     "n": 0, "ini": 0, "fin": 0, "dst": [], "flow": ""}
+            orden.append(k)
+        g = gr[k]
+        g["n"] += 1
+        t = int(p.get("ts") or 0)
+        if t:
+            g["ini"] = min(g["ini"] or t, t)
+            g["fin"] = max(g["fin"], t)
+        d = p.get("rrname") or p.get("dst") or ""
+        # a un dominio no se le pega el puerto: se consulta, no se conecta
+        if d and p.get("dport") and not p.get("rrname"):
+            d = "%s:%s" % (d, p.get("dport"))
+        if d and d not in g["dst"]:
+            g["dst"].append(d)
+        g["flow"] = g["flow"] or str(p.get("flow_id") or "")
+    # por frecuencia, y a igualdad por el orden en que aparecieron: asi dos recargas
+    # seguidas no barajan las filas
+    return sorted((gr[k] for k in orden), key=lambda g: -g["n"])
+
 def ficha_page(ip, embed=False):
     """Ficha de EVIDENCIA por CPE: por que tiene ese riesgo (alertas, coincidencias de
     reputacion con su fuente/CIDR/vigencia, corroboracion independiente y decision)."""
@@ -13553,16 +13615,35 @@ def ficha_page(ip, embed=False):
                 dst = esc(p.get("dst", "")) + ((":" + esc(str(p.get("dport")))) if p.get("dport") else "")
                 act.append("Comunicacion a <span class=mono>" + dst + "</span>")
         act_html = "<br>".join(dict.fromkeys(act)) or "&mdash;"
-        # Alertas
+        # Alertas, agrupadas por FIRMA. Antes salia una fila por alerta: una firma que
+        # dispara ocho veces llenaba la ficha con ocho filas identicas que solo cambiaban
+        # en el flow_id. Lo que decide si se corta a un abonado no es cuantas alertas hay,
+        # sino cuantas cosas DISTINTAS le apuntan, y eso es justo lo que tapaba.
+        _pr = list(c.get("pruebas") or [])
         al = ""
-        for p in (c.get("pruebas") or [])[:8]:
-            al += (f"<tr><td class=mono>{esc(str(p.get('sid') or '-'))}</td>"
-                   f"<td class=mono>{esc(str(p.get('rev') or '-'))}</td>"
-                   f"<td>{esc(p.get('sig', ''))}</td>"
-                   f"<td class=mono>{_fecha(p.get('ts', 0))}</td>"
-                   f"<td class=mono>{esc(str(p.get('flow_id') or '-'))}</td></tr>")
-        al = (f"<table class=fichat><thead><tr><th>SID</th><th>rev</th><th>Firma</th>"
-              f"<th>Fecha</th><th>flow_id</th></tr></thead><tbody>{al}</tbody></table>") if al else "&mdash; (sin alertas guardadas)"
+        for g in agrupar_pruebas(_pr):
+            sid, rev, sig = g["sid"], g["rev"], g["sig"]
+            if g["ini"] and g["fin"] and g["ini"] != g["fin"]:
+                cuando = "%s &rarr; %s" % (_fecha(g["ini"]),
+                                           time.strftime("%H:%M", time.localtime(g["fin"])))
+            else:
+                cuando = _fecha(g["ini"] or g["fin"])
+            _d = [esc(x) for x in g["dst"][:2]]
+            if len(g["dst"]) > 2:
+                _d.append("+%d mas" % (len(g["dst"]) - 2))
+            # el flow_id sigue estando (es con lo que se busca el flujo en EveBox), pero
+            # como referencia de la fila y no como una columna de ocho numeros iguales
+            _ref = (" title='flow_id %s'" % esc(g["flow"])) if g["flow"] else ""
+            al += (f"<tr{_ref}><td>{esc(sig)}"
+                   f"<div class=rowmeta>SID {esc(sid)} &middot; rev {esc(rev)}</div></td>"
+                   f"<td class=num>{g['n']}</td>"
+                   f"<td class=mono>{cuando}</td>"
+                   f"<td class=mono>{'<br>'.join(_d) or '&mdash;'}</td></tr>")
+        _tope = ("<div class=rowmeta>Se guardan hasta 8 alertas por CPE: las veces son las "
+                 "guardadas, no el total.</div>") if len(_pr) >= 8 else ""
+        al = (f"<table class=fichat><thead><tr><th>Firma</th><th class=num>Veces</th>"
+              f"<th>Cuando</th><th>Destino</th></tr></thead><tbody>{al}</tbody></table>"
+              + _tope) if al else "&mdash; (sin alertas guardadas)"
         # Coincidencia + Vigencia (reputacion)
         rep = c.get("reputacion") or []
         if rep:

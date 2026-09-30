@@ -73,6 +73,7 @@ correr "enviar/quitar de cuarentena van por identidad (router, IP)" "$PY" tests/
 correr "insignia de confianza: Confirmado y cuantas pruebas" "$PY" tests/test_insignia_confianza.py
 correr "exclusiones: el alta va en un modal" "$PY" tests/test_exclusiones_modal.py
 correr "ningun dialogo del navegador: todo va por el modal" "$PY" tests/test_sin_dialogos_nativos.py
+correr "la IP del sensor va puesta en los comandos del MikroTik" "$PY" tests/test_ip_sensor.py
 correr "historial de listas negras: cuando entro y cuanto estuvo" "$PY" tests/test_dnsbl_historial.py
 correr "de me listaron a mira a estos abonados" "$PY" tests/test_culpables_listado.py
 correr "ver que hace se despliega en la tabla" "$PY" tests/test_ficha_desplegable.py

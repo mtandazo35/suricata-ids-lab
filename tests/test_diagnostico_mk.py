@@ -36,7 +36,10 @@ def entorno(tablas):
                                 "LIST_GRAD": "suricata-graduada"},
           "mk_conectar": lambda d: type("S", (), {"close": lambda self: None})(),
           "_mk_send": lambda s, w: None,
-          "_mk_reply": lambda s: (True, [], "")}
+          "_mk_reply": lambda s: (True, [], ""),
+          # doble: lo que se comprueba aqui es el diagnostico, no como se averigua
+          # la IP (eso es tests/test_ip_sensor.py)
+          "ip_del_sensor": lambda hacia="": "10.0.0.9"}
     for n in ARBOL.body:
         nom = getattr(n, "name", None)
         if nom in PIEZAS:

@@ -5015,6 +5015,42 @@ def blocklist_rsc(lista=BL_LISTA, ttl="1d"):
         out.append('add list=%s address=%s timeout=%s comment="%s"' % (lista, f["ip"], ttl, com))
     return "\n".join(out) + "\n"
 
+def ip_del_sensor(hacia=""):
+    """La IP de ESTE sensor por la que el router tiene que hablarle.
+
+    No sirve `hostname -I` ni la primera interfaz: estas cajas suelen tener varias (la de
+    gestion, la del tunel, la de la red del cliente) y la buena es la que se usa para
+    llegar A ESE router, que es distinta segun el nodo. Se averigua abriendo un socket UDP
+    hacia el: en UDP `connect` no manda ni un paquete, solo fija la ruta, y `getsockname`
+    dice por donde saldria.
+
+    Si no se puede averiguar se devuelve el hueco de siempre, que al menos se ve que hay
+    que rellenarlo a mano. Poner una IP equivocada seria peor: el espejo apuntaria a otra
+    caja y el sensor se quedaria ciego sin que nada lo dijera."""
+    destinos = [hacia]
+    try:
+        destinos.append((cargar_mk() or {}).get("HOST", ""))
+    except Exception:
+        pass
+    # ultimo recurso: cualquier destino enrutable vale, solo sirve para que el sistema
+    # elija interfaz de salida. 192.0.2.1 es de la red de documentacion (RFC 5737).
+    destinos.append("192.0.2.1")
+    for dst in destinos:
+        if not dst:
+            continue
+        try:
+            sk = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            try:
+                sk.connect((dst, 9))
+                ip = sk.getsockname()[0]
+            finally:
+                sk.close()
+        except OSError:
+            continue
+        if ip and not ip.startswith(("0.", "127.")):
+            return ip
+    return "IP_DEL_SENSOR"
+
 def blocklist_reglas(lista=BL_LISTA):
     """Las reglas. El detalle que decide si esto sirve o rompe clientes es
     connection-state=new: si se corta en raw o sin ese matcher, tambien se tiran las
@@ -5024,8 +5060,9 @@ def blocklist_reglas(lista=BL_LISTA):
         "# 1) que el router se baje la lista solo, cada hora",
         "/system scheduler",
         'add name=suricata-atacantes interval=1h on-event="/tool fetch '
-        'url=\\"http://IP_DEL_SENSOR:PUERTO/blocklist.rsc\\" dst-path=atacantes.rsc; '
-        ':delay 5s; /import atacantes.rsc" comment="Suricata: lista de atacantes"',
+        'url=\\"http://%s:%s/blocklist.rsc\\" dst-path=atacantes.rsc; '
+        ':delay 5s; /import atacantes.rsc" comment="Suricata: lista de atacantes"'
+        % (ip_del_sensor(), CFG.get("PORT", "5637")),
         "",
         "# 2) cortar SOLO las conexiones NUEVAS que entran desde esas IPs.",
         "#    Sin connection-state=new se tiran tambien las respuestas a lo que pidio tu",
@@ -5123,7 +5160,8 @@ def mk_diagnostico(router=None):
         out.append(("falta", "El espejo NO esta enviando",
                     "Sin esto el sensor esta ciego y todo lo demas da igual.",
                     "/tool sniffer set streaming-enabled=yes "
-                    "streaming-server=IP_DEL_SENSOR:37008 filter-stream=yes\n/tool sniffer start"))
+                    "streaming-server=%s:37008 filter-stream=yes\n/tool sniffer start"
+                    % ip_del_sensor(d.get("HOST", ""))))
 
     # 2) las address-lists tienen que tener una regla que las use
     for lista, que in ((d.get("LIST", ""), "cuarentena"),
@@ -10003,6 +10041,7 @@ def update_box():
 
 def documentacion_page(embed=False, pagina=""):
     port = CFG.get("PORT", "5637")
+    ip_sensor = ip_del_sensor()       # para que las lineas se puedan copiar tal cual
     ubox = update_box()
     refresh_meta = "<meta http-equiv=refresh content='15;url=/documentacion#reglas'>" if UPDATE["running"] else ""
     art = f"""<!--CAT:Primeros pasos--><h2>Las pestañas del menu</h2>
@@ -10506,13 +10545,13 @@ en <code>/etc/suricata-report.conf</code>. Se envia cada dia a las 07:30.</li>
 
 <!--CAT:Cuarentena y MikroTik--><h2>Las dos lineas del MikroTik</h2>
 <p>Lo minimo para que este sensor reciba trafico, si ya tienes una <code>address-list</code>
-con las redes de tus abonados (aqui <code>Cliente</code>). Cambia <code>IP_IDS</code> por la
-IP de este servidor:</p>
+con las redes de tus abonados (aqui <code>Cliente</code>). La IP que aparece es la de este
+servidor, asi que se copia tal cual:</p>
 <pre><code>/ip firewall mangle
 add action=sniff-tzsp chain=forward comment=IDS connection-bytes=0-10000 \
-    sniff-target=IP_IDS sniff-target-port=37008 src-address-list=Cliente
+    sniff-target={ip_sensor} sniff-target-port=37008 src-address-list=Cliente
 add action=sniff-tzsp chain=forward comment=IDS connection-bytes=0-10000 \
-    sniff-target=IP_IDS sniff-target-port=37008 dst-address-list=Cliente</code></pre>
+    sniff-target={ip_sensor} sniff-target-port=37008 dst-address-list=Cliente</code></pre>
 <p>Y una tercera que <b>no es opcional</b>, aunque se olvide siempre:</p>
 <pre><code>/ip firewall filter set [find action=fasttrack-connection] src-address-list=!Cliente</code></pre>
 <p>Sin ella, con fasttrack activo mangle deja de ver la conexion en cuanto se establece:
@@ -10708,7 +10747,7 @@ Eso crea una interfaz por router y hace que Suricata capture todas. <b>Este paso
 habilita la captura</b>; sin el, un nodo dado de alta en el panel no se vigila.</li>
 <li><b>En cada MikroTik</b>, apuntar el espejo al sensor (igual que con uno solo):
 <pre><code>/tool sniffer set filter-interface=bridge1 streaming-enabled=yes \
-    streaming-server=IP_DEL_SENSOR:37008
+    streaming-server={ip_sensor}:37008
 /tool sniffer start</code></pre></li>
 <li><b>En Ajustes &rarr; MikroTik</b>, dar de alta cada nodo con su IP, usuario y clave de API,
 y marcar <b>Permitir enviar</b> en los que deban bloquear.</li>
@@ -13824,9 +13863,10 @@ def cuarentena_page(msg="", es_admin=False):
                 "\n\n# --- bloqueo PREVENTIVO: que el router se baje los feeds solo ---\n"
                 "/system scheduler\n"
                 'add name=suricata-destinos interval=1h on-event="/tool fetch '
-                'url=\\\\"http://IP_DEL_SENSOR:PUERTO/destinos.rsc\\\\" '
+                'url=\\\\"http://%s:%s/destinos.rsc\\\\" '
                 'dst-path=destinos.rsc; :delay 5s; /import destinos.rsc" '
-                'comment="Suricata: destinos de mala reputacion"')
+                'comment="Suricata: destinos de mala reputacion"'
+                % (ip_del_sensor(), CFG.get("PORT", "5637")))
         sec_dst = (
             "<div class=seccion><div class=shead><div>"
             "<h2>Destinos de mala reputacion</h2>"

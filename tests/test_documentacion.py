@@ -41,7 +41,10 @@ def render(pagina="", embed=False):
           "PANEL_VERSION": "1.1",
           "LOGDIR": "/var/log/suricata",
           "NUNCA_FILE": "/etc/x", "MK_CONF": "/etc/y",
-          "nav": lambda activa="": "<!--nav-->"}
+          "nav": lambda activa="": "<!--nav-->",
+          # doble: la IP real la prueba tests/test_ip_sensor.py; aqui solo interesa
+          # que la pagina la pinte donde toca
+          "ip_del_sensor": lambda hacia="": "10.0.0.9"}
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "<doc>", "exec"), ns)
     return ns["documentacion_page"](pagina=pagina, embed=embed)
 

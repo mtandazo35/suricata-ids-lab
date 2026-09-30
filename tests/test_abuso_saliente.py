@@ -106,6 +106,8 @@ def main():
                       "ipaddress": __import__("ipaddress"), "re": __import__("re"),
                       "es_mi_cpe": lambda ip: ip.startswith("10."),
                       "nunca_bloquear": lambda ip: False,
+                      "CFG": {"PORT": "5637"},
+                      "ip_del_sensor": lambda hacia="": "10.0.0.9",
                       "FEEDS_META": os.path.join(tmp, "reputation.meta"),
                       "mis_redes": lambda: ["10.0.0.0/8"],
                       "clave_cpe": lambda ip, rid: (rid + "|" + ip) if rid else ip,

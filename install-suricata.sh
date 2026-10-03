@@ -855,6 +855,11 @@ if [ ! -f /etc/suricata-feeds.conf ]; then
 # cosas: la lista masiva de atacantes de aqui arriba y las consultas por IP del panel.
 #ABUSEIPDB_KEY=tu-clave
 #ABUSEIPDB_URL=https://api.abuseipdb.com/api/v2/blacklist?plaintext&limit=10000
+# Groq (analisis con IA): explica la evidencia en lenguaje llano y senala falsos
+# positivos conocidos. NO corta a nadie: lee y recomienda. Se pone desde el panel, en
+# Ajustes -> Reputacion/feeds, que ademas valida la clave y lista los modelos reales.
+#GROQ_API_KEY=tu-clave
+#GROQ_MODEL=
 FCONF
   chmod 600 /etc/suricata-feeds.conf
 fi
@@ -8143,6 +8148,79 @@ def _salida_html(entrada, bl, limpio, esc=None):
             + "<ul style='margin:7px 0 0;padding-left:18px;font-size:12.5px'>" + filas + "</ul>"
             + exp + "</div>")
 
+# --------------------------------------------------------------- Groq (analisis con IA)
+# La clave vive donde las demas: /etc/suricata-feeds.conf, permisos 600, y NUNCA se
+# devuelve a una pagina. Un secreto que se USA no se puede hashear, asi que lo unico que
+# se puede hacer es que no salga de aqui.
+GROQ_URL = "https://api.groq.com/openai/v1"
+
+def groq_key():
+    return _feeds_conf_get("GROQ_API_KEY")
+
+def groq_configurada():
+    return bool(groq_key())
+
+def groq_set(val):
+    return _feeds_conf_set("GROQ_API_KEY", val)
+
+def groq_modelo():
+    """El modelo elegido. Sin valor no se asume ninguno: los nombres cambian con el tiempo
+    y uno inventado falla en la primera consulta, no al guardarlo."""
+    return _feeds_conf_get("GROQ_MODEL")
+
+def groq_set_modelo(val):
+    return _feeds_conf_set("GROQ_MODEL", val)
+
+def groq_modelos(key=""):
+    """Los modelos que esa cuenta tiene de verdad. Lista vacia si no se pudo preguntar."""
+    k = (key or groq_key()).strip()
+    if not k:
+        return []
+    req = urllib.request.Request(GROQ_URL + "/models",
+                                 headers={"Authorization": "Bearer " + k,
+                                          "User-Agent": "suricata-panel/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            d = json.load(r)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return []
+    out = []
+    for m in (d.get("data") or []):
+        mid = str(m.get("id") or "").strip()
+        if mid:
+            out.append(mid)
+    return sorted(out)
+
+def groq_probar(key):
+    """Valida una clave ANTES de guardarla. (True|False|None, mensaje, modelos).
+
+    Se pregunta por la lista de modelos y no por una respuesta del chat: es barato, no
+    gasta tokens y de paso dice que modelos tiene la cuenta, que es lo que hace falta
+    para no escribir el nombre a ciegas."""
+    key = (key or "").strip()
+    if not key:
+        return False, "vacia", []
+    req = urllib.request.Request(GROQ_URL + "/models",
+                                 headers={"Authorization": "Bearer " + key,
+                                          "User-Agent": "suricata-panel/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            d = json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return False, "Groq rechazo la clave (HTTP %d)" % e.code, []
+        if e.code == 429:
+            return True, "valida (ahora mismo esta limitada por cuota)", []
+        return None, "no se pudo comprobar (HTTP %d)" % e.code, []
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None, "no se pudo comprobar ahora (sin red?)", []
+    except ValueError:
+        return None, "respuesta ilegible de Groq", []
+    ms = sorted(str(m.get("id") or "") for m in (d.get("data") or []) if m.get("id"))
+    if not ms:
+        return None, "Groq contesto pero no listo ningun modelo", []
+    return True, "valida (%d modelos disponibles)" % len(ms), ms
+
 def aidb_probar(key):
     """Valida una clave ANTES de guardarla. (True|False|None, mensaje)."""
     key = (key or "").strip()
@@ -9304,6 +9382,32 @@ def perfil_page(msg="", ok=False, edit_user=None):
         meta = cargar_feeds_meta()
         srcs = meta.get("sources", {})
         auth_ok = feeds_auth_configurada()
+        def _groq_modelo_campo():
+            """El modelo, elegido de los que la cuenta tiene de verdad.
+
+            Escribirlo a mano es pedir un error que no aparece hasta la primera consulta:
+            los nombres de los modelos cambian con el tiempo y Groq retira los viejos. Si
+            no se puede preguntar la lista (sin clave aun, o sin red), se deja un campo de
+            texto en vez de dejar al usuario sin poder configurarlo."""
+            if not groq_configurada():
+                return ""
+            act = groq_modelo()
+            ms = groq_modelos()
+            if not ms:
+                return ("<div class=field><label>Modelo</label>"
+                        "<input name=groqmodel value='" + esc(act) + "' "
+                        "placeholder='nombre del modelo'>"
+                        "<div class=hint>No se pudo consultar la lista de modelos ahora "
+                        "mismo; escribelo a mano.</div></div>")
+            ops = "".join("<option value='%s'%s>%s</option>"
+                          % (esc(m), " selected" if m == act else "", esc(m)) for m in ms)
+            return ("<div class=field><label>Modelo</label><select name=groqmodel>"
+                    + ("<option value=''>(elige uno)</option>" if not act else "")
+                    + ops + "</select>"
+                    "<div class=hint>Los que tiene tu cuenta ahora mismo. Groq retira "
+                    "modelos de vez en cuando: si el elegido desaparece, el analisis se "
+                    "apaga solo y aqui se vuelve a elegir.</div></div>")
+
         def _estb(e):
             c = {"valido": "#1a7f37", "vacio": "#e58a00", "error": "#b52a2a",
                  "sin-clave": "#7a4a12", "caducado": "#b52a2a"}.get(e, "#8a8a86")
@@ -9353,6 +9457,26 @@ def perfil_page(msg="", ok=False, edit_user=None):
             f"ataques se le denuncian a una IP. El plan gratuito da <b>{AIDB_CUOTA:,}</b> consultas al dia. "
             "Se valida al guardar. Para <b>quitarla</b>, escribe <code>BORRAR</code>.</div></div>"
             "<div class=actions><button class=primary type=submit>Guardar clave de AbuseIPDB</button></div></form>"
+            # --- Groq -------------------------------------------------------------------
+            "<hr style='border:0;border-top:1px solid #f0efec;margin:16px 0'>"
+            "<form method=post action='/feeds/groq'>"
+            "<div class=field><label>Clave de Groq (analisis con IA) "
+            + ("<span style='color:#3a9d5d'>(configurada)</span>" if groq_configurada()
+               else "<span style='color:#b06a00'>(sin configurar)</span>")
+            + "</label>"
+            "<input type=password name=groqkey autocomplete=new-password placeholder='"
+            + ("dejar vacio para conservar" if groq_configurada()
+               else "pega tu clave de Groq") + "'>"
+            "<div class=hint>Se saca en <a href='https://console.groq.com/keys' target=_blank "
+            "rel=noopener>console.groq.com</a>. Sirve para que el panel <b>explique la "
+            "evidencia en lenguaje llano</b> y senale falsos positivos conocidos. "
+            "<b>La IA no corta a nadie</b>: lee y recomienda, el corte lo sigue decidiendo "
+            "una persona o la politica que ya tienes. Se valida al guardar y se guarda solo "
+            "en este servidor (permisos 600); <b>no se vuelve a mostrar</b>. Para "
+            "<b>quitarla</b>, escribe <code>BORRAR</code>.</div></div>"
+            + _groq_modelo_campo()
+            + "<div class=actions><button class=primary type=submit>Guardar clave de Groq"
+            "</button></div></form>"
             "<form method=post action='/feeds/reportar'>"
             "<label class=chk><input type=checkbox name=reportar"
             + (" checked" if aidb_reportar_activo() else "")
@@ -10854,6 +10978,20 @@ guardan <b>solo-escritura</b> en <code>/etc/suricata-feeds.conf</code> (permisos
 mostrar) y hay un <b>validador</b> que comprueba cada clave antes de guardarla. Feodo, CINS y Spamhaus
 no necesitan clave. La tabla muestra el estado por fuente (vigente/vacia/caducada) y un boton para
 actualizar los feeds al momento.</p>
+<h3>Analisis con IA (Groq)</h3>
+<p>En la misma tarjeta de Ajustes se pega la <b>clave de Groq</b>. Sirve para que el panel
+<b>explique la evidencia en lenguaje llano</b> &mdash; estos informes los lee gente que no es de
+redes &mdash; y para senalar <b>falsos positivos conocidos</b>. <b>La IA no corta a nadie</b>: lee y
+recomienda; el corte lo sigue decidiendo una persona o la politica con sus umbrales medibles.</p>
+<p>La clave se guarda igual que las demas: <b>solo-escritura</b> en <code>/etc/suricata-feeds.conf</code>
+(permisos 600) y no se vuelve a mostrar. Al guardarla se <b>valida contra Groq</b>, y de paso se trae
+<b>la lista de modelos que tiene tu cuenta</b>: el modelo se elige de ahi en vez de escribirlo a mano.
+Esto no es un capricho &mdash; Groq retira modelos cada cierto tiempo, y un nombre que ya no existe
+no falla al guardarlo sino en la primera consulta, lejos de donde se configuro. Si el modelo elegido
+desaparece de la cuenta, el panel lo deja en blanco y hay que volver a elegir.</p>
+<p><b>Que se le manda y que no.</b> Solo la evidencia tecnica: nombres de firma, dominios consultados,
+puertos, recuentos y categorias. <b>Nunca</b> la IP del abonado, su nombre ni la identidad del router.
+La IA no necesita saber <b>quien</b> es para decir <b>que</b> es, y esos datos saldrian de tu red.</p>
 <p>La fuente <code>abuseipdb</code> es la <b>lista masiva</b> de atacantes denunciados por la comunidad:
 se baja como mucho <b>cada 6 horas</b> (el plan gratuito permite 5 descargas al dia) y trae hasta
 10.000 IPs de <b>confianza 100&nbsp;%</b> &mdash; acotar ese umbral es de pago. Si un dia se agota la
@@ -15169,6 +15307,42 @@ class H(BaseHTTPRequestHandler):
                 return self._html(perfil_page("Clave de AbuseIPDB VALIDA y guardada (solo en este servidor).", ok=True))
             bitacora("CONFIG-ABUSEIPDB", f"guardada sin validar ({det})")
             return self._html(perfil_page(f"Clave guardada, pero {det}.", ok=True))
+        if ruta == "/feeds/groq":
+            if not self._admin():
+                return self._deny()
+            k = q.get("groqkey", [""])[0]
+            mod = (q.get("groqmodel", [""])[0] or "").strip()
+            if k.strip() == "BORRAR":
+                groq_set(""); groq_set_modelo("")
+                bitacora("CONFIG-GROQ", "borrada")
+                return self._html(perfil_page("Clave de Groq borrada.", ok=True))
+            if not k.strip():
+                # sin clave nueva, pero puede venir solo un cambio de modelo
+                if mod and groq_configurada():
+                    groq_set_modelo(mod)
+                    bitacora("CONFIG-GROQ", "modelo " + mod)
+                    return self._html(perfil_page("Modelo de Groq guardado: " + mod, ok=True))
+                return self._html(perfil_page("Sin cambios en la clave de Groq.", ok=True))
+            estado, det, modelos = groq_probar(k)     # validar ANTES de guardar
+            if estado is False:
+                bitacora("CONFIG-GROQ", "rechazada (%s)" % det)
+                return self._html(perfil_page(
+                    "No se guardo: la clave no es valida — %s." % det, ok=False))
+            groq_set(k)
+            # si el modelo elegido ya no existe, no se deja puesto: fallaria en la primera
+            # consulta y el error saldria lejos de aqui
+            if mod and (not modelos or mod in modelos):
+                groq_set_modelo(mod)
+            elif groq_modelo() and modelos and groq_modelo() not in modelos:
+                groq_set_modelo("")
+            if estado is True:
+                bitacora("CONFIG-GROQ", "validada y guardada")
+                return self._html(perfil_page(
+                    "Clave de Groq VALIDA y guardada (solo en este servidor). %s"
+                    % ("Elige el modelo abajo." if not groq_modelo() else
+                       "Modelo: " + groq_modelo()), ok=True))
+            bitacora("CONFIG-GROQ", "guardada sin validar (%s)" % det)
+            return self._html(perfil_page("Clave guardada, pero %s." % det, ok=True))
         if ruta == "/feeds/actualizar":
             if not self._admin():
                 return self._deny()

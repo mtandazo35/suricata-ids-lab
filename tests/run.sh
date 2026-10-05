@@ -77,6 +77,7 @@ correr "la IP del sensor va puesta en los comandos del MikroTik" "$PY" tests/tes
 correr "ficha por firma y cuadros que no se descuadran" "$PY" tests/test_ficha_kpis.py
 correr "clave de Groq: se valida antes de guardar y no sale de aqui" "$PY" tests/test_groq_ajustes.py
 correr "lectura con IA: sin datos del abonado y fallo suave" "$PY" tests/test_ia_lectura.py
+correr "plan de bloqueo: la IA ordena lo medido y no inventa puertos" "$PY" tests/test_plan_bloqueo.py
 correr "historial de listas negras: cuando entro y cuanto estuvo" "$PY" tests/test_dnsbl_historial.py
 correr "de me listaron a mira a estos abonados" "$PY" tests/test_culpables_listado.py
 correr "ver que hace se despliega en la tabla" "$PY" tests/test_ficha_desplegable.py

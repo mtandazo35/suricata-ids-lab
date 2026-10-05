@@ -38,7 +38,11 @@ def check(d, c, e=""):
 
 
 def entorno():
-    ns = {"os": os, "time": time, "html": __import__("html")}
+    # doble vacio: aqui se prueba el bloque de salida. Que devuelva "" comprueba de
+    # paso que ese bloque se ve igual aunque el plan de bloqueo no este disponible
+    # (sin IA, sin metricas o sin red).
+    ns = {"os": os, "time": time, "html": __import__("html"),
+          "plan_bloqueo_html": lambda bl, limpio, esc=None: ""}
     for n in ARBOL.body:
         nom = getattr(n, "name", None) or (
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")

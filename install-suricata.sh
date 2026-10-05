@@ -8096,6 +8096,248 @@ _SAL_COLOR = {"espera": ("#a15c12", "#fdf3e3", "#f0ddb8"),
 _SAL_POL = {"sola": "caduca sola", "formulario": "hay que pedirla",
             "pago": "salida inmediata de pago", "muerta": "servicio cerrado"}
 
+# Puertos que todo el mundo reconoce, para poder decir QUE es en vez de solo el numero.
+# No es una lista exhaustiva: lo que no este sale como "puerto 1234/tcp" y ya.
+PUERTOS_NOMBRE = {
+    "25/tcp": "correo saliente (SMTP)", "465/tcp": "correo saliente (SMTP sobre TLS)",
+    "587/tcp": "correo saliente (envio autenticado)", "22/tcp": "SSH",
+    "23/tcp": "Telnet", "3389/tcp": "escritorio remoto (RDP)",
+    "445/tcp": "comparticion de archivos (SMB)", "1433/tcp": "SQL Server",
+    "3306/tcp": "MySQL", "5900/tcp": "VNC", "53/udp": "DNS",
+    "123/udp": "NTP", "161/udp": "SNMP", "1900/udp": "SSDP", "19/udp": "chargen",
+}
+
+def perfil_abuso(dias, n=7):
+    """Por donde sale el abuso: puertos de destino y categorias de los ultimos n dias.
+
+    Esto es MEDICION, no opinion: sale de lo que el sensor conto. Es la lista cerrada de
+    la que luego se puede elegir que cerrar; nada que no este aqui deberia proponerse."""
+    corte = time.strftime("%Y-%m-%d", time.localtime(time.time() - n * 86400))
+    puertos, cats = {}, {}
+    total = 0
+    for dia, d in sorted((dias or {}).items()):
+        if dia < corte or not isinstance(d, dict):
+            continue
+        total += int(d.get("sal", 0) or 0)
+        for k, v in (d.get("puertos") or {}).items():
+            puertos[k] = puertos.get(k, 0) + int(v or 0)
+        for k, v in (d.get("cats") or {}).items():
+            cats[k] = cats.get(k, 0) + int(v or 0)
+    tp = sorted(puertos.items(), key=lambda kv: -kv[1])[:10]
+    suma = sum(puertos.values()) or 1
+    return {
+        "dias": n, "alertas": total,
+        "puertos": [{"puerto": k, "n": v, "pct": round(v * 100.0 / suma, 1),
+                     "que_es": PUERTOS_NOMBRE.get(k, "")} for k, v in tp],
+        "categorias": sorted(cats.items(), key=lambda kv: -kv[1])[:6],
+    }
+
+def reglas_puertos(puertos, lista):
+    """Las lineas de MikroTik para cerrar esos puertos de salida.
+
+    Van contra la address-list de los abonados que ya estan fichados, no contra todo el
+    mundo: cerrar el 25 a TODA la red es una decision de negocio (hay clientes que mandan
+    correo de verdad) y no se toma desde aqui por su cuenta. Quien quiera el corte general
+    quita el src-address-list y lo sabe."""
+    if not puertos:
+        return ""
+    out = ["/ip firewall filter"]
+    for p in puertos:
+        try:
+            num, _, proto = str(p).partition("/")
+            num = int(num)
+        except (TypeError, ValueError):
+            continue
+        proto = (proto or "tcp").lower()
+        if proto not in ("tcp", "udp"):
+            continue
+        que = PUERTOS_NOMBRE.get("%d/%s" % (num, proto), "")
+        out.append('add chain=forward src-address-list=%s protocol=%s dst-port=%d '
+                   'action=drop comment="Suricata: salida %d/%s%s"'
+                   % (ros_lista(lista), proto, num, num, proto,
+                      (" - " + que) if que else ""))
+    return "\n".join(out) if len(out) > 1 else ""
+
+IA_PLAN_SISTEMA = (
+    "Eres un analista de un proveedor de internet cuyas IPs publicas han acabado en listas "
+    "negras porque algunos abonados abusan. Te dan el abuso MEDIDO por puerto de destino y "
+    "en que listas esta el proveedor. Responde SOLO un objeto JSON con: "
+    "orden (lista de puertos, en el formato exacto en que te los dieron, del que mas urge "
+    "cerrar al que menos; SOLO puertos de los que te han dado, ninguno mas), "
+    "motivo (objeto: puerto -> una frase en castellano llano explicando por que cerrarlo y "
+    "que riesgo tiene cerrarlo para un cliente normal), "
+    "resumen (2 o 3 frases en castellano llano, para alguien que NO es de redes, "
+    "sin jerga ni siglas sin explicar, diciendo que conviene hacer primero y que se "
+    "espera conseguir con ello). "
+    "No inventes puertos ni direcciones IP: si algo no esta en los datos, no existe."
+)
+
+def ia_plan_bloqueo(perfil, listas):
+    """Orden y explicacion del plan de bloqueo. Devuelve dict o None.
+
+    Lo que devuelve el modelo se FILTRA contra lo medido: cualquier puerto que no estuviera
+    en los datos se tira. Un puerto inventado aqui no es un detalle cosmetico: es una regla
+    de firewall que alguien va a pegar, y cortaria trafico de abonados que no han hecho
+    nada."""
+    if not ia_activa():
+        return None
+    validos = [p["puerto"] for p in (perfil.get("puertos") or [])]
+    if not validos:
+        return None
+    datos = {"dias_mirados": perfil.get("dias"),
+             "alertas_de_abuso": perfil.get("alertas"),
+             "puertos_medidos": perfil.get("puertos"),
+             "categorias": [{"categoria": a, "n": b} for a, b in (perfil.get("categorias") or [])],
+             "listas_negras_que_nos_tienen": [str(x)[:40] for x in (listas or [])][:10]}
+    datos = json.loads(_RE_IP.sub("(ip)", json.dumps(datos, ensure_ascii=False)))
+    modelo = groq_modelo()
+    h = _ia_huella(datos, modelo + "|plan")
+    with _IA_LOCK:
+        cache = _ia_cache()
+        if h in cache:
+            return cache[h]
+        est = _ia_estado()
+        if int(est.get("gastadas", 0)) >= IA_CUOTA:
+            return None
+        est["gastadas"] = int(est.get("gastadas", 0)) + 1
+        _ia_guardar_estado(est)
+    cuerpo = json.dumps({
+        "model": modelo, "temperature": 0.2, "max_tokens": 700,
+        "response_format": {"type": "json_object"},
+        "messages": [{"role": "system", "content": IA_PLAN_SISTEMA},
+                     {"role": "user", "content": json.dumps(datos, ensure_ascii=False)}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        GROQ_URL + "/chat/completions", data=cuerpo,
+        headers={"Authorization": "Bearer " + groq_key(),
+                 "Content-Type": "application/json",
+                 "User-Agent": "suricata-panel/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=IA_TIMEOUT) as r:
+            resp = json.load(r)
+        txt = (((resp.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    except urllib.error.HTTPError as _e:
+        _ia_apuntar(False, "Groq respondio HTTP %s" % getattr(_e, "code", "?"))
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        _ia_apuntar(False, "no se pudo llegar a Groq (red o timeout)")
+        return None
+    except (ValueError, IndexError, AttributeError, TypeError):
+        _ia_apuntar(False, "respuesta de Groq ilegible")
+        return None
+    try:
+        d = json.loads(txt)
+    except ValueError:
+        _ia_apuntar(False, "el modelo no devolvio JSON")
+        return None
+    if not isinstance(d, dict):
+        _ia_apuntar(False, "el modelo no devolvio un objeto")
+        return None
+    # EL FILTRO: solo sobreviven los puertos que se midieron, y sin repetir
+    orden, vistos = [], set()
+    for p in (d.get("orden") or []):
+        p = str(p).strip()
+        if p in validos and p not in vistos:
+            orden.append(p)
+            vistos.add(p)
+    # lo medido que el modelo no nombro va detras, para no perderlo de vista
+    orden += [p for p in validos if p not in vistos]
+    mot = {}
+    for k, v in (d.get("motivo") or {}).items():
+        if str(k).strip() in validos:
+            mot[str(k).strip()] = str(v)[:300]
+    out = {"orden": orden, "motivo": mot,
+           "resumen": str(d.get("resumen", ""))[:800],
+           "inventados": sorted(set(str(p).strip() for p in (d.get("orden") or []))
+                                - set(validos)),
+           "modelo": modelo, "ts": int(time.time())}
+    if not out["resumen"]:
+        _ia_apuntar(False, "el modelo contesto sin resumen")
+        return None
+    with _IA_LOCK:
+        cache = _ia_cache()
+        cache[h] = out
+        _ia_guardar_cache(cache)
+    _ia_apuntar(True)
+    return out
+
+def plan_bloqueo_html(bl, limpio, esc=None):
+    """Que cerrar para dejar de abusar, y por tanto para poder salir de las listas.
+
+    El orden importa: primero lo que se ha MEDIDO (puertos y cuanto pesa cada uno), y la
+    opinion de la IA despues y marcada como tal. Si la IA no esta o falla, este apartado
+    sigue sirviendo: la tabla y las reglas salen igual, porque salen de la medicion."""
+    esc = esc or html.escape
+    perfil = perfil_abuso(cargar_metricas())
+    if not perfil["puertos"]:
+        return ""
+    listas = [x.get("zona") or x.get("nombre") or ""
+              for x in ((bl or {}).get("listas") or [])]
+    plan = None
+    try:
+        plan = ia_plan_bloqueo(perfil, listas)
+    except Exception as _e:
+        sys.stderr.write("plan de bloqueo ia: %s\n" % _e)
+
+    orden = (plan or {}).get("orden") or [p["puerto"] for p in perfil["puertos"]]
+    por_puerto = {p["puerto"]: p for p in perfil["puertos"]}
+    filas = ""
+    for i, pk in enumerate(orden, 1):
+        p = por_puerto.get(pk)
+        if not p:
+            continue
+        mot = (plan or {}).get("motivo", {}).get(pk, "")
+        filas += ("<tr><td class=num>%d</td><td class=mono>%s</td><td>%s</td>"
+                  "<td class=num>%s</td><td class=num>%s&nbsp;%%</td><td>%s</td></tr>"
+                  % (i, esc(pk), esc(p["que_es"] or "&mdash;"), format(p["n"], ","),
+                     p["pct"], esc(mot) or "&mdash;"))
+
+    cab = ("<h3 style='margin:16px 0 4px;font-size:14px'>Que bloquear para dejar de "
+           "abusar</h3>"
+           "<p class=hint style='margin:0 0 8px'>Por aqui sale el abuso de los ultimos "
+           "%d dias, medido por el sensor. "
+           "<b>Salir de una lista negra empieza por dejar de abusar</b>: "
+           "pedir la salida con el abuso en marcha vuelve a listarte, y "
+           "algunas listas castigan la reincidencia.</p>" % perfil["dias"])
+
+    ia = ""
+    if plan:
+        ia = ("<div style='background:#f3f7fd;border:1px solid #d8e5f7;border-radius:8px;"
+              "padding:10px 12px;margin:0 0 10px'>"
+              "<b>Lectura de la IA:</b> " + esc(plan["resumen"])
+              + "<div class=hint style='margin-top:6px'>Orden sugerido con "
+              + esc(plan.get("modelo", "")) + ". <b>Es una opinion sobre lo medido</b>, no "
+              "una medicion: los puertos y los numeros de la tabla salen del sensor, no "
+              "del modelo."
+              + (" Se descartaron %d puerto(s) que el modelo nombro y no estaban en los "
+                 "datos." % len(plan["inventados"]) if plan.get("inventados") else "")
+              + "</div></div>")
+
+    reglas = reglas_puertos(orden[:5], lista_de_categoria("otros"))
+    pre = ""
+    if reglas:
+        pre = ("<details style='margin-top:8px'><summary style='cursor:pointer;"
+               "font-weight:600'>Reglas para el MikroTik (los 5 primeros)</summary>"
+               "<p class=hint style='margin:6px 0 4px'>Cortan la salida de esos puertos "
+               "<b>solo a los abonados ya fichados</b>, no a toda la red: cerrar el correo "
+               "saliente a todo el mundo es una decision de negocio y no se toma desde "
+               "aqui. Para el corte general, quita el <code>src-address-list</code>.</p>"
+               "<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;"
+               "padding:10px;overflow-x:auto;font-size:12px'>" + esc(reglas) + "</pre>"
+               "</details>")
+
+    pasos = ("<div class=hint style='margin-top:8px'><b>Y despues:</b> con el abuso "
+             "cortado, los dias limpios empiezan a contar solos (llevas <b>%d</b>) y "
+             "arriba aparece cuando se puede pedir la salida de cada lista y con que "
+             "pruebas.</div>" % int(limpio or 0))
+
+    return (cab + ia
+            + "<table class=fichat><thead><tr><th class=num>#</th><th>Puerto</th>"
+              "<th>Que es</th><th class=num>Alertas</th><th class=num>Peso</th>"
+              "<th>Por que cerrarlo</th></tr></thead><tbody>"
+            + (filas or "<tr><td colspan=6 class=hint>Sin abuso medido.</td></tr>")
+            + "</tbody></table>" + pre + pasos)
+
 def _salida_html(entrada, bl, limpio, esc=None):
     """Que hacer para salir de las listas en las que esta esta entrada.
 
@@ -8127,6 +8369,8 @@ def _salida_html(entrada, bl, limpio, esc=None):
         filas += (f"<li><b>{esc(x['nombre'])}</b> &mdash; {esc(pol)}{enl}"
                   f"<div class=hint>{esc(x['nota'])}</div></li>")
 
+    # que bloquear va DENTRO del bloque de salida: son la misma tarea, en orden
+    plan = plan_bloqueo_html(bl, limpio, esc)
     exp = ""
     if est["estado"] == "pedir":
         texto = dnsbl_expediente(entrada, bl, est, tend)
@@ -8146,7 +8390,7 @@ def _salida_html(entrada, bl, limpio, esc=None):
             f"<div class=hint style='margin-top:3px'>{esc(est['detalle'])}</div>"
             + tnd
             + "<ul style='margin:7px 0 0;padding-left:18px;font-size:12.5px'>" + filas + "</ul>"
-            + exp + "</div>")
+            + exp + plan + "</div>")
 
 # --------------------------------------------------------------- Groq (analisis con IA)
 # La clave vive donde las demas: /etc/suricata-feeds.conf, permisos 600, y NUNCA se

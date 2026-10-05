@@ -8221,6 +8221,182 @@ def groq_probar(key):
         return None, "Groq contesto pero no listo ningun modelo", []
     return True, "valida (%d modelos disponibles)" % len(ms), ms
 
+IA_CACHE = "/var/log/suricata-ia-cache.json"
+IA_ESTADO = "/var/log/suricata-ia-estado.json"
+IA_CUOTA = 300          # consultas al dia: tope duro, para que un bucle no vacie la cuenta
+IA_TIMEOUT = 12         # la ficha la abre una persona esperando: mas de esto no se aguanta
+IA_CACHE_MAX = 400
+_IA_LOCK = threading.RLock()
+_RE_IP = re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
+
+def ia_activa():
+    """Hay con que preguntar? Sin clave o sin modelo, el panel se comporta como siempre."""
+    return bool(groq_key() and groq_modelo())
+
+def _ia_estado():
+    try:
+        d = json.load(open(IA_ESTADO, encoding="utf-8"))
+    except (OSError, ValueError):
+        d = {}
+    hoy = time.strftime("%Y-%m-%d")
+    if d.get("dia") != hoy:
+        d = {"dia": hoy, "gastadas": 0}
+    return d
+
+def _ia_guardar_estado(d):
+    try:
+        tmp = "%s.%d.tmp" % (IA_ESTADO, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, IA_ESTADO)
+    except OSError:
+        pass
+
+def ia_restantes():
+    return max(0, IA_CUOTA - int(_ia_estado().get("gastadas", 0)))
+
+def ia_datos(c):
+    """Lo que se le manda al modelo. SIN una sola direccion IP.
+
+    La IA no necesita saber QUIEN es para decir QUE es. Una IP de abonado identifica a una
+    persona real y, si sale de la red, ya salio: no hay forma de recogerla. Tampoco va el
+    nombre del cliente, su MAC ni el router. Se manda lo que describe el COMPORTAMIENTO:
+    nombres de firma, dominios consultados, puertos de destino, cuantas veces, y de que
+    fuentes de reputacion viene la coincidencia."""
+    pruebas = c.get("pruebas") or []
+    firmas, dominios, puertos = [], [], []
+    for p in pruebas:
+        f = (p.get("sig") or "").strip()
+        if f and f not in firmas:
+            firmas.append(f[:120])
+        d = (p.get("rrname") or "").strip().lower().rstrip(".")
+        if d and d not in dominios:
+            dominios.append(d[:80])
+        try:
+            dp = int(p.get("dport") or 0)
+        except (TypeError, ValueError):
+            dp = 0
+        if dp and dp not in puertos:
+            puertos.append(dp)
+    fuentes = []
+    for r in (c.get("reputacion") or []):
+        par = (r.get("fuente", ""), r.get("categoria", ""))
+        if par not in fuentes:
+            fuentes.append(par)
+    d = {
+        "categoria": c.get("banda", ""),
+        "firmas": firmas[:8],
+        "dominios": dominios[:8],
+        "puertos_destino": sorted(puertos)[:8],
+        "alertas_totales": int(c.get("total_alertas", 0) or 0),
+        "destinos_distintos": int(c.get("destinos", 0) or 0),
+        "evidencias_independientes": [str(e)[:120] for e in (c.get("evidencias") or [])][:6],
+        "reputacion": [{"fuente": a[:40], "categoria": b[:40]} for a, b in fuentes[:6]],
+    }
+    # cinturon y tirantes: si algo se colo con pinta de IP, fuera. Es mas barato que
+    # confiar en que ningun campo nuevo traiga una el dia de manana.
+    return json.loads(_RE_IP.sub("(ip)", json.dumps(d, ensure_ascii=False)))
+
+def _ia_huella(datos, modelo):
+    return _hashlib.sha256(
+        (modelo + "|" + json.dumps(datos, sort_keys=True, ensure_ascii=False)
+         ).encode("utf-8")).hexdigest()[:32]
+
+def _ia_cache():
+    try:
+        d = json.load(open(IA_CACHE, encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+def _ia_guardar_cache(c):
+    try:
+        if len(c) > IA_CACHE_MAX:      # se queda con lo mas reciente
+            c = dict(sorted(c.items(), key=lambda kv: -(kv[1] or {}).get("ts", 0))[:IA_CACHE_MAX])
+        tmp = "%s.%d.tmp" % (IA_CACHE, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(c, f, ensure_ascii=False)
+        os.replace(tmp, IA_CACHE)
+    except OSError:
+        pass
+
+IA_SISTEMA = (
+    "Eres un analista de seguridad de un proveedor de internet. Te dan la evidencia que un "
+    "IDS reunio sobre un equipo de un abonado, SIN datos personales. Responde SOLO un objeto "
+    "JSON con estas claves: veredicto (uno de: infectado, sospechoso, falso_positivo), "
+    "explicacion (2 o 3 frases en castellano llano, para alguien que NO es de redes, "
+    "sin jerga ni siglas sin explicar), "
+    "accion (que conviene hacer, una frase), motivo_falso_positivo "
+    "(si aplica, por que esa firma suele saltar sin que haya infeccion; si no aplica, cadena "
+    "vacia). No inventes datos que no esten en la evidencia."
+)
+
+def ia_preguntar(c):
+    """Lectura de la evidencia de un CPE. Devuelve dict o None.
+
+    Falla suave SIEMPRE: sin clave, sin modelo, sin cuota, sin red o con una respuesta
+    ilegible devuelve None y la ficha se ve exactamente igual que sin IA. Esto es un extra
+    que explica; no puede llevarse por delante la pagina donde se decide cortarle el
+    internet a alguien."""
+    if not ia_activa():
+        return None
+    modelo = groq_modelo()
+    datos = ia_datos(c)
+    if not (datos.get("firmas") or datos.get("dominios")):
+        return None                      # sin nada que leer, no se gasta una consulta
+    h = _ia_huella(datos, modelo)
+    with _IA_LOCK:
+        cache = _ia_cache()
+        if h in cache:
+            return cache[h]
+        est = _ia_estado()
+        if int(est.get("gastadas", 0)) >= IA_CUOTA:
+            return None
+        est["gastadas"] = int(est.get("gastadas", 0)) + 1
+        _ia_guardar_estado(est)          # se apunta ANTES: si falla, ya se gasto el intento
+    cuerpo = json.dumps({
+        "model": modelo,
+        "temperature": 0.2,
+        "max_tokens": 400,
+        "response_format": {"type": "json_object"},
+        "messages": [{"role": "system", "content": IA_SISTEMA},
+                     {"role": "user", "content": json.dumps(datos, ensure_ascii=False)}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        GROQ_URL + "/chat/completions", data=cuerpo,
+        headers={"Authorization": "Bearer " + groq_key(),
+                 "Content-Type": "application/json",
+                 "User-Agent": "suricata-panel/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=IA_TIMEOUT) as r:
+            resp = json.load(r)
+        txt = ((resp.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError,
+            ValueError, IndexError, AttributeError, TypeError):
+        return None
+    txt = txt.strip()
+    if txt.startswith("```"):            # algunos modelos devuelven el JSON en un bloque
+        txt = txt.strip("`")
+        txt = txt.split("\n", 1)[1] if "\n" in txt else txt
+    try:
+        d = json.loads(txt)
+    except ValueError:
+        return None
+    if not isinstance(d, dict):
+        return None
+    out = {"veredicto": str(d.get("veredicto", ""))[:40],
+           "explicacion": str(d.get("explicacion", ""))[:800],
+           "accion": str(d.get("accion", ""))[:300],
+           "fp": str(d.get("motivo_falso_positivo", ""))[:400],
+           "modelo": modelo, "ts": int(time.time())}
+    if not out["explicacion"]:
+        return None
+    with _IA_LOCK:
+        cache = _ia_cache()
+        cache[h] = out
+        _ia_guardar_cache(cache)
+    return out
+
 def aidb_probar(key):
     """Valida una clave ANTES de guardarla. (True|False|None, mensaje)."""
     key = (key or "").strip()
@@ -13848,6 +14024,35 @@ def ficha_page(ip, embed=False):
                         "corrobore antes de cortarle")
         def _row(k, v):
             return f"<tr><th>{k}</th><td>{v}</td></tr>"
+        # Lectura de la IA: va DESPUES de la evidencia y ANTES de la decision, que es el
+        # orden en que se mira. Lo que devuelve el modelo es TEXTO para una persona: se
+        # escapa entero y no dispara ninguna accion. Si no hay clave, no hay cuota o Groq
+        # no contesta, esta fila simplemente no aparece y la ficha queda como siempre.
+        _ia = None
+        try:
+            _ia = ia_preguntar(c)
+        except Exception as _e:
+            sys.stderr.write("lectura ia: %s\n" % _e)
+        ia_html = ""
+        if _ia:
+            _vcol = {"infectado": "#b52a2a", "sospechoso": "#7a4a12",
+                     "falso_positivo": "#1a7f37"}.get(_ia.get("veredicto", ""), "#52514e")
+            _vtxt = {"infectado": "Parece infectado de verdad",
+                     "sospechoso": "Sospechoso, falta corroborar",
+                     "falso_positivo": "Huele a falso positivo"}.get(
+                         _ia.get("veredicto", ""), _ia.get("veredicto", "") or "sin veredicto")
+            ia_html = (
+                f"<div><b style='color:{_vcol}'>{esc(_vtxt)}</b></div>"
+                f"<div style='margin-top:4px'>{esc(_ia.get('explicacion', ''))}</div>"
+                + (f"<div class=rowmeta style='margin-top:6px'><b>Por que suele ser falsa "
+                   f"alarma:</b> {esc(_ia.get('fp'))}</div>" if _ia.get("fp") else "")
+                + (f"<div style='margin-top:6px'><b>Sugerencia:</b> "
+                   f"{esc(_ia.get('accion'))}</div>" if _ia.get("accion") else "")
+                + "<div class=rowmeta style='margin-top:8px'>Lectura automatica con "
+                + esc(_ia.get("modelo", "")) + " del "
+                + time.strftime("%d/%m %H:%M", time.localtime(_ia.get("ts", 0)))
+                + ". <b>Es una opinion, no una medicion</b>: la decision y el corte siguen "
+                  "siendo tuyos. No se le manda ninguna IP ni dato del abonado.</div>")
         ab = abonado_de(ip)
         _abinfo = cargar_abonados()
         _snap = time.strftime("%d/%m %H:%M", time.localtime(_abinfo.get("ts", 0))) if _abinfo.get("ts") else "—"
@@ -13893,6 +14098,7 @@ def ficha_page(ip, embed=False):
             + _row("Coincidencia", coincidencia)
             + _row("Vigencia", vigencia)
             + _row("Corroboracion", corr)
+            + (_row("Lectura de la IA", ia_html) if ia_html else "")
             + _row("Decision", decision)
             + "</table>")
     css = (BASE_CSS +

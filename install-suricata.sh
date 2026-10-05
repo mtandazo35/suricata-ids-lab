@@ -8255,6 +8255,39 @@ def _ia_guardar_estado(d):
 def ia_restantes():
     return max(0, IA_CUOTA - int(_ia_estado().get("gastadas", 0)))
 
+def _ia_apuntar(ok, detalle=""):
+    """Como fue el ultimo intento. Sin esto, 'la fila no sale' puede ser cuatro cosas
+    distintas -no hay clave, no hay cuota, Groq esta caido, el modelo ya no existe- y
+    desde la pantalla no se distinguen."""
+    with _IA_LOCK:
+        d = _ia_estado()
+        d["ultimo_ts"] = int(time.time())
+        d["ultimo_ok"] = bool(ok)
+        d["ultimo_detalle"] = str(detalle)[:160]
+        if ok:
+            d["ok_total"] = int(d.get("ok_total", 0)) + 1
+        _ia_guardar_estado(d)
+
+def ia_estado_txt():
+    """(nivel, frase) para ensenar en Ajustes. nivel: ok | aviso | malo | off."""
+    if not groq_configurada():
+        return "off", "sin clave: el panel funciona igual, solo que sin la lectura"
+    if not groq_modelo():
+        return "aviso", "falta elegir el modelo"
+    d = _ia_estado()
+    gast, quedan = int(d.get("gastadas", 0)), ia_restantes()
+    base = "%d consultas hoy, quedan %d de %d" % (gast, quedan, IA_CUOTA)
+    if not quedan:
+        return "aviso", base + " — hasta manana no se consulta mas"
+    ts = int(d.get("ultimo_ts", 0) or 0)
+    if not ts:
+        return "aviso", base + " — aun no se ha usado: abre la ficha de un candidato"
+    cuando = time.strftime("%d/%m %H:%M", time.localtime(ts))
+    if d.get("ultimo_ok"):
+        return "ok", "funcionando — ultima lectura %s · %s" % (cuando, base)
+    return "malo", "ultimo intento FALLIDO (%s) el %s · %s" % (
+        d.get("ultimo_detalle") or "sin detalle", cuando, base)
+
 def ia_datos(c):
     """Lo que se le manda al modelo. SIN una sola direccion IP.
 
@@ -8371,8 +8404,14 @@ def ia_preguntar(c):
         with urllib.request.urlopen(req, timeout=IA_TIMEOUT) as r:
             resp = json.load(r)
         txt = ((resp.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError,
-            ValueError, IndexError, AttributeError, TypeError):
+    except urllib.error.HTTPError as _e:
+        _ia_apuntar(False, "Groq respondio HTTP %s" % getattr(_e, "code", "?"))
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        _ia_apuntar(False, "no se pudo llegar a Groq (red o timeout)")
+        return None
+    except (ValueError, IndexError, AttributeError, TypeError):
+        _ia_apuntar(False, "respuesta de Groq ilegible")
         return None
     txt = txt.strip()
     if txt.startswith("```"):            # algunos modelos devuelven el JSON en un bloque
@@ -8381,8 +8420,10 @@ def ia_preguntar(c):
     try:
         d = json.loads(txt)
     except ValueError:
+        _ia_apuntar(False, "el modelo no devolvio JSON")
         return None
     if not isinstance(d, dict):
+        _ia_apuntar(False, "el modelo no devolvio un objeto")
         return None
     out = {"veredicto": str(d.get("veredicto", ""))[:40],
            "explicacion": str(d.get("explicacion", ""))[:800],
@@ -8390,11 +8431,13 @@ def ia_preguntar(c):
            "fp": str(d.get("motivo_falso_positivo", ""))[:400],
            "modelo": modelo, "ts": int(time.time())}
     if not out["explicacion"]:
+        _ia_apuntar(False, "el modelo contesto sin explicacion")
         return None
     with _IA_LOCK:
         cache = _ia_cache()
         cache[h] = out
         _ia_guardar_cache(cache)
+    _ia_apuntar(True)
     return out
 
 def aidb_probar(key):
@@ -9558,6 +9601,14 @@ def perfil_page(msg="", ok=False, edit_user=None):
         meta = cargar_feeds_meta()
         srcs = meta.get("sources", {})
         auth_ok = feeds_auth_configurada()
+        def _groq_estado_linea():
+            """Que esta haciendo la IA ahora mismo, en una linea."""
+            niv, txt = ia_estado_txt()
+            col = {"ok": "#1a7f37", "aviso": "#a15c12", "malo": "#b52a2a"}.get(niv, "#6b6a66")
+            pto = {"ok": "&#10003;", "aviso": "&#9679;", "malo": "&#9888;"}.get(niv, "&#9679;")
+            return ("<div class=hint style='margin:-6px 0 12px'>"
+                    "<b style='color:%s'>%s IA:</b> %s</div>" % (col, pto, esc(txt)))
+
         def _groq_modelo_campo():
             """El modelo, elegido de los que la cuenta tiene de verdad.
 
@@ -9650,6 +9701,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "una persona o la politica que ya tienes. Se valida al guardar y se guarda solo "
             "en este servidor (permisos 600); <b>no se vuelve a mostrar</b>. Para "
             "<b>quitarla</b>, escribe <code>BORRAR</code>.</div></div>"
+            + _groq_estado_linea()
             + _groq_modelo_campo()
             + "<div class=actions><button class=primary type=submit>Guardar clave de Groq"
             "</button></div></form>"

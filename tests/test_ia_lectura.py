@@ -30,7 +30,7 @@ ARBOL = ast.parse(DASH)
 PIEZAS = ("GROQ_URL", "IA_CACHE", "IA_ESTADO", "IA_CUOTA", "IA_TIMEOUT", "IA_CACHE_MAX",
           "_IA_LOCK", "_RE_IP", "IA_SISTEMA", "ia_activa", "_ia_estado",
           "_ia_guardar_estado", "ia_restantes", "ia_datos", "_ia_huella", "_ia_cache",
-          "_ia_guardar_cache", "ia_preguntar")
+          "_ia_guardar_cache", "_ia_apuntar", "ia_estado_txt", "ia_preguntar")
 
 fallos = 0
 
@@ -88,7 +88,8 @@ def entorno(tmp, contenido=None, clave="k", modelo="m-1", fallo=None):
     ns = {"json": json, "os": os, "re": re, "time": time, "sys": sys,
           "threading": threading, "urllib": urllib_falso,
           "_hashlib": __import__("hashlib"), "TimeoutError": TimeoutError,
-          "groq_key": lambda: clave, "groq_modelo": lambda: modelo}
+          "groq_key": lambda: clave, "groq_modelo": lambda: modelo,
+          "groq_configurada": lambda: bool(clave)}
     for n in ARBOL.body:
         nom = getattr(n, "name", None) or (
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
@@ -240,6 +241,65 @@ def main():
     # si la lectura no sale, la fila no aparece: la ficha queda como antes de existir esto
     check("sin lectura, la fila ni se pinta",
           '(_row("Lectura de la IA", ia_html) if ia_html else "")' in DASH, "")
+
+    # =====================================================================================
+    # Que se pueda VER si esta funcionando
+    # =====================================================================================
+    # "La fila no aparece" puede ser cuatro cosas distintas -no hay clave, no hay cuota,
+    # Groq esta caido, el modelo ya no existe- y desde la pantalla no se distinguian. Para
+    # quien configura esto, son cuatro arreglos completamente distintos.
+    d5 = tempfile.mkdtemp()
+    niv, txt = entorno(d5, BUENA, clave="")["ia_estado_txt"]()
+    check("sin clave se dice que esta apagada, no que falla", niv == "off", (niv, txt))
+    check("y que el panel sigue funcionando igual", "funciona igual" in txt, txt)
+
+    niv, txt = entorno(d5, BUENA, modelo="")["ia_estado_txt"]()
+    check("sin modelo se dice exactamente eso", niv == "aviso" and "modelo" in txt,
+          (niv, txt))
+
+    d6 = tempfile.mkdtemp()
+    ns = entorno(d6, BUENA)
+    niv, txt = ns["ia_estado_txt"]()
+    check("configurada pero sin usar, se nota", niv == "aviso" and "aun no se ha usado" in txt,
+          (niv, txt))
+
+    ns["ia_preguntar"](CAND)
+    niv, txt = ns["ia_estado_txt"]()
+    check("tras una lectura buena, dice que funciona", niv == "ok", (niv, txt))
+    check("y cuando fue la ultima", "ultima lectura" in txt, txt)
+    check("y cuanta cuota queda", "quedan" in txt, txt)
+
+    # un fallo tiene que distinguirse, y decir CUAL
+    d7 = tempfile.mkdtemp()
+    ns = entorno(d7, fallo=HTTPError(401))
+    ns["ia_preguntar"](CAND)
+    niv, txt = ns["ia_estado_txt"]()
+    check("un fallo se ve como fallo", niv == "malo", (niv, txt))
+    check("y se dice que respondio Groq, no un 'no funciona' a secas",
+          "HTTP 401" in txt, txt)
+
+    d8 = tempfile.mkdtemp()
+    ns = entorno(d8, fallo=URLError("x"))
+    ns["ia_preguntar"](CAND)
+    check("sin red se dice que no se pudo llegar",
+          "no se pudo llegar" in ns["ia_estado_txt"]()[1], ns["ia_estado_txt"]())
+
+    d9 = tempfile.mkdtemp()
+    ns = entorno(d9, "esto no es json")
+    ns["ia_preguntar"](CAND)
+    check("un modelo que no devuelve JSON se distingue de un corte de red",
+          "no devolvio JSON" in ns["ia_estado_txt"]()[1], ns["ia_estado_txt"]())
+
+    # agotar la cuota no es un fallo: es un limite, y se dice como tal
+    d10 = tempfile.mkdtemp()
+    ns = entorno(d10, BUENA)
+    ns["_ia_guardar_estado"]({"dia": time.strftime("%Y-%m-%d"), "gastadas": ns["IA_CUOTA"]})
+    niv, txt = ns["ia_estado_txt"]()
+    check("quedarse sin cuota es un aviso, no un error",
+          niv == "aviso" and "manana" in txt, (niv, txt))
+
+    check("y la linea sale en Ajustes, junto a la clave",
+          "_groq_estado_linea()" in DASH, "")
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

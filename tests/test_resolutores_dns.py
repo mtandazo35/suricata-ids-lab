@@ -123,7 +123,9 @@ def main():
               len(ns["RESOLUTORES"]) == 2 and ipaddress.ip_address("203.0.113.53") in ns["RESOLUTORES"][0], ns["RESOLUTORES"])
         ns2 = {"_ipr": ipaddress}
         exec(carga.replace('"/etc/suricata-resolutores.lst"', repr(f + ".no")), ns2)
-        check("sin archivo vienen los publicos de serie (10)", len(ns2["RESOLUTORES"]) == 10, len(ns2["RESOLUTORES"]))
+        check("sin archivo vienen los publicos de serie (12, FamilyShield incluido)",
+              len(ns2["RESOLUTORES"]) == 12 and ipaddress.ip_address("208.67.222.123") in ns2["RESOLUTORES"][-2],
+              len(ns2["RESOLUTORES"]))
 
     # --- Top destinos los pinta aparte, con la lectura correcta -------------------------
     top = DASH if False else GEN
@@ -191,7 +193,7 @@ def main():
     # --- instalador y documentacion -------------------------------------------------------
     check("el instalador crea la lista con los publicos sin pisarla",
           '_RESOL="/etc/suricata-resolutores.lst"' in SRC and 'if [ ! -f "$_RESOL" ]' in SRC
-          and "208.67.220.220\nLST" in SRC, "")
+          and "208.67.220.123\nLST" in SRC, "")
     check("la documentacion lo explica y lo distingue de excluir destino",
           "Resolutores DNS: el DNS no es la victima" in SRC and "Es distinto de <i>excluir destino</i>" in SRC, "")
 

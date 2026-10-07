@@ -1212,7 +1212,8 @@ except OSError:
 # tuyo y nunca son victima de una consulta; los del ISP se anaden en Ajustes -> DNS.
 RESOLUTORES_FILE = "/etc/suricata-resolutores.lst"
 RESOLUTORES_DEFECTO = ("1.1.1.1", "1.1.1.2", "1.1.1.3", "1.0.0.1", "8.8.8.8", "8.8.4.4",
-                       "9.9.9.9", "149.112.112.112", "208.67.222.222", "208.67.220.220")
+                       "9.9.9.9", "149.112.112.112", "208.67.222.222", "208.67.220.220",
+                       "208.67.222.123", "208.67.220.123")   # OpenDNS FamilyShield
 import ipaddress as _ipr
 RESOLUTORES = []
 try:
@@ -6056,7 +6057,8 @@ def guardar_dest_ok_set(conjunto):
 # DEST_OK: ahi la alerta deja de contar para TODOS; aqui sigue contando para el CPE. ---
 RESOLUTORES_FILE = "/etc/suricata-resolutores.lst"
 RESOLUTORES_DEFECTO = ("1.1.1.1", "1.1.1.2", "1.1.1.3", "1.0.0.1", "8.8.8.8", "8.8.4.4",
-                       "9.9.9.9", "149.112.112.112", "208.67.222.222", "208.67.220.220")
+                       "9.9.9.9", "149.112.112.112", "208.67.222.222", "208.67.220.220",
+                       "208.67.222.123", "208.67.220.123")   # OpenDNS FamilyShield
 
 def cargar_resolutores():
     """Texto de la lista tal cual esta en disco. Sin archivo: los publicos, para que el
@@ -17814,6 +17816,8 @@ if [ ! -f "$_RESOL" ]; then
 149.112.112.112
 208.67.222.222
 208.67.220.220
+208.67.222.123
+208.67.220.123
 LST
   chmod 600 "$_RESOL"
 fi

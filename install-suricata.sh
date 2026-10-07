@@ -9833,6 +9833,48 @@ _IC_BOOK  = _ic("M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-
 _IC_AUDIT = _ic("M19 3h-4.18C14.4 1.84 13.3 1 12 1c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm-2 14l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z")
 _IC_FEED  = _ic("M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 4.5a2.5 2.5 0 0 1 2.5 2.5c0 1-.6 1.9-1.5 2.3V17h-2v-4.7A2.5 2.5 0 0 1 9.5 8 2.5 2.5 0 0 1 12 5.5z")
 
+def _card_listas(m):
+    """Las address-lists, separadas por tipo de abuso.
+
+    Es donde de verdad va cada CPE: el envio enruta por CATEGORIA, no a una lista unica.
+    Hasta ahora estas solo se podian cambiar editando MK_CONF a mano, mientras el
+    formulario enseñaba LIST y LIST_DNS, que son otra cosa. Separarlas no es estetica: no
+    se trata igual una botnet (cortar) que el P2P (encolar) que el DNS de malware
+    (redirigir al resolutor), y por eso son listas distintas."""
+    esc = html.escape
+    filas = ""
+    for cat, nom, _cats, por_defecto in CAT_CPE + [CAT_OTROS]:
+        actual = (m.get("LISTA_" + cat.upper(), "") or "").strip()
+        filas += ("<div class=field><label>%s</label>"
+                  "<input type=text name=lista_%s value=\"%s\" placeholder=\"%s\">"
+                  "</div>" % (esc(nom), esc(cat), esc(actual), esc(por_defecto)))
+    return (
+        "<h3 style='margin:18px 0 2px;font-size:15px'>Listas por tipo de abuso</h3>"
+        "<p class=sub2 style='margin:0 0 10px'>Cada CPE va a la address-list de <b>su</b> "
+        "categoria, porque no todas se tratan igual: una botnet se corta, el P2P se encola "
+        "y el DNS de malware se redirige a tu resolutor. Deja un campo vacio para usar el "
+        "nombre por defecto (el que aparece en gris). Las reglas que necesita cada una "
+        "estan en la pestana <b>Cuarentena</b>.</p>"
+        "<div class=grid2>" + filas + "</div>"
+        "<h3 style='margin:18px 0 2px;font-size:15px'>Caducidad y listas heredadas</h3>"
+        "<p class=sub2 style='margin:0 0 10px'>El <b>TTL</b> es cuanto dura la entrada en "
+        "el router si no se mantiene sola. Las dos listas de abajo son las antiguas: se "
+        "siguen usando para sacar a un CPE de donde esta y para el diagnostico, pero los "
+        "envios nuevos van a las de arriba.</p>"
+        "<div class=grid2>"
+        "<div class=field><label>TTL cuarentena (timeout)</label>"
+        "<input type=text name=ttl value=\"%s\" placeholder='1h, 30m, 1d (vacio = permanente)'></div>"
+        "<div class=field><label>TTL DNS sospechoso (timeout)</label>"
+        "<input type=text name=ttl_dns value=\"%s\" placeholder='1d, 12h (vacio = permanente)'></div>"
+        "<div class=field><label>Address-list de cuarentena (heredada)</label>"
+        "<input type=text name=list value=\"%s\"></div>"
+        "<div class=field><label>Address-list de DNS sospechoso (heredada)</label>"
+        "<input type=text name=list_dns value=\"%s\"></div>"
+        "</div>"
+        % (esc(m.get("TTL", "1h")), esc(m.get("TTL_DNS", "1d")),
+           esc(m.get("LIST", "suricata-cuarentena")),
+           esc(m.get("LIST_DNS", "suricata-dns-sospechoso"))))
+
 def _card_politicas(m):
     """Sub-bloque de la tarjeta MikroTik: politicas por banda de riesgo del Top origenes."""
     esc = html.escape
@@ -10232,7 +10274,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
         en = m.get("ENABLED") == "1"
         tls = m.get("TLS") == "1"
         card_mk = (
-            "<section class=card><h2>MikroTik (cuarentena)</h2>"
+            "<section class=card><h2>MikroTik &mdash; conexion</h2>"
             "<p class=sub2>Conexion por <b>API</b> para enviar las IPs de CPEs infectados a una "
             "<b>address-list</b> del MikroTik. El MikroTik decide que hacer con esa lista (drop, limitar) "
             "con <b>tus</b> reglas de firewall. La clave se guarda solo en este servidor (permisos 600).</p>"
@@ -10247,14 +10289,6 @@ def perfil_page(msg="", ok=False, edit_user=None):
             f"<div class=field><label>Clave API {'<span style=color:#3a9d5d>(guardada)</span>' if tiene_pass else ''}</label>"
             "<input type=password name=pass autocomplete=new-password placeholder='"
             + ("dejar vacio para conservar" if tiene_pass else "clave del usuario API") + "'></div>"
-            f"<div class=field><label>Address-list de cuarentena (infectados)</label>"
-            f"<input type=text name=list value=\"{esc(m.get('LIST','suricata-cuarentena'))}\"></div>"
-            f"<div class=field><label>TTL cuarentena (timeout)</label>"
-            f"<input type=text name=ttl value=\"{esc(m.get('TTL','1h'))}\" placeholder='1h, 30m, 1d (vacio = permanente)'></div>"
-            f"<div class=field><label>Address-list de DNS sospechoso</label>"
-            f"<input type=text name=list_dns value=\"{esc(m.get('LIST_DNS','suricata-dns-sospechoso'))}\"></div>"
-            f"<div class=field><label>TTL DNS sospechoso (timeout)</label>"
-            f"<input type=text name=ttl_dns value=\"{esc(m.get('TTL_DNS','1d'))}\" placeholder='1d, 12h (vacio = permanente)'></div>"
             "</div>"
             "<div class=field style='margin-top:6px'><label class=chk>"
             f"<input type=checkbox name=tls value=1 {'checked' if tls else ''} "
@@ -10265,6 +10299,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "Permitir enviar IPs al MikroTik</label>"
             "<div class=hint>Activado: aparece el boton para poner CPEs en cuarentena (el panel escribe en el router). "
             "Apagado: la pestana Cuarentena solo muestra sugerencias y no toca el MikroTik.</div></div>"
+            + _card_listas(m) +
             "<div class=field><label class=chk>"
             f"<input type=checkbox name=auto value=1 {'checked' if m.get('AUTO_MANTENER') == '1' else ''}> "
             "Mantener la cuarentena automaticamente</label>"
@@ -15851,6 +15886,15 @@ class H(BaseHTTPRequestHandler):
             m["TTL"] = (q.get("ttl", [""])[0]).strip()[:16]
             m["LIST_DNS"] = (q.get("list_dns", [""])[0]).strip()[:64] or "suricata-dns-sospechoso"
             m["TTL_DNS"] = (q.get("ttl_dns", [""])[0]).strip()[:16]
+            # Las listas por categoria. Vacio = se borra la clave y vuelve el nombre por
+            # defecto; asi se puede deshacer un cambio sin tener que recordar cual era.
+            for _cat, _nom, _cs, _def in CAT_CPE + [CAT_OTROS]:
+                _k = "LISTA_" + _cat.upper()
+                _v = (q.get("lista_" + _cat, [""])[0]).strip()[:64]
+                if _v:
+                    m[_k] = _v
+                else:
+                    m.pop(_k, None)
             m["AUTO_MANTENER"] = "1" if q.get("auto") else "0"
             _va = {"nada", "cuarentena", "dns", "notificar"}
             m["POL_BAJO"] = (q.get("pol_bajo", ["nada"])[0]) if (q.get("pol_bajo", ["nada"])[0]) in _va else "nada"

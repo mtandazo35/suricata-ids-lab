@@ -1655,6 +1655,26 @@ dns_sig = {}                       # firma DNS mas reciente por CPE
 dns_sig_ts = {}                    # idem: la mas reciente por tiempo, no por orden
 pruebas_by_src = defaultdict(list)  # evidencia por alerta (SID/rev/flow_id/dst/ts) por CPE, tope 8
 MAX_CARD = 2500                    # tope por set (el score satura mucho antes; protege RAM)
+# Por DOMINIO (no solo por CPE): que se pregunta, quien lo pregunta y por donde. Es lo que
+# se presenta: el dominio es la prueba, la IP de la red es el culpable, el DNS el canal.
+dom_cnt = Counter()                # dominio malicioso -> consultas
+dom_src = defaultdict(Counter)     # dominio -> Counter(CPE) (quien y cuantas veces)
+dom_por = {}                       # dominio -> por que es malo ("feed: urlhaus" | "firma: ...")
+dom_res = defaultdict(Counter)     # dominio -> Counter(resolutor usado)
+MAX_DOM = 3000                     # tope de dominios distintos (DGA/tunel DNS crecen sin fin)
+
+def _apuntar_dominio(dom, src, dst, por):
+    """Una consulta a un dominio malicioso: la apunta al dominio, al CPE y al resolutor.
+    Acotado: dominios nuevos solo hasta MAX_DOM; CPEs por dominio hasta MAX_CARD."""
+    if not dom or (dom not in dom_cnt and len(dom_cnt) >= MAX_DOM):
+        return
+    dom_cnt[dom] += 1
+    if src and (src in dom_src[dom] or len(dom_src[dom]) < MAX_CARD):
+        dom_src[dom][src] += 1
+    if dst and dst != "?" and len(dom_res[dom]) < 8:
+        dom_res[dom][dst] += 1
+    if dom not in dom_por and por:
+        dom_por[dom] = por[:90]
 total = 0
 seen = 0
 ts_min = None          # timestamp del evento mas antiguo dentro de la ventana (cobertura real)
@@ -1755,6 +1775,9 @@ for p in files:
                         if _tv is None or _tv >= cutoff:
                             _s = _sm.group(1)
                             dns_hits[_s] += 1
+                            _mdd = _RE["dest_ip"].search(line)
+                            _apuntar_dominio(_dom, _s, _mdd.group(1) if _mdd else "",
+                                             "feed: " + dominio_malo(_dom))
                             # tope como el de dst_by_src: con tunel DNS o dominios DGA
                             # (subdominios aleatorios bajo un dominio de los feeds) este
                             # set crecia sin fin. Solo se usa su len(), asi que acotarlo
@@ -1854,6 +1877,9 @@ for p in files:
             if _es_dns:                            # consulta DNS a dominio malicioso
                 dns_hits[src] += 1
                 dns_sids[src].add(g("sid") or sig)
+                _rr = (g("rrname") or "").lower().rstrip(".")
+                if _rr:
+                    _apuntar_dominio(_rr, src, dst, "firma: " + sig[:70])
                 if (ts or 0) >= dns_sig_ts.get(src, 0):
                     dns_sig[src] = sig
                     dns_sig_ts[src] = ts or 0
@@ -2477,7 +2503,7 @@ def top_origenes_section(n_src=5, n_sub=8):
         "<span style='color:#a15c12;font-weight:700'>naranja</span> = dominio del dueño pero no es un gran servicio; "
         "<b>sin PTR</b> = IP sin nombre publico (frecuente en botnets/hosting sucio).</p>"
         f"<div class=\"topwrap\">{''.join(cards)}</div></section>"
-        + top_destinos_section() + entrantes_section() +
+        + top_destinos_section() + dominios_section() + entrantes_section() +
         "<!--TOP_FIN-->")
 
 # id numerico del TopoJSON (countries-110m) -> ISO2, y nombres, para el mapa del cliente.
@@ -2838,6 +2864,55 @@ def top_destinos_section(n_dst=5, n_sub=8):
         "los CPEs de tu red que los atacan. Util para detectar un <b>destino comun</b> (un mismo C2 o servidor tocado por "
         "varios CPEs a la vez). El chip muestra el dueño/reputacion del destino.</p>"
         f"<div class=\"topwrap\">{''.join(cards)}</div></section>")
+
+DOMINIOS_FILE = "/var/log/suricata-dominios-malos.json"
+
+def dominios_section(n=15, n_ips=4):
+    """Dominios maliciosos consultados y desde que IP de la red. Es la lista que se
+    presenta: el dominio es la prueba, no la IP del DNS. Tambien se deja en JSON (top 200)
+    para el panel."""
+    if not dom_cnt:
+        return ""
+    top = dom_cnt.most_common(n)
+    filas = ""
+    for d, nq in top:
+        quien = dom_src.get(d, Counter())
+        ej = ", ".join("%s (%d)" % (esc(ip_de(k)), c) for k, c in quien.most_common(n_ips))
+        if len(quien) > n_ips:
+            ej += " +%d mas" % (len(quien) - n_ips)
+        res = ", ".join(esc(r) for r, _c in dom_res.get(d, Counter()).most_common(3)) or "&mdash;"
+        por = dom_por.get(d, "")
+        filas += ("<tr><td class='mono' style='word-break:break-all'>%s</td><td>%s</td>"
+                  "<td class='num'>%s</td><td class='num'>%s</td>"
+                  "<td class='mono' style='color:#184f95'>%s</td><td class='mono'>%s</td></tr>"
+                  % (esc(d), esc(por), format(nq, ","), format(len(quien), ","), ej or "&mdash;", res))
+    try:
+        salida = []
+        for d, nq in dom_cnt.most_common(200):
+            quien = dom_src.get(d, Counter())
+            salida.append({"dominio": d, "por": dom_por.get(d, ""), "consultas": nq,
+                           "cpes": len(quien),
+                           "ips": [[ip_de(k), c] for k, c in quien.most_common(8)],
+                           "resolutores": [r for r, _c in dom_res.get(d, Counter()).most_common(3)]})
+        _t = DOMINIOS_FILE + ".tmp"
+        with open(_t, "w", encoding="utf-8") as _f:
+            json.dump({"generado": int(time.time()), "ventana_min": VENTANA_MIN,
+                       "total_dominios": len(dom_cnt), "dominios": salida}, _f)
+        os.replace(_t, DOMINIOS_FILE)
+    except Exception:
+        pass
+    return (
+        "<section class=\"card\" style=\"margin-top:16px\"><h2>Dominios maliciosos consultados (y desde que IP de tu red)</h2>"
+        "<p class=\"muted\" style=\"margin:0 0 12px\">Lo que se pregunta al DNS y quien lo pregunta. "
+        "El <b>dominio</b> es la prueba; la columna <b>por que</b> dice si lo ficha un feed "
+        "(URLhaus, ThreatFox) o una firma de Suricata; <b>IPs de tu red</b> son los CPEs que lo "
+        "consultaron (y cuantas veces); el <b>resolutor</b> es solo el canal, no una victima.</p>"
+        "<div class='tablewrap'><table><thead><tr><th>Dominio</th><th>Por que es malicioso</th>"
+        "<th class='num'>Consultas</th><th class='num'>CPEs</th><th>IPs de tu red (consultas)</th>"
+        "<th>Resolutor</th></tr></thead><tbody>" + filas + "</tbody></table></div>"
+        + ("<p class='muted' style='margin:8px 0 0;font-size:12px'>Se muestran %d de %s dominios distintos "
+           "en la ventana.</p>" % (len(top), format(len(dom_cnt), ",")) if len(dom_cnt) > n else "")
+        + "</section>")
 
 def entrantes_section(n_src=8, n_sub=6, max_src=5000, max_det=60):
     """Ataques ENTRANTES: origenes de INTERNET golpeando IPs de TU red.

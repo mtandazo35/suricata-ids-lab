@@ -113,6 +113,7 @@ correr "exclusiones -> threshold.config: solo las exactas, con -T antes" "$PY" t
 correr "feeds -> dataset de Suricata: base64 y validado" "$PY" tests/test_dataset_feeds.py
 correr "resolutores DNS: el DNS no es la victima, la prueba es el dominio" "$PY" tests/test_resolutores_dns.py
 correr "feeds nuevos: ThreatFox ip:port, ET compromised y Tor como contexto" "$PY" tests/test_feeds_nuevas.py
+correr "dominios maliciosos consultados: cual, quien y por donde" "$PY" tests/test_dominios_maliciosos.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

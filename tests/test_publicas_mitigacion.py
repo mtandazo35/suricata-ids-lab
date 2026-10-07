@@ -34,6 +34,7 @@ PIEZAS = ("PUBLICAS_CONF", "PUB_HIST", "PUB_HIST_DIAS", "PUB_UMBRAL_AVISO", "_PU
           "AIDB_RESERVA_MANUAL", "_AIDB_LOCK", "FEEDS_CONF",
           "_feeds_conf_get", "_feeds_conf_set", "aidb_key", "aidb_configurada", "aidb_set",
           "aidb_ip_valida", "aidb_red_valida", "_aidb_cache", "_aidb_guardar_cache",
+          "_aidb_sello", "_AIDB_MEM",
           "_aidb_estado", "_aidb_guardar_estado", "_aidb_pedir", "_aidb_resumen",
           "aidb_consultar", "_aidb_pedir_red", "_aidb_resumen_red", "aidb_consultar_red",
           "cargar_publicas", "origen_publicas", "guardar_publicas", "publicas_texto", "cubrir_publicas", "guardar_publicas_de",

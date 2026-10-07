@@ -106,6 +106,7 @@ correr "una pagina que revienta da 500 explicado, no 502 mudo" "$PY" tests/test_
 correr "Accesos y Bitacora: cada una responde una pregunta" "$PY" tests/test_accesos_bitacora.py
 correr "salir de las listas negras: cuando, con que pruebas y donde" "$PY" tests/test_salida_listas.py
 correr "cache de configuracion: rapida y sin datos viejos" "$PY" tests/test_cache_config.py
+correr "cache de AbuseIPDB: un parseo por cambio, sin datos viejos" "$PY" tests/test_cache_abuseipdb.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

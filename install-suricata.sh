@@ -6761,11 +6761,40 @@ def aidb_restantes_bloque():
     e = _aidb_estado()
     return max(0, AIDB_CUOTA_BLOQUE - int(e.get("bloques", 0)))
 
-def _aidb_cache():
+_AIDB_MEM = {"sello": None, "datos": None}
+
+def _aidb_sello():
+    """(mtime, tamaño) del archivo de cache: cambia si y solo si alguien lo reescribio."""
     try:
-        return json.load(open(AIDB_CACHE, encoding="utf-8"))
+        st = os.stat(AIDB_CACHE)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+def _aidb_cache():
+    """La cache de AbuseIPDB, parseada UNA vez por cada cambio del archivo.
+
+    Antes se releia y parseaba ENTERA en cada consulta de IP. Con la cache llena (20.000
+    entradas, 2,9 MB) eso son 22 ms por consulta, y el precargador recorre todos los
+    destinos de todos los candidatos en cada ciclo: con 200 destinos, 4,4 s de CPU con el
+    GIL cogido cada 5 minutos. El panel vive en el mismo proceso, asi que mientras tanto
+    cambiar de pagina se queda colgado, y cuanto mas llena la cache peor se pone.
+
+    Devuelve el MISMO diccionario, no una copia: quien escribe en el ya lo hacia asi y
+    luego guarda. Copiarlo seria pagar otra vez casi todo lo que se acaba de ahorrar."""
+    sello = _aidb_sello()
+    if sello is None:
+        return {}
+    if _AIDB_MEM["sello"] == sello and _AIDB_MEM["datos"] is not None:
+        return _AIDB_MEM["datos"]
+    try:
+        d = json.load(open(AIDB_CACHE, encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    if not isinstance(d, dict):
+        return {}
+    _AIDB_MEM["sello"], _AIDB_MEM["datos"] = sello, d
+    return d
 
 def _aidb_guardar_cache(c):
     try:
@@ -6775,7 +6804,10 @@ def _aidb_guardar_cache(c):
             json.dump(c, f)
         os.replace(tmp, AIDB_CACHE)
     except OSError:
-        pass
+        return
+    # lo que se acaba de escribir es lo que hay: se adopta en memoria en vez de obligar a
+    # releer 2,9 MB en la consulta siguiente
+    _AIDB_MEM["sello"], _AIDB_MEM["datos"] = _aidb_sello(), c
 
 def aidb_ip_valida(ip):
     """Solo IPs PUBLICAS. Las privadas ni se envian: son las de tus abonados y ademas
@@ -6966,9 +6998,13 @@ def _aidb_resumen(d):
             "cats_nom": [AIDB_CATS.get(c, "categoria %d" % c) for c, _n in orden],
             "ejemplos": ejemplos, "ts": int(time.time())}
 
-def aidb_consultar(ip, auto=False, refrescar=False):
+def aidb_consultar(ip, auto=False, refrescar=False, guardar=True):
     """Ficha de una IP publica. Devuelve (datos|None, origen, error);
-    origen es 'cache' o 'api'. Nunca lanza."""
+    origen es 'cache' o 'api'. Nunca lanza.
+
+    Con `guardar=False` la entrada nueva se mete en la cache en memoria pero NO se escribe
+    el archivo: lo usa el precargador, que hace varias consultas seguidas y guarda una sola
+    vez al final. Reescribir 2,9 MB por cada IP consultada costaba 182 ms cada una."""
     ok, porque = aidb_ip_valida(ip)
     if not ok:
         return None, "", porque
@@ -7008,7 +7044,8 @@ def aidb_consultar(ip, auto=False, refrescar=False):
         if len(cache) > AIDB_MAX_CACHE:       # poda: no crecer sin fin en un espejo de ISP
             for k, _v in sorted(cache.items(), key=lambda kv: kv[1].get("ts", 0))[:5000]:
                 cache.pop(k, None)
-        _aidb_guardar_cache(cache)
+        if guardar:
+            _aidb_guardar_cache(cache)
     return res, "api", ""
 
 def precargar_abuseipdb(max_por_ciclo=4):
@@ -7029,18 +7066,34 @@ def precargar_abuseipdb(max_por_ciclo=4):
             for d in (c.get("destinos_ip") or []):
                 if d not in destinos:
                     destinos.append(d)
-    hechas = 0
+    # Lo que ya esta fresco se descarta AQUI, de una sola mirada a la cache, en vez de
+    # entrar a aidb_consultar por cada uno. Con muchos candidatos la lista son cientos de
+    # IPs y casi todas estan ya resueltas.
+    ahora = time.time()
+    cache = _aidb_cache()
+    pend = []
     for ip in destinos:
+        ent = cache.get(ip)
+        if ent:
+            ttl = AIDB_TTL_SUCIA if ent.get("score", 0) else AIDB_TTL_LIMPIA
+            if ahora - ent.get("ts", 0) < ttl:
+                continue
+        pend.append(ip)
+    hechas = 0
+    for ip in pend:
         if hechas >= max_por_ciclo:
             break
         ok, _porque = aidb_ip_valida(ip)
         if not ok:
             continue
-        _d, origen, err = aidb_consultar(ip, auto=True)
+        # guardar=False: se escribe una vez al final del ciclo, no una por IP
+        _d, origen, err = aidb_consultar(ip, auto=True, guardar=False)
         if origen == "api":
             hechas += 1
         elif err:
             break               # sin cuota o sin red: no machacar en este ciclo
+    if hechas:
+        _aidb_guardar_cache(_aidb_cache())
     return hechas
 
 # --- Denunciar de vuelta -----------------------------------------------------------
@@ -12441,12 +12494,10 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
 def bitacora_page(embed=False):
     """Bitacora auditable: quien hizo que y cuando (logins, cuarentenas, config, usuarios, updates)."""
     esc = html.escape
-    lineas = []
-    try:
-        with open(BITACORA_LOG, encoding="utf-8", errors="replace") as f:
-            lineas = f.readlines()[-1500:]
-    except OSError:
-        pass
+    # la cola, no el archivo entero: readlines() cargaba en memoria toda la bitacora
+    # para quedarse con las ultimas 1500 lineas. Una linea cortada por el corte de bytes
+    # se cae sola mas abajo, donde se exigen 4 campos.
+    lineas = _cola_lineas(BITACORA_LOG, 400000)[-1500:]
     lineas.reverse()
     def accb(a):
         au = a.upper(); c = "#8a8a86"

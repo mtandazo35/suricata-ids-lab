@@ -1289,6 +1289,11 @@ _TRAD = [
     (("coinmin", "cryptomin", "miner"), "Criptomineria"),
     (("ssh scan",), "Escaneo SSH"),
     (("brute", "password"), "Fuerza bruta"),
+    # Sin esta linea, traducir() nunca producia "Spam": la categoria de CPE 'spam', su
+    # address-list y la regla del 25/465/587 existian pero no se le aplicaban NUNCA a
+    # nadie. Nada fallaba; simplemente no clasificaba. Va aqui, despues de fuerza bruta,
+    # para que un "SMTP brute force" siga siendo fuerza bruta.
+    (("outbound spam", "spambot", "smtp", "open relay", "mail relay"), "Spam"),
     (("rdp", "vnc"), "RDP/VNC"),
     (("telnet",), "Escaneo Telnet"),
     (("tr-069", "cwmp", "7547"), "Escaneo TR-069"),
@@ -3515,6 +3520,11 @@ _TRAD = [
     (("coinmin", "cryptomin", "miner"), "Criptomineria"),
     (("ssh scan",), "Escaneo SSH"),
     (("brute", "password"), "Fuerza bruta"),
+    # Sin esta linea, traducir() nunca producia "Spam": la categoria de CPE 'spam', su
+    # address-list y la regla del 25/465/587 existian pero no se le aplicaban NUNCA a
+    # nadie. Nada fallaba; simplemente no clasificaba. Va aqui, despues de fuerza bruta,
+    # para que un "SMTP brute force" siga siendo fuerza bruta.
+    (("outbound spam", "spambot", "smtp", "open relay", "mail relay"), "Spam"),
     (("rdp", "vnc"), "RDP/VNC"),
     (("telnet",), "Escaneo Telnet"),
     (("tr-069", "cwmp", "7547"), "Escaneo TR-069"),
@@ -7506,6 +7516,11 @@ AIDB_SENAL = {
          "cats": ["Escaneo Telnet", "Escaneo TR-069", "Botnet Mirai"]},
 }
 
+# Categorias cuyo abuso el sensor casi nunca ve. Un bot web abusivo o un ataque a una
+# aplicacion web son HTTP que parece normal: ET Open no dispara, asi que no hay alerta que
+# cruzar. No decirlo hace pensar que no pasa nada, cuando lo que pasa es que no miramos.
+AIDB_CIEGAS = {19, 21}
+
 def senal_de_categorias(cats):
     """Puertos y categorias de firma a buscar, a partir de las categorias denunciadas."""
     puertos, firmas = set(), set()
@@ -7514,6 +7529,43 @@ def senal_de_categorias(cats):
         puertos |= set(sen.get("puertos") or [])
         firmas |= set(sen.get("cats") or [])
     return puertos, firmas
+
+def _cats_int(cats):
+    out = []
+    for c in cats or []:
+        try:
+            out.append(int(c))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+def por_que_sin_culpables(cats):
+    """Por que no salio ningun candidato. Devuelve (motivo, detalle).
+
+    Antes todo decia lo mismo: "ningun CPE aparece haciendo eso". Pero son tres cosas
+    distintas y cada una se arregla de otra manera: que la denuncia no diga que buscar,
+    que se haya buscado y no haya nadie, o que el sensor no pueda ver ese tipo de abuso
+    por mucho que este ocurriendo."""
+    ids = _cats_int(cats)
+    pts, firmas = senal_de_categorias(ids)
+    ciegas = [c for c in ids if c in AIDB_CIEGAS]
+    if not pts and not firmas:
+        return ("sin-senal",
+                "Lo que se denuncia no se traduce a nada concreto que buscar dentro de tu "
+                "red, asi que no se ha buscado.")
+    if ciegas and len(ciegas) == len(ids):
+        return ("ciego",
+                "Este tipo de abuso (bot web, ataque a aplicacion web) es trafico HTTP que "
+                "parece normal: casi nunca dispara una regla, asi que el sensor puede no "
+                "verlo aunque este ocurriendo. Que no aparezca aqui no significa que no pase.")
+    if ciegas:
+        return ("mixto",
+                "Se busco y ningun CPE de este nodo esta haciendo eso ahora. Ojo: parte de "
+                "lo denunciado (bot web o ataque web) casi nunca dispara una regla, asi que "
+                "esa parte el sensor puede no verla.")
+    return ("nadie",
+            "Se busco entre los CPEs de este nodo y ninguno esta haciendo eso en la ventana "
+            "actual: pudo pasar antes, o salir por otro nodo.")
 
 def _cpes_del_nodo(rid):
     """CPEs con actividad del reporte actual, con lo que hace falta para el cruce."""
@@ -8224,6 +8276,105 @@ IA_PLAN_SISTEMA = (
     "espera conseguir con ello). "
     "No inventes puertos ni direcciones IP: si algo no esta en los datos, no existe."
 )
+
+IA_DENUNCIA_SISTEMA = (
+    "Eres un analista de un proveedor de internet. Te dan los textos de las denuncias que "
+    "terceros han puesto contra una IP publica del proveedor, y la lista de nombres de "
+    "comportamiento que su sensor sabe reconocer. Responde SOLO un objeto JSON con: "
+    "puertos (lista de numeros de puerto de DESTINO que se deduzcan de los textos; vacia si "
+    "no se deduce ninguno), "
+    "comportamientos (lista de nombres, COPIADOS EXACTAMENTE de la lista que te dan, que "
+    "encajen con lo denunciado; vacia si ninguno encaja), "
+    "resumen (una o dos frases en castellano llano, para alguien que NO es de redes, "
+    "diciendo que es lo que se le denuncia a esta IP). "
+    "No inventes nombres que no esten en la lista, ni puertos que no se deduzcan del texto."
+)
+
+def ia_senal_denuncias(ejemplos, nombres_validos):
+    """Que buscar dentro de la red, leido de los textos de las denuncias.
+
+    Es el unico sitio donde esta escrito lo que el denunciante vio de verdad, y hasta ahora
+    se enseñaba crudo y no lo usaba nadie. Leer ingles libre y sacarle estructura es
+    justo lo que un modelo hace bien.
+
+    Lo que devuelve se FILTRA: los puertos tienen que ser numeros de puerto y los
+    comportamientos tienen que existir de verdad en el sensor. La IA no amplia la busqueda
+    con cosas inventadas; solo puede señalar entre lo que ya sabemos reconocer."""
+    if not ia_activa() or not ejemplos:
+        return None
+    # los textos son publicos pero hablan de NUESTRA IP: fuera cualquier direccion
+    textos = [_RE_IP.sub("(ip)", str(t))[:300] for t in ejemplos][:3]
+    datos = {"denuncias": textos, "comportamientos_que_el_sensor_reconoce":
+             sorted(nombres_validos)[:60]}
+    modelo = groq_modelo()
+    h = _ia_huella(datos, modelo + "|denuncia")
+    with _IA_LOCK:
+        cache = _ia_cache()
+        if h in cache:
+            return cache[h]
+        est = _ia_estado()
+        if int(est.get("gastadas", 0)) >= IA_CUOTA:
+            return None
+        est["gastadas"] = int(est.get("gastadas", 0)) + 1
+        _ia_guardar_estado(est)
+    cuerpo = json.dumps({
+        "model": modelo, "temperature": 0.1, "max_tokens": 400,
+        "response_format": {"type": "json_object"},
+        "messages": [{"role": "system", "content": IA_DENUNCIA_SISTEMA},
+                     {"role": "user", "content": json.dumps(datos, ensure_ascii=False)}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        GROQ_URL + "/chat/completions", data=cuerpo,
+        headers={"Authorization": "Bearer " + groq_key(),
+                 "Content-Type": "application/json",
+                 "User-Agent": "suricata-panel/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=IA_TIMEOUT) as r:
+            resp = json.load(r)
+        txt = (((resp.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+        d = json.loads(txt)
+    except urllib.error.HTTPError as _e:
+        _ia_apuntar(False, "Groq respondio HTTP %s" % getattr(_e, "code", "?"))
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        _ia_apuntar(False, "no se pudo llegar a Groq (red o timeout)")
+        return None
+    except (ValueError, IndexError, AttributeError, TypeError):
+        _ia_apuntar(False, "respuesta de Groq ilegible")
+        return None
+    if not isinstance(d, dict):
+        _ia_apuntar(False, "el modelo no devolvio un objeto")
+        return None
+    # EL FILTRO: puertos que sean puertos, y comportamientos que el sensor reconozca
+    puertos, inventados = set(), []
+    for p in (d.get("puertos") or []):
+        try:
+            n = int(str(p).split("/", 1)[0])
+        except (TypeError, ValueError):
+            continue
+        if 1 <= n <= 65535:
+            puertos.add(str(n))
+    validos = set(nombres_validos)
+    comp = set()
+    for c in (d.get("comportamientos") or []):
+        c = str(c).strip()
+        if c in validos:
+            comp.add(c)
+        elif c:
+            inventados.append(c)
+    out = {"puertos": sorted(puertos), "cats": sorted(comp),
+           "resumen": str(d.get("resumen", ""))[:400],
+           "inventados": sorted(set(inventados)),
+           "modelo": modelo, "ts": int(time.time())}
+    if not (out["puertos"] or out["cats"] or out["resumen"]):
+        _ia_apuntar(False, "el modelo no saco nada de las denuncias")
+        return None
+    with _IA_LOCK:
+        cache = _ia_cache()
+        cache[h] = out
+        _ia_guardar_cache(cache)
+    _ia_apuntar(True)
+    return out
 
 def ia_plan_bloqueo(perfil, listas):
     """Orden y explicacion del plan de bloqueo. Devuelve dict o None.
@@ -12020,7 +12171,12 @@ def rid_de_publica(ip):
                 continue
     return ""
 
-def culpables_ficha_html(ip, cats, esc=None, tope=6):
+def _nombres_de_comportamiento():
+    """Los nombres que el sensor sabe producir de verdad. Es la lista cerrada con la que
+    se filtra lo que diga la IA: no puede ampliar la busqueda con algo que no existe."""
+    return {txt for _claves, txt in _TRAD}
+
+def culpables_ficha_html(ip, cats, esc=None, tope=6, ejemplos=None):
     """Que CPE privado puede estar detras de lo que se le denuncia a esa publica.
 
     Es el cruce que da sentido a todo: de "a mi IP publica le denuncian escaneo de
@@ -12039,10 +12195,34 @@ def culpables_ficha_html(ip, cats, esc=None, tope=6):
     ids = [c[0] if isinstance(c, (list, tuple)) else c for c in cats]
     rid = rid_de_publica(ip)
     culp = culpables_de(rid, ids, tope=tope)
+
+    # Si por categoria no sale nadie, se mira lo que DICEN las denuncias. Es lo unico
+    # escrito sobre lo que el denunciante vio, y la tabla de categorias es gruesa por
+    # fuerza: "bot web abusivo" no dice contra que puerto ni con que patron.
+    lec = None
+    if not culp and ejemplos:
+        try:
+            lec = ia_senal_denuncias(ejemplos, _nombres_de_comportamiento())
+        except Exception as _e:
+            sys.stderr.write("lectura de denuncias: %s\n" % _e)
+        if lec and (lec["puertos"] or lec["cats"]):
+            culp = culpables_por_senal(rid, set(lec["puertos"]), set(lec["cats"]), tope=tope)
+
+    _ia_nota = ""
+    if lec and lec.get("resumen"):
+        _ia_nota = ("<div class=hint style='margin-top:8px'><b>Lectura de las denuncias:</b> "
+                    + esc(lec["resumen"])
+                    + (" Se busco ademas por: " + esc(", ".join(
+                        lec["cats"] + ["puerto " + p for p in lec["puertos"]]))
+                       if (lec["cats"] or lec["puertos"]) else "")
+                    + " <i>(leido con " + esc(lec.get("modelo", "")) + "; es una lectura del "
+                    "texto, no una medicion)</i></div>")
+
     if not culp:
-        return ("<div class=hint style='margin-top:10px'>Ningun CPE de este nodo aparece "
-                "haciendo eso en la ventana actual: pudo pasar antes, o salir por otro "
-                "nodo.</div>")
+        _motivo, _det = por_que_sin_culpables(ids)
+        _col = "#7a4a12" if _motivo in ("ciego", "mixto") else "#6b6a66"
+        return ("<div class=hint style='margin-top:10px;color:%s'>%s</div>%s"
+                % (_col, esc(_det), _ia_nota))
     lis = ""
     for k, c, _pts, mot, yaesta in culp:
         accion = ("<span class=hint style='color:#3a9d5d'>&#10003; en cuarentena</span>"
@@ -12055,7 +12235,7 @@ def culpables_ficha_html(ip, cats, esc=None, tope=6):
         lis += ("<li style='margin:6px 0'><b class=mono>%s</b> "
                 "<span class=hint>%s</span> %s</li>"
                 % (esc(ip_de(k)), esc(", ".join(mot)), accion))
-    return ("<div style='margin-top:10px'><b style='font-size:13px'>Quien puede estar "
+    return (_ia_nota + "<div style='margin-top:10px'><b style='font-size:13px'>Quien puede estar "
             "detras, de tu lado del NAT</b>"
             "<p class=hint style='margin:4px 0 2px'>CPEs de este nodo que estan haciendo "
             "ese mismo tipo de abuso, ordenados por cuanto encajan. Son candidatos: "
@@ -12118,7 +12298,8 @@ def ficha_ip_html(d, ip="", esc=None, scb=None):
         f"<b>{d.get('denunciantes', 0):,}</b> denunciantes distintos"
         + (f" &middot; ultima {esc(d.get('ultimo'))}" if d.get("ultimo") else "") + "</div>"
         + chips + arr_html
-    + culpables_ficha_html(d.get("ip") or ip, cats, esc)
+    # con los textos de las denuncias: si por categoria no sale nadie, se leen
+    + culpables_ficha_html(d.get("ip") or ip, cats, esc, ejemplos=d.get("ejemplos"))
     + ejem + "</div>")
 
 

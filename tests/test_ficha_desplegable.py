@@ -42,7 +42,8 @@ def entorno():
     # el cruce con los CPEs tiene su propia prueba (test_culpables_ficha); aqui solo
     # estorbaria, porque esta ficha se mira por lo que trae de AbuseIPDB
     ns = {"html": __import__("html"), "time": _t,
-          "culpables_ficha_html": lambda ip, cats, esc=None, tope=6: ""}
+          "culpables_ficha_html":
+              lambda ip, cats, esc=None, tope=6, ejemplos=None: ""}
     for n in ARBOL.body:
         nom = getattr(n, "name", None) or (
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")

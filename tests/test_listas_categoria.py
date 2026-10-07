@@ -23,6 +23,7 @@ ARBOL = ast.parse(DASH)
 
 PIEZAS = ("CAT_CPE", "CAT_OTROS", "_CPES_CACHE", "_cpes_de_reporte",
           "lista_de_categoria", "nombre_categoria", "categoria_cpe", "listas_cpe_reglas",
+          "_TRAD", "traducir", "AIDB_SENAL", "senal_de_categorias",
           "ros_lista", "_RE_ROS_RARO")
 
 fallos = 0
@@ -197,6 +198,44 @@ def main():
           "firewall connection remove" in coms, "")
     check("avisa que redirect usa el resolutor del propio router",
           "allow-remote-requests" in coms and "dst-nat" in coms, "")
+
+    # =====================================================================================
+    # Una categoria que nadie puede producir es una categoria MUERTA
+    # =====================================================================================
+    # Paso de verdad: CAT_CPE agrupaba por "Spam" y traducir() no producia ese nombre
+    # jamas. Nada fallaba. Simplemente la categoria 'spam' no se le asignaba a nadie, la
+    # address-list clientes-spam estaba siempre vacia, y la regla que el panel propone para
+    # cortar el 25/465/587 no bloqueaba a nadie — siendo el correo saliente la causa numero
+    # uno de que un ISP acabe en Spamhaus. Un fallo mudo de los caros.
+    producibles = {t for _c, t in ns["_TRAD"]}
+    muertas = []
+    for c, nom, cats, lista in ns["CAT_CPE"]:
+        falta = [x for x in cats if x not in producibles]
+        if falta:
+            muertas.append((c, falta, lista))
+    check("toda categoria de CPE se puede asignar de verdad", not muertas, muertas)
+
+    # lo mismo para la atribucion: busca nombres de categoria, y uno que no exista no
+    # encuentra nunca a nadie sin decir por que
+    busca = set()
+    for d in ns["AIDB_SENAL"].values():
+        busca |= set(d.get("cats") or [])
+    check("y la atribucion no busca nombres que no existen",
+          not (busca - producibles), sorted(busca - producibles))
+
+    # las firmas reales de correo saliente tienen que caer en Spam...
+    for fir in ("ET POLICY Outbound Spam", "ET POLICY SMTP Outbound Connection",
+                "SMTP Open Relay detected"):
+        check("'%s' se clasifica como Spam" % fir[:34],
+              ns["traducir"](fir) == "Spam", ns["traducir"](fir))
+    # ...sin robarle las suyas a las categorias vecinas, que es el riesgo de meter una
+    # palabra tan generica en la tabla
+    check("un brute force de SMTP sigue siendo fuerza bruta",
+          ns["traducir"]("ET SCAN SMTP Login Brute Force") == "Fuerza bruta",
+          ns["traducir"]("ET SCAN SMTP Login Brute Force"))
+    check("y Spamhaus sigue siendo mala reputacion, no spam",
+          ns["traducir"]("ET DROP Spamhaus DROP Listed") == "Mala reputacion",
+          ns["traducir"]("ET DROP Spamhaus DROP Listed"))
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

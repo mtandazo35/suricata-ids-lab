@@ -27,8 +27,10 @@ _i = SRC.index("cat > /usr/local/bin/suricata-dashboard <<'DASH'")
 DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
 ARBOL = ast.parse(DASH)
 
-PIEZAS = ("AIDB_SENAL", "senal_de_categorias", "culpables_por_senal", "culpables_de",
-          "rid_de_publica", "culpables_ficha_html")
+PIEZAS = ("AIDB_SENAL", "AIDB_CIEGAS", "senal_de_categorias", "_cats_int",
+          "por_que_sin_culpables", "culpables_por_senal", "culpables_de",
+          "rid_de_publica", "_nombres_de_comportamiento", "_TRAD",
+          "culpables_ficha_html")
 
 fallos = 0
 
@@ -57,6 +59,10 @@ PUBLICAS = {"r1": ["192.141.39.0/24"], "r2": ["203.0.113.0/24"]}
 
 def entorno():
     ns = {"html": __import__("html"), "ipaddress": ipaddress,
+          "sys": __import__("sys"), "re": __import__("re"),
+          # sin clave de Groq la lectura de denuncias no se usa: aqui se prueba el
+          # cruce por categoria, que es lo que funciona con o sin IA
+          "ia_senal_denuncias": lambda ejemplos, nombres: None,
           "cargar_publicas": lambda: PUBLICAS,
           "_cpes_del_nodo": lambda rid: CPES.get(rid, []),
           "cargar_enviados": lambda path=None: {},
@@ -120,8 +126,31 @@ def main():
     check("sin categorias denunciadas no se inventa nada",
           ns["culpables_ficha_html"]("192.141.39.202", []) == "", "")
     vacio = ns["culpables_ficha_html"]("203.0.113.9", [[SPAM, 1]])
-    check("si ningun CPE del nodo encaja se dice, en vez de dejar el hueco",
-          "Ningun CPE" in vacio, vacio[:200])
+    # No basta con decir "no hay nadie": antes ese mismo mensaje tapaba tres
+    # situaciones distintas. Aqui SI hay señal que buscar y SI se busco, asi que
+    # tiene que decirse eso y no un "no aparece" que no distingue nada.
+    check("si ningun CPE del nodo encaja se dice que se busco y no habia nadie",
+          "Se busco entre los CPEs" in vacio, vacio[:200])
+    check("y el motivo que se da es ese, no otro",
+          ns["por_que_sin_culpables"]([SPAM])[0] == "nadie",
+          ns["por_que_sin_culpables"]([SPAM]))
+
+    # --- los tres motivos se distinguen ---------------------------------------------
+    # Cada uno se arregla de otra manera: declarar la publica, esperar, o asumir que
+    # el sensor no ve ese abuso. Darlos todos como "no aparece" los hace indistinguibles.
+    check("una categoria sin traduccion dice que no hay que buscar",
+          ns["por_que_sin_culpables"]([99])[0] == "sin-senal",
+          ns["por_que_sin_culpables"]([99]))
+    # 19 = bot web abusivo, 21 = ataque a aplicacion web: HTTP que parece normal y
+    # casi nunca dispara una regla. Que no salga aqui no significa que no pase.
+    check("un abuso que el sensor no puede ver se dice como tal",
+          ns["por_que_sin_culpables"]([19, 21])[0] == "ciego",
+          ns["por_que_sin_culpables"]([19, 21]))
+    check("y si se mezcla con algo visible, se avisa de la parte ciega",
+          ns["por_que_sin_culpables"]([19, SPAM])[0] == "mixto",
+          ns["por_que_sin_culpables"]([19, SPAM]))
+    check("una categoria ilegible no revienta",
+          ns["por_que_sin_culpables"](["x", None])[0] == "sin-senal", "")
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

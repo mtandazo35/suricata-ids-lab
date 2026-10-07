@@ -41,6 +41,8 @@ PIEZAS = ("FEEDS_CONF", "AIDB_CACHE", "AIDB_ESTADO", "AIDB_TTL_LIMPIA", "AIDB_TT
           "_feeds_conf_get", "_feeds_conf_set", "aidb_key", "aidb_configurada", "aidb_set",
           "_aidb_estado", "_aidb_guardar_estado", "aidb_restantes", "_aidb_cache",
           "_aidb_guardar_cache", "_aidb_sello", "_AIDB_MEM",
+          "AIDB_CIEGAS", "_cats_int", "por_que_sin_culpables",
+          "_nombres_de_comportamiento", "_TRAD",
           "aidb_ip_valida", "_aidb_pedir", "_aidb_resumen",
           "aidb_consultar", "aidb_cats_txt", "reputacion_page",
           "AIDB_CUOTA_BLOQUE", "AIDB_PREFIJO_MIN", "aidb_restantes_bloque",
@@ -106,7 +108,9 @@ def http(code, cabeceras=None):
 def entorno(tmp, red):
     ns = {"json": json, "os": os, "re": re, "time": __import__("time"), "html": __import__("html"),
           "threading": __import__("threading"), "ipaddress": __import__("ipaddress"),
-          "socket": __import__("socket"),
+          "socket": __import__("socket"), "sys": __import__("sys"),
+          # sin clave de Groq no se consulta: aqui se prueba AbuseIPDB, no la IA
+          "ia_senal_denuncias": lambda ejemplos, nombres: None,
           "ThreadPoolExecutor": __import__("concurrent.futures", fromlist=["futures"]).ThreadPoolExecutor,
           "urllib": types.SimpleNamespace(request=red, error=urllib.error, parse=urllib.parse),
           "BASE_CSS": "", "nav": lambda a="": "<!--nav-->",

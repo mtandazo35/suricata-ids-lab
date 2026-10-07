@@ -107,6 +107,7 @@ correr "Accesos y Bitacora: cada una responde una pregunta" "$PY" tests/test_acc
 correr "salir de las listas negras: cuando, con que pruebas y donde" "$PY" tests/test_salida_listas.py
 correr "cache de configuracion: rapida y sin datos viejos" "$PY" tests/test_cache_config.py
 correr "cache de AbuseIPDB: un parseo por cambio, sin datos viejos" "$PY" tests/test_cache_abuseipdb.py
+correr "instalador: local o VPN sin colgar un curl|bash" bash tests/test_instalador_espejo.sh
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

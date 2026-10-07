@@ -85,6 +85,7 @@ IFACE=""; HOME_NET=""; HOME_NET_GIVEN=0; WEB=1; WEB_PORT=5636; WEB_PASS=""; TZSP
 TZSP_BYTES=0   # recorte por flujo en el receptor (0 = sin recorte)
 TZSP_BYTES_DADO=0
 ESPEJO_DONDE="local"   # local | vpn  (ver -e)
+ESPEJO_DADO=0          # 1 si lo dijo -e: entonces no se pregunta nada
 GESTION=""     # red(es) desde las que se permite llegar a la web (UFW)
 MK_CRED=""     # archivo con las credenciales del MikroTik (ver -k)
 while getopts "i:n:p:P:m:b:a:e:k:tWh" opt; do
@@ -94,7 +95,7 @@ while getopts "i:n:p:P:m:b:a:e:k:tWh" opt; do
     p) WEB_PORT="$OPTARG" ;;
     P) WEB_PASS="$OPTARG" ;;
     b) TZSP_BYTES="$OPTARG"; TZSP_BYTES_DADO=1 ;;
-    e) ESPEJO_DONDE="$OPTARG" ;;
+    e) ESPEJO_DONDE="$OPTARG"; ESPEJO_DADO=1 ;;
     k) MK_CRED="$OPTARG" ;;
     a) GESTION="$OPTARG" ;;
     m) MIRROR_SRC="$OPTARG" ;;
@@ -112,6 +113,36 @@ case "$ESPEJO_DONDE" in
   local|vpn) ;;
   *) die "-e admite 'local' o 'vpn' (recibido: '$ESPEJO_DONDE')." ;;
 esac
+# Si no se dijo con -e y hay alguien delante, se pregunta: de la respuesta cuelgan el
+# recorte, las reglas del router y la proteccion del tunel, y acertar con los tres flags
+# a la vez es justo lo que se equivoca.
+#
+# OJO con el one-liner: `curl ... | bash` deja stdin ocupado por el PROPIO SCRIPT, asi que
+# un `read` normal no lee del teclado — recibe EOF y sigue de largo, o peor, se come una
+# linea del script. Por eso se lee de /dev/tty. Y si no hay terminal (cron, un deploy
+# automatizado) no se pregunta: se sigue con el valor por defecto y se dice, porque un
+# instalador que se queda esperando una respuesta que no va a llegar es peor que uno que
+# asume mal.
+if [ "$ESPEJO_DADO" -eq 0 ] && [ "$TZSP" -eq 1 ]; then
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    {
+      printf '\n%sComo llega el espejo a este sensor?%s\n' "$c_b" "$c_0"
+      printf '  1) Local  - el MikroTik esta en la misma red\n'
+      printf '  2) VPN    - el MikroTik se conecta por un tunel\n'
+      printf 'Elige [1]: '
+    } > /dev/tty
+    _resp=""
+    read -r _resp < /dev/tty || _resp=""
+    case "$_resp" in
+      2|v|vpn|VPN|Vpn) ESPEJO_DONDE="vpn" ;;
+      *)               ESPEJO_DONDE="local" ;;
+    esac
+    printf '\n' > /dev/tty
+    info "Espejo: ${ESPEJO_DONDE}."
+  else
+    info "Sin terminal para preguntar: se asume espejo ${ESPEJO_DONDE} (usa -e vpn si va por tunel)."
+  fi
+fi
 # Con el sensor al otro lado de un enlace, el recorte no es un ajuste fino: es lo que
 # separa ver la red de creer que la ves. Medido en produccion: el espejo entero de un
 # ISP eran 886 Mbps para que el receptor tirase el 91%, y al llenarse el enlace se
@@ -17129,6 +17160,26 @@ VENTANA_MIN=360
 ${_MIS_REDES}
 CONF
   chmod 600 /etc/suricata-dashboard.conf
+fi
+
+# Los extremos del tunel no son abonados, y por defecto el panel cree que si: sus redes
+# de CPE son RFC1918 mas 100.64.0.0/10, y los tuneles suelen vivir justo ahi. Un paquete
+# espejado con ese origen convertiria al router en candidato a cuarentena — o sea, el
+# panel proponiendo cortar el enlace por el que recibe el espejo.
+if [ "$ESPEJO_DONDE" = "vpn" ] && [ -n "$MIRROR_SRC" ]; then
+  _NUNCA="/etc/suricata-nunca-bloquear.lst"
+  [ -f "$_NUNCA" ] || printf '# IPs y redes que NUNCA entran en cuarentena.\n' > "$_NUNCA"
+  _ya=0
+  IFS=',' read -ra _SRCS <<< "$MIRROR_SRC"
+  for _s in "${_SRCS[@]}"; do
+    _s="$(printf '%s' "$_s" | tr -d '[:space:]')"
+    [ -n "$_s" ] || continue
+    grep -qxF "$_s" "$_NUNCA" 2>/dev/null && continue
+    printf '%s\n' "$_s" >> "$_NUNCA"
+    _ya=$((_ya+1))
+  done
+  chmod 600 "$_NUNCA" 2>/dev/null || true
+  [ "$_ya" -eq 0 ] || ok "Extremo(s) del tunel anadidos a nunca-bloquear: el router no puede acabar en cuarentena."
 fi
 DASH_PORT="$(awk -F= '/^PORT=/{print $2}' /etc/suricata-dashboard.conf 2>/dev/null)"; DASH_PORT="${DASH_PORT:-5637}"
 DASH_PASS_SHOWN="$(awk -F= '/^PASS=/{print $2}' /etc/suricata-dashboard.conf 2>/dev/null)"

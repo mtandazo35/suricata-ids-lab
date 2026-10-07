@@ -112,6 +112,7 @@ correr "formulario MikroTik: conexion aparte, listas por tipo de abuso" "$PY" te
 correr "exclusiones -> threshold.config: solo las exactas, con -T antes" "$PY" tests/test_threshold_exclusiones.py
 correr "feeds -> dataset de Suricata: base64 y validado" "$PY" tests/test_dataset_feeds.py
 correr "resolutores DNS: el DNS no es la victima, la prueba es el dominio" "$PY" tests/test_resolutores_dns.py
+correr "feeds nuevos: ThreatFox ip:port, ET compromised y Tor como contexto" "$PY" tests/test_feeds_nuevas.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

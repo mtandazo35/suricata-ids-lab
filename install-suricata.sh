@@ -728,19 +728,36 @@ IPF = [
     # y devuelve las de confianza 100 (acotar el umbral es de pago), asi que se baja como
     # mucho cada 6 h: la lista queda fresca y sobra cuota. Una peticion trae hasta 10.000.
     ("abuseipdb",     _conf("ABUSEIPDB_URL", "https://api.abuseipdb.com/api/v2/blacklist?plaintext&limit=10000"), 24, "ip", "atacante-denunciado", "aidb", 360),
+    # ET compromised: hosts comprometidos vistos atacando (Proofpoint, diario, lista plana).
+    ("et-compromised", _conf("ET_COMPROMISED_URL", "https://rules.emergingthreats.net/blockrules/compromised-ips.txt"), 48, "ip", "atacante-observado", "", 720),
+    # Salidas Tor: CONTEXTO, no prueba. Hablar con Tor no es estar infectado; hay quien lo
+    # usa a proposito. La categoria 'anonimizador' hace que el reporte lo ensene pero no lo
+    # sume al riesgo ni lo proponga para cortar.
+    ("tor-exit",      _conf("TOR_EXIT_URL", "https://check.torproject.org/torbulkexitlist"), 24, "ip", "anonimizador", "", 360),
+    # ThreatFox por IP y PUERTO: los C2 con el puerto por el que mandan. Va por la API
+    # (POST con la misma Auth-Key); el export en archivo exige entrar al portal.
+    ("threatfox-c2",  _conf("THREATFOX_API_URL", "https://threatfox-api.abuse.ch/api/v1/"), 24, "ipport", "c2-ioc", "abusech", 60,
+     {"query": "get_iocs", "days": 7}),
 ]
+# SSLBL (IPs de C2 por certificado TLS) no esta a proposito: el CSV lleva vacio desde
+# 2025-01-03 (deprecado) y los JA3 de SSLBL no se actualizan desde 2021.
+TFX_CONFIANZA_MIN = 50   # ThreatFox: confidence_level por debajo no entra (menos FP)
 DOMF = [
     ("urlhaus",   _conf("URLHAUS_URL", "https://urlhaus.abuse.ch/downloads/hostfile/"), 24, "dom", "distribucion-malware", "abusech", 60),
     ("threatfox", _conf("THREATFOX_URL", "https://threatfox.abuse.ch/downloads/hostfile/"), 24, "dom", "c2-ioc", "abusech", 60),
 ]
 
-def _fetch(url, auth=""):
-    hdrs = {"User-Agent": "suricata-feeds/2.0", "Accept": "text/plain"}
+def _fetch(url, auth="", post=None):
+    hdrs = {"User-Agent": "suricata-feeds/2.0", "Accept": "text/plain, application/json"}
     clave = _clave_de(auth)
     if clave:
         hdrs[CABECERA.get(auth, "Auth-Key")] = clave    # abuse.ch: Auth-Key; AbuseIPDB: Key
     url = url.replace("{AUTH}", clave)                  # o clave en la URL, si la fuente la usa asi
-    req = urllib.request.Request(url, headers=hdrs)
+    datos = None
+    if post is not None:                                # fuentes que son una API (ThreatFox)
+        datos = json.dumps(post).encode("utf-8")
+        hdrs["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=datos, headers=hdrs)
     with urllib.request.urlopen(req, timeout=30) as r:
         ctype = (r.headers.get("Content-Type", "") or "").lower()
         body = r.read().decode("utf-8", "replace")
@@ -787,6 +804,39 @@ def _parse_dom(body):
         out.add(dom)
     return out
 
+def _parse_ipport(body):
+    """Respuesta JSON de la API de ThreatFox: se quedan los IOC de tipo ip:port con
+    confianza suficiente, como 'ip:puerto' (IPv4). Un dominio, una URL o una IP rara se
+    ignoran: ya hay otras fuentes para eso."""
+    out = set()
+    try:
+        data = json.loads(body).get("data") or []
+    except (ValueError, AttributeError):
+        return out
+    if not isinstance(data, list):
+        return out
+    for it in data:
+        if not isinstance(it, dict) or it.get("ioc_type") != "ip:port":
+            continue
+        try:
+            if int(it.get("confidence_level") or 0) < TFX_CONFIANZA_MIN:
+                continue
+        except (TypeError, ValueError):
+            continue
+        ioc = str(it.get("ioc") or "").strip()
+        ip, _, port = ioc.rpartition(":")
+        if not ip or not port.isdigit() or not (0 < int(port) < 65536):
+            continue
+        try:
+            if ipaddress.ip_address(ip).version != 4:
+                continue
+        except ValueError:
+            continue
+        out.add(f"{ip}:{int(port)}")
+    return out
+
+PARSERS = {"dom": _parse_dom, "ipport": _parse_ipport}
+
 def _cargar_meta():
     try:
         return json.load(open(os.path.join(DIR, "reputation.meta"), encoding="utf-8"))
@@ -798,10 +848,10 @@ src_prev = meta_prev.get("sources", {})
 sources = {}
 now = int(time.time())
 
-def procesar(name, url, ttl_h, tipo, cat, auth, min_min):
+def procesar(name, url, ttl_h, tipo, cat, auth, min_min, post=None):
     prev = src_prev.get(name, {})
     estado = "error"; n = prev.get("count", 0); fv = prev.get("fetched_valid", 0)
-    parse = _parse_dom if tipo == "dom" else _parse_ip
+    parse = PARSERS.get(tipo, _parse_ip)
     if fv and prev.get("estado") == "valido" and (now - fv) < min_min * 60 \
             and os.path.exists(os.path.join(SRCDIR, name + ".lst")):
         estado = "valido"                   # descargado hace poco: no re-bajar (respeta el upstream)
@@ -809,7 +859,7 @@ def procesar(name, url, ttl_h, tipo, cat, auth, min_min):
         estado = "sin-clave"                # necesita clave y no hay -> se conserva lo viejo
     else:
         try:
-            body, ctype = _fetch(url, auth)
+            body, ctype = _fetch(url, auth, post)
             if "text/html" in ctype or _es_html(body):
                 estado = "error"            # respuesta HTML (login/portal/error), NO una lista
             else:
@@ -849,15 +899,28 @@ def _leer_src(name):
 
 # rearmar reputation.lst / domains.lst uniendo SOLO fuentes vigentes (no caducadas),
 # con la fuente en cada linea: "indicador<TAB>fuente".
-rep_lines = []; dom_lines = []; n_ip = 0; n_dom = 0
+rep_lines = []; dom_lines = []; port_lines = []; n_ip = 0; n_dom = 0
 for name, s in sources.items():
     if not s["vigente"]:
         continue
+    vistas = set()
     for ind in _leer_src(name):
         if s["tipo"] == "dom":
             dom_lines.append(f"{ind}\t{name}"); n_dom += 1
+        elif s["tipo"] == "ipport":
+            # la IP va a la lista general (casa con el cruce que ya existe); el puerto,
+            # aparte: es lo que permite decir "hablo con el C2 POR SU PUERTO"
+            ip, _, _p = ind.rpartition(":")
+            port_lines.append(f"{ind}\t{name}")
+            if ip and ip not in vistas:
+                vistas.add(ip)
+                rep_lines.append(f"{ip}\t{name}"); n_ip += 1
         else:
             rep_lines.append(f"{ind}\t{name}"); n_ip += 1
+if port_lines:
+    tmp = os.path.join(DIR, "c2ports.lst.tmp")
+    open(tmp, "w", encoding="utf-8").write("\n".join(port_lines) + "\n")
+    os.replace(tmp, os.path.join(DIR, "c2ports.lst"))
 if rep_lines:
     tmp = os.path.join(DIR, "reputation.lst.tmp")
     open(tmp, "w", encoding="utf-8").write("\n".join(rep_lines) + "\n")
@@ -2183,6 +2246,11 @@ REP_WIDE = []                   # CIDRs con prefijo <8 -> [(net, mask, fuente)]
 REP_OK = False                  # hay al menos un feed vigente?
 REP_INFO = "feeds no instalados"
 REP_META = {}                   # meta por fuente (estado, vigencia, caducidad) para la ficha
+REP_PORTS = {}                  # ip -> {puertos} de C2 (ThreatFox ip:port), para la ficha
+# Categorias que son CONTEXTO y no prueba: se ensenan en la celda del destino, pero no
+# suman al riesgo ni a las evidencias ni al barrido, ni se proponen para cortar. Hablar
+# con una salida Tor no es estar infectado.
+REP_CONTEXTO = ("anonimizador",)
 
 def _ip4_int(ip):
     try:
@@ -2227,12 +2295,28 @@ def _cargar_reputacion():
                 REP_IPS[ind] = src
     except Exception:
         pass
+    try:
+        for line in open(os.path.join(FEEDS_DIR, "c2ports.lst"), encoding="utf-8"):
+            ind = line.rstrip("\n").partition("\t")[0].strip()
+            ip, _, port = ind.rpartition(":")
+            if ip and port.isdigit():
+                REP_PORTS.setdefault(ip, set()).add(port)
+    except Exception:
+        pass
     n = len(REP_IPS) + sum(len(v) for v in REP_CIDR.values()) + len(REP_WIDE)
     vig = ", ".join(k for k, s in REP_META.items() if s.get("vigente"))
     REP_INFO = f"{n:,} IOCs ({vig})" if n else "feeds vacios"
     REP_OK = n > 0
 
 _cargar_reputacion()
+
+def es_malo_firme(ip):
+    """Como es_malo, pero '' si la fuente es solo CONTEXTO (Tor): para todo lo que decide
+    -riesgo, evidencias, destinos a cortar-, no para lo que solo informa."""
+    f = es_malo(ip)
+    if f and (REP_META.get(f, {}) or {}).get("categoria", "") in REP_CONTEXTO:
+        return ""
+    return f
 
 def es_malo(ip):
     """Devuelve la FUENTE que reporta la IP destino (str no vacio) o '' si ninguna."""
@@ -2285,7 +2369,7 @@ def riesgo(src):
     rep_hits = 0                                       # destinos del CPE en feeds de reputacion
     if REP_OK:
         for d in dst_by_src.get(src, ()):
-            if es_malo(d):
+            if es_malo_firme(d):           # contexto (Tor) no suma riesgo
                 rep_hits += 1
                 if rep_hits >= 2:
                     break
@@ -2850,8 +2934,8 @@ try:
         if not es_mi_cpe(_sip) or es_mi_cpe(_d):
             continue                      # solo TU red -> internet
         _fuente, _cidr = reputacion_de(_d)
-        if not _fuente:
-            continue
+        if not _fuente or not es_malo_firme(_d):
+            continue                      # sin ficha, o solo contexto (Tor): no se corta
         _e = _dm.get(_d)
         if _e is None:
             if len(_dm) >= 5000:
@@ -2941,9 +3025,15 @@ try:
             if fuente and (fuente, cidr) not in vistos:
                 vistos.add((fuente, cidr))
                 mm = REP_META.get(fuente, {})
+                # el puerto de C2 coincide? (ThreatFox ip:port): es la diferencia entre
+                # "toco una IP fichada" y "hablo con el C2 por donde el C2 escucha"
+                _pc2 = REP_PORTS.get(d)
+                _coincide = bool(_pc2) and any(
+                    k[0] == src and k[2] == d and str(k[3]) in _pc2 for k in flujos)
                 out.append({"ip": d, "cidr": cidr, "fuente": fuente,
                             "categoria": mm.get("categoria", ""), "vigente": mm.get("vigente", False),
-                            "fetched_valid": mm.get("fetched_valid", 0), "expira": mm.get("expira", 0)})
+                            "fetched_valid": mm.get("fetched_valid", 0), "expira": mm.get("expira", 0),
+                            "puerto_c2": _coincide, "contexto": mm.get("categoria", "") in REP_CONTEXTO})
                 if len(out) >= 8:
                     break
         return out
@@ -2956,7 +3046,7 @@ try:
         nsids = len(inf_sids.get(src, ()))
         if nsids >= 2:
             ev.append(f"{nsids} firmas CnC distintas")
-        _dm = [d for d in dst_by_src.get(src, ()) if es_malo(d)]
+        _dm = [d for d in dst_by_src.get(src, ()) if es_malo_firme(d)]
         if _dm:
             ev.append(f"destino en lista de reputacion ({len(_dm)})")
         if (src in n5_by_src) and (n1h_by_src.get(src, 0) > n5_by_src.get(src, 0)):
@@ -3009,7 +3099,7 @@ try:
         nd = len(dns_sids.get(src, ()))
         if nd >= 2:
             ev.append(f"{nd} firmas DNS distintas")
-        _dm = [d for d in dst_by_src.get(src, ()) if es_malo(d)]
+        _dm = [d for d in dst_by_src.get(src, ()) if es_malo_firme(d)]
         if _dm:
             ev.append(f"destino en lista de reputacion ({len(_dm)})")
         if src in correlacionados:
@@ -6647,6 +6737,7 @@ _FAST_CNC = ("cnc", "c2 ", "command and control", "checkin", "check-in", "botnet
 # infectado y basta UNA vez; una IP que alguna vez escaneo a alguien (CINS) puede ser
 # coincidencia, y ahi se exige insistencia.
 _FAST_REP_C2 = ("c2-activo", "c2-ioc")
+_FAST_REP_CONTEXTO = ("anonimizador",)   # Tor: se ensena, no cuenta (ni como "otras")
 _FAST_REP_OTRAS = 3
 try:                      # umbral de confirmacion; alinear con el del reporte (report.conf)
     _u = 3
@@ -6687,8 +6778,8 @@ def barrido_alto_rapido(maxbytes=4_000_000):
         _es_cnc = any(k in low for k in _FAST_CNC)
         # el destino esta fichado? se mira SOLO si la firma no bastaba ya
         _cat = "" if _es_cnc else (rep_categoria(dst) if dst else "")
-        if not _es_cnc and not _cat:
-            continue                             # ni firma de infeccion ni destino fichado
+        if not _es_cnc and (not _cat or _cat in _FAST_REP_CONTEXTO):
+            continue                             # ni firma de infeccion ni destino fichado (Tor no cuenta)
         if not src_ip or nunca_bloquear(src_ip) or dst in dest_ok:
             continue
         if es_publica_declarada(src_ip):
@@ -12060,9 +12151,18 @@ clientes criticos), aunque disparen alertas. Se guardan en
 con su <b>procedencia</b> y <b>caducidad</b>. En <b>Ajustes &rarr; Reputacion/feeds</b> (admin) se pegan
 las claves: la <b>Auth-Key</b> de abuse.ch (URLhaus/ThreatFox) y la <b>clave de AbuseIPDB</b>. Se
 guardan <b>solo-escritura</b> en <code>/etc/suricata-feeds.conf</code> (permisos 600, no se vuelven a
-mostrar) y hay un <b>validador</b> que comprueba cada clave antes de guardarla. Feodo, CINS y Spamhaus
-no necesitan clave. La tabla muestra el estado por fuente (vigente/vacia/caducada) y un boton para
-actualizar los feeds al momento.</p>
+mostrar) y hay un <b>validador</b> que comprueba cada clave antes de guardarla. Feodo, CINS, Spamhaus,
+ET compromised y la lista de salidas Tor no necesitan clave. La tabla muestra el estado por fuente
+(vigente/vacia/caducada) y un boton para actualizar los feeds al momento.</p>
+<p><b>Fuentes y que pesa cada una.</b> <code>feodo</code> (C2 activos) y <code>threatfox-c2</code>
+(C2 por IP <b>y puerto</b>, via la API de ThreatFox con la misma Auth-Key) son prueba de infeccion:
+basta un contacto, y si el CPE hablo <b>por el puerto del C2</b> la ficha lo dice.
+<code>spamhaus-drop</code> es infraestructura delictiva. <code>cins</code>, <code>et-compromised</code>
+y <code>abuseipdb</code> son atacantes observados: una IP que ataca puede alojar ademas algo legitimo,
+asi que se exige insistencia. <code>tor-exit</code> es <b>contexto</b>: un abonado que habla con una
+salida Tor no esta infectado por eso (hay quien lo usa a proposito); se ensena en el destino pero
+<b>no suma al riesgo</b>, no es evidencia y no se propone cortar. La lista de IPs de SSLBL no esta
+porque abuse.ch la dejo vacia en enero de 2025 (y sus JA3 no se actualizan desde 2021).</p>
 <h3>Analisis con IA (Groq)</h3>
 <p>En la misma tarjeta de Ajustes se pega la <b>clave de Groq</b>. Sirve para que el panel
 <b>explique la evidencia en lenguaje llano</b> &mdash; estos informes los lee gente que no es de
@@ -14946,7 +15046,10 @@ def ficha_page(ip, embed=False):
             co = ""; vg = ""
             for r in rep:
                 co += (f"<tr><td class=mono>{esc(r.get('cidr') or r.get('ip', ''))}</td>"
-                       f"<td>{esc(r.get('fuente', ''))}</td><td>{esc(r.get('categoria', ''))}</td></tr>")
+                       f"<td>{esc(r.get('fuente', ''))}</td><td>{esc(r.get('categoria', ''))}"
+                       + (" <b>&middot; por su puerto de C2</b>" if r.get("puerto_c2") else "")
+                       + (" <span class=rowmeta>(contexto: no suma al riesgo)</span>" if r.get("contexto") else "")
+                       + "</td></tr>")
                 vg += (f"<tr><td>{esc(r.get('fuente', ''))}</td><td class=mono>{_fecha(r.get('fetched_valid', 0))}</td>"
                        f"<td class=mono>{_fecha(r.get('expira', 0))}</td>"
                        f"<td>{'vigente' if r.get('vigente') else 'CADUCADA'}</td></tr>")

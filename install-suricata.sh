@@ -15531,7 +15531,8 @@ def cuarentena_page(msg="", es_admin=False):
                     items += ("<tr><td class=mono><button type=button class=evlink "
                               "onclick=\"verFicha('%s')\" title='Ver la ficha'>%s</button>%s</td>"
                               "<td>%s</td><td class=mono>%s</td><td>%s</td></tr>"
-                              % (esc(e["clave"]), esc(e["ip"]),
+                              # la ficha busca por IP (como el resto del panel), no por clave
+                              % (esc(e["ip"]), esc(e["ip"]),
                                  (" <span class=sub2>&middot; %s</span>" % esc(e["router"])) if _multi and e["router"] else "",
                                  esc(nombre) or "<span class=sub2>&mdash;</span>",
                                  time.strftime("%d/%m %H:%M", time.localtime(e["cuando"])) if e["cuando"] else "&mdash;",

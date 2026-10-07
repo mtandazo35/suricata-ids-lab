@@ -6,7 +6,7 @@ Lo que se protege:
     cada uno (no por la que le tocaria hoy), con ip/router/cuando/por/categoria, mas
     reciente primero; una entrada sin lista (anterior al enrutado) no se inventa una;
   - la seccion pinta un desplegable por fila con las IPs, el abonado, desde cuando y
-    quien lo mando, y cada IP abre su ficha con la identidad completa (router|IP);
+    quien lo mando, y cada IP abre su ficha por IP (es lo que ficha_page busca);
   - una categoria vacia no tiene desplegable;
   - un nombre de abonado con angulos no rompe el HTML.
 """
@@ -81,8 +81,9 @@ def main():
           "<details class=ldet" in h and "ver las 2 IPs" in h and "ver las 1 IPs" in h, "")
     check("la categoria vacia no tiene desplegable",
           "Spam" in h and h.count("<details class=ldet") == 2, h.count("<details class=ldet"))
-    check("cada IP abre su ficha con la identidad completa (router|IP)",
-          "verFicha('r1|10.0.0.8')" in h and "verFicha('r2|10.0.0.9')" in h, "")
+    # la ficha (ficha_page) busca por IP, como el boton 'ver evidencia' de la tabla
+    check("cada IP abre su ficha por IP, igual que el resto del panel",
+          "verFicha('10.0.0.8')" in h and "verFicha('10.0.0.9')" in h and "verFicha('r1|" not in h, "")
     check("se ve el abonado, escapado", "Juan &lt;Perez&gt;" in h and "Juan <Perez>" not in h, "")
     check("y quien lo mando", "a mano (admin)" in h and h.count(">politica<") == 2, h.count(">politica<"))
     check("con varios routers se dice el nodo", "&middot; r2</span>" in h, "")

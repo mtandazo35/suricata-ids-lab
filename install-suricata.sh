@@ -263,6 +263,11 @@ cat > "$LOCAL_RULES" <<'RULES'
 # Si tu red es pequena (una LAN, no un espejo de ISP) y quieres barrido horizontal
 # generico, descomenta con cuidado y vigila la RAM:
 #alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"LOCAL Posible barrido TCP saliente"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 120, seconds 60; classtype:attempted-recon; sid:9000001; rev:1;)
+#
+# Dominios de los feeds de reputacion (URLhaus/ThreatFox) como DETECCION: la consulta DNS a
+# un dominio fichado es una alerta en el momento, no un cruce posterior del panel. El
+# dataset lo rearma suricata-feeds-update cada vez que cambian los feeds, en base64.
+alert dns $HOME_NET any -> any any (msg:"LOCAL DNS a dominio fichado en feeds de reputacion"; dns.query; dataset:isset,feeds-dominios,type string,load /var/lib/suricata-feeds/domains.dataset; classtype:trojan-activity; sid:9000050; rev:1;)
 
 # --- Puertos tipicos de botnets IoT / gusanos (Mirai y familia) hacia afuera ---
 alert tcp $HOME_NET any -> $EXTERNAL_NET [23,2323] (msg:"LOCAL CPE escanea Telnet saliente (botnet IoT/Mirai)"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 15, seconds 60; classtype:attempted-recon; sid:9000010; rev:1;)
@@ -861,6 +866,42 @@ if dom_lines:
     tmp = os.path.join(DIR, "domains.lst.tmp")
     open(tmp, "w", encoding="utf-8").write("\n".join(dom_lines) + "\n")
     os.replace(tmp, os.path.join(DIR, "domains.lst"))
+
+# El mismo listado como DATASET de Suricata, para que la consulta a un dominio fichado sea
+# una alerta en el momento y no un cruce posterior. Un dataset de tipo string va en
+# BASE64 por linea: en claro no casa nunca y no da error. Solo dominios bien formados; un
+# dato raro de un feed no puede romper la carga de reglas.
+import base64, subprocess
+ds_lines = []
+for l in dom_lines:
+    d = l.split("\t", 1)[0].strip().lower().rstrip(".")
+    if d and len(d) <= 253 and all(p and len(p) <= 63 for p in d.split(".")) and " " not in d:
+        ds_lines.append(base64.b64encode(d.encode("utf-8")).decode("ascii"))
+ds_path = os.path.join(DIR, "domains.dataset")
+try:
+    viejo = open(ds_path, encoding="utf-8").read()
+except OSError:
+    viejo = ""
+nuevo = "\n".join(sorted(set(ds_lines))) + ("\n" if ds_lines else "")
+if nuevo != viejo:
+    tmp = ds_path + ".tmp"
+    open(tmp, "w", encoding="utf-8").write(nuevo)
+    os.replace(tmp, ds_path)
+    # recargar solo si valida: un dataset que no carga deja el sensor sin reglas
+    try:
+        t = subprocess.run(["suricata", "-T", "-c", "/etc/suricata/suricata.yaml"],
+                           capture_output=True, text=True, timeout=120)
+        if t.returncode == 0:
+            for cmd in (["suricatasc", "-c", "reload-rules"], ["systemctl", "reload", "suricata"]):
+                try:
+                    if subprocess.run(cmd, capture_output=True, timeout=60).returncode == 0:
+                        break
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+        else:
+            print("dataset: suricata -T fallo, no se recarga: " + (t.stderr or "")[-200:])
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print("dataset: no se pudo validar/recargar: %s" % e)
 
 meta = {"generated": now, "total": n_ip, "total_dominios": n_dom, "sources": sources}
 open(os.path.join(DIR, "reputation.meta"), "w", encoding="utf-8").write(json.dumps(meta, indent=2))
@@ -3470,6 +3511,106 @@ def cargar_exclusiones(incluir_vencidas=False):
         pass
     return reglas
 
+THRESHOLD_FILE = "/etc/suricata/threshold.config"
+THRESHOLD_MARCA = "# --- generado por el panel: exclusiones (no editar entre marcas) ---"
+
+def threshold_desde_exclusiones(reglas):
+    """Las lineas de threshold.config que corresponden a las exclusiones del panel.
+
+    Solo las que Suricata puede decir EXACTAMENTE igual que el panel: con sid y sin
+    puerto. `suppress` no tiene puerto, y sin sid seria silenciar toda la IP, que es mas
+    de lo que se pidio. Las demas siguen filtrandose en el panel, como siempre. Vencidas
+    fuera: cargar_exclusiones ya las quita, pero se comprueba aqui tambien porque esto
+    acaba en el sensor y una exclusion caducada que siguiera activa seria un falso
+    negativo mudo."""
+    out = []
+    ahora = time.time()
+    for r in (reglas or []):
+        sid = str(r.get("sid") or "").strip()
+        if not sid.isdigit() or r.get("puertos"):
+            continue
+        h = float(r.get("hasta") or 0)
+        if h and ahora > h:
+            continue
+        try:
+            ipaddress.ip_network(r.get("ip", ""), strict=False)
+        except ValueError:
+            continue
+        via = "by_dst" if r.get("tipo") == "dst" else "by_src"
+        mot = (r.get("motivo") or "").replace("\n", " ")[:60]
+        out.append("suppress gen_id 1, sig_id %s, track %s, ip %s%s"
+                   % (sid, via, r["ip"], ("   # " + mot) if mot else ""))
+    return out
+
+def _threshold_fusionar(actual, lineas):
+    """Mete las lineas del panel entre marcas, conservando lo que haya escrito a mano
+    fuera de ellas. El archivo es compartido: el operador puede tener sus propios
+    suppress y no se le pisan."""
+    ini = THRESHOLD_MARCA
+    fin = "# --- fin de lo generado por el panel ---"
+    bloque = [ini] + lineas + [fin]
+    if ini in actual and fin in actual:
+        a = actual.index(ini)
+        b = actual.index(fin) + len(fin)
+        return actual[:a] + "\n".join(bloque) + actual[b:]
+    return actual.rstrip("\n") + "\n\n" + "\n".join(bloque) + "\n"
+
+def escribir_threshold(reglas=None):
+    """Regenera threshold.config desde las exclusiones y recarga Suricata si valida.
+
+    Se hace en un hilo: `suricata -T` tarda segundos y la ruta que guarda la exclusion no
+    puede quedarse colgada. Si el test falla se restaura el archivo anterior: un
+    threshold.config roto deja el sensor sin reglas, que es peor que una exclusion de mas."""
+    import subprocess, threading as _th
+    if reglas is None:
+        reglas = cargar_exclusiones()
+    lineas = threshold_desde_exclusiones(reglas)
+
+    def _trabajo():
+        try:
+            actual = open(THRESHOLD_FILE, encoding="utf-8").read()
+        except OSError:
+            actual = ""
+        nuevo = _threshold_fusionar(actual, lineas)
+        if nuevo == actual:
+            return
+        tmp = THRESHOLD_FILE + ".tmp"
+        try:
+            open(tmp, "w", encoding="utf-8").write(nuevo)
+            os.replace(tmp, THRESHOLD_FILE)
+        except OSError as e:
+            sys.stderr.write("threshold: no se pudo escribir: %s\n" % e)
+            return
+        try:
+            t = subprocess.run(["suricata", "-T", "-c", "/etc/suricata/suricata.yaml"],
+                               capture_output=True, text=True, timeout=120)
+            ok = t.returncode == 0
+        except (OSError, subprocess.TimeoutExpired) as e:
+            ok = False
+            t = None
+            sys.stderr.write("threshold: suricata -T no se pudo ejecutar: %s\n" % e)
+        if not ok:
+            # volver atras: lo anterior validaba (o no existia), lo nuevo no
+            try:
+                open(tmp, "w", encoding="utf-8").write(actual)
+                os.replace(tmp, THRESHOLD_FILE)
+            except OSError:
+                pass
+            sys.stderr.write("threshold: suricata -T FALLO, restaurado el anterior%s\n"
+                             % ((": " + (t.stderr or "")[-300:]) if t else ""))
+            bitacora("THRESHOLD", "rechazado por suricata -T; se restauro el anterior")
+            return
+        for cmd in (["suricatasc", "-c", "reload-rules"],
+                    ["systemctl", "reload", "suricata"]):
+            try:
+                if subprocess.run(cmd, capture_output=True, timeout=60).returncode == 0:
+                    break
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+        bitacora("THRESHOLD", "%d exclusion(es) bajadas a Suricata" % len(lineas))
+
+    _th.Thread(target=_trabajo, daemon=True).start()
+
 def guardar_exclusiones(reglas):
     _keys = ("tipo", "ip", "motivo", "puertos", "sid", "hasta", "autor", "creado")
     limpio = [{k: r[k] for k in _keys if k in r} for r in reglas if r.get("motivo") != "(conf)"]
@@ -3477,6 +3618,11 @@ def guardar_exclusiones(reglas):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(limpio, f, ensure_ascii=False, indent=1)
     os.replace(tmp, EXCL_FILE)
+    # y al sensor: las que se puedan expresar exactas dejan de generar la alerta
+    try:
+        escribir_threshold(limpio)
+    except Exception as _e:
+        sys.stderr.write("threshold: %s\n" % _e)
 
 def _excluido(reglas, src, dst, dport, sid=None):
     for r in reglas:
@@ -15776,7 +15922,12 @@ class H(BaseHTTPRequestHandler):
                 m = 1440
             if m not in [v for v, _ in VENTANAS]:
                 m = 1440
+            _antes = ventana_generada() if "ventana_generada" in globals() else "?"
             set_ventana(m)
+            # queda anotado: una ventana de 30 min deja casi ciego al detector y hasta
+            # ahora se cambiaba sin dejar rastro de quien ni cuando
+            bitacora("CONFIG-VENTANA", "%s -> %d min%s" % (
+                _antes, m, " (OJO: 30 min deja casi ciego al detector)" if m <= 30 else ""))
             global FORCE_REGEN
             FORCE_REGEN = True   # el refrescador regenera el resumen con la nueva ventana en <=10 s
             return self._redirect("/")
@@ -17723,6 +17874,15 @@ print("af-packet NIC fisica " + fis + (": eliminada (captura solo " + mon + ")" 
 PY
   # checksums: el trafico espejeado llega con csum de offload -> no validar
   sed -i "s#^\(\s*checksum-validation:\)\s*yes#\1 no #" "$CFG"
+  # threshold.config: el paquete lo deja COMENTADO, asi que Suricata no lo leia aunque el
+  # archivo existiera. El panel baja ahi las exclusiones para que la alerta no se genere.
+  sed -i "s#^\s*\#\s*threshold-file:\s*/etc/suricata/threshold.config#threshold-file: /etc/suricata/threshold.config#" "$CFG"
+  grep -q "^threshold-file:" "$CFG" || printf '\nthreshold-file: /etc/suricata/threshold.config\n' >> "$CFG"
+  [ -f /etc/suricata/threshold.config ] || printf '# threshold.config - ver https://docs.suricata.io\n' > /etc/suricata/threshold.config
+  # el dataset de dominios: una regla con `load` de un archivo inexistente tumba la carga
+  # de TODAS las reglas al arrancar. Vacio hasta que corra suricata-feeds-update.
+  mkdir -p /var/lib/suricata-feeds
+  [ -f /var/lib/suricata-feeds/domains.dataset ] || : > /var/lib/suricata-feeds/domains.dataset
   # eve.json: con espejo real 'flow' era el 76% del volumen, 'dns' el 15% y 'quic' el 6%
   # (15 MB/s = 1,3 TB/dia): llenaron el disco y EveBox (SQLite) solo ingiere ~600 ev/s.
   # eve.json queda para EveBox con alert/http/tls/ssh/files/stats; el DNS (solo

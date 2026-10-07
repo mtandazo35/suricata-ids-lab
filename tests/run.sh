@@ -109,6 +109,8 @@ correr "cache de configuracion: rapida y sin datos viejos" "$PY" tests/test_cach
 correr "cache de AbuseIPDB: un parseo por cambio, sin datos viejos" "$PY" tests/test_cache_abuseipdb.py
 correr "instalador: local o VPN sin colgar un curl|bash" bash tests/test_instalador_espejo.sh
 correr "formulario MikroTik: conexion aparte, listas por tipo de abuso" "$PY" tests/test_form_mikrotik.py
+correr "exclusiones -> threshold.config: solo las exactas, con -T antes" "$PY" tests/test_threshold_exclusiones.py
+correr "feeds -> dataset de Suricata: base64 y validado" "$PY" tests/test_dataset_feeds.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

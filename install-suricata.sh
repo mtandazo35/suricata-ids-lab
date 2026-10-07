@@ -2458,12 +2458,8 @@ def mapa_ataques_section():
              "desde tu red hacia cada pais. <b>Pasa el mouse</b> por un pais para ver a que IPs y "
              "puertos se peticiona, y <b>haz clic para acercar</b>. Geolocalizacion <b>offline</b>; "
              "las IPs privadas o sin pais no cuentan.")
-    if not datos:
-        aviso = ("<div class='mapempty'>Sin datos de pais todavia. Puede que la base GeoIP aun no este "
-                 "instalada (<code>/var/lib/suricata-geoip/ipv4.bin</code>) o que los destinos recientes "
-                 "sean IPs privadas / sin pais.</div>")
-    else:
-        aviso = ""
+    # Sin paises el mapa se dibuja igual (gris): no hace falta un aviso encima. En un sensor
+    # por VPN, que solo ve redes privadas, saldria SIEMPRE y era ruido.
     return (
         "<style>"
         ".attmap .mapwrap{display:block}"
@@ -2510,7 +2506,7 @@ def mapa_ataques_section():
         ".attmap .mapempty{color:#6b6a66;font-size:13px;background:#faf9f6;border:1px dashed #e0dfda;border-radius:8px;padding:12px 14px;margin-top:8px}"
         "</style>"
         "<section class=\"card attmap\" style=\"margin-top:16px\"><h2>A donde atacan tus CPEs (destino por pais)</h2>"
-        "<p class=\"muted\" style=\"margin:0 0 12px\">" + intro + "</p>" + aviso +
+        "<p class=\"muted\" style=\"margin:0 0 12px\">" + intro + "</p>" +
         "<div class=mapwrap><div class=mapsvg><svg id=attackmap viewBox=\"0 20 1000 392\" "
         "preserveAspectRatio=\"xMidYMid meet\" role=img aria-label=\"Mapa de destinos\"></svg>"
         "<div class=mapctl>"

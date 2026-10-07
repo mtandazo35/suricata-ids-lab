@@ -6204,23 +6204,23 @@ def nombre_categoria(cat):
             return nom
     return CAT_OTROS[1]
 
-def categoria_cpe(clave):
-    """En que categoria cae ese CPE, segun el tipo de trafico que hace de verdad.
+def categoria_de_cats(cats_top):
+    """La clase a partir del desglose de categorias de un CPE (cats_top del reporte).
 
     Se decide por la PRIMERA categoria que casa, y la tabla va de lo mas grave a lo mas
     leve: quien tiene una botnet y ademas usa BitTorrent es, a efectos de que hacer con
     el, un CPE con botnet."""
-    c = None
-    for x in _cpes_de_reporte(None):
-        if clave_cpe(x.get("ip", ""), x.get("router", "")) == clave:
-            c = x
-            break
-    if not c:
-        return CAT_OTROS[0]
-    suyas = set((c.get("cats_top") or {}).keys())
+    suyas = set((cats_top or {}).keys())
     for cat, _nom, cats, _l in CAT_CPE:
         if suyas & set(cats):
             return cat
+    return CAT_OTROS[0]
+
+def categoria_cpe(clave):
+    """En que categoria cae ese CPE, segun el tipo de trafico que hace de verdad."""
+    for x in _cpes_de_reporte(None):
+        if clave_cpe(x.get("ip", ""), x.get("router", "")) == clave:
+            return categoria_de_cats(x.get("cats_top"))
     return CAT_OTROS[0]
 
 def listas_en_uso():
@@ -6712,34 +6712,72 @@ def estado_sensor():
         return {}
 
 POL_NOTIF = "/var/log/suricata-politica-notif.json"   # dedupe de la accion 'notificar'
-POL_ACCIONES = ("nada", "cuarentena", "dns", "notificar")
+POL_ACCIONES = ("nada", "cuarentena", "dns", "notificar")   # valores heredados por banda
+# Politica por CLASE: para cada clase de abuso, desde que riesgo se actua. El destino es
+# siempre la address-list de esa clase (lista_de_categoria).
+POL_CLASE = (("nada", "Nada (solo mostrar)"),
+             ("notificar", "Solo notificar (bitacora)"),
+             ("alto", "Cuarentena si el riesgo es ALTO"),
+             ("medio", "Cuarentena si el riesgo es MEDIO o ALTO"),
+             ("siempre", "Cuarentena en cuanto aparezca en el Top"))
+POL_CLASE_VALORES = tuple(v for v, _t in POL_CLASE)
+_BANDA_NIVEL = {"BAJO": 1, "MEDIO": 2, "ALTO": 3}
+_POL_UMBRAL = {"siempre": 1, "medio": 2, "alto": 3}
+
+def _politica_heredada(m):
+    """Lo que decian las tres bandas, como una sola politica de clase. Es la migracion:
+    una caja que tenia ALTO=cuarentena sigue haciendo exactamente eso en todas las clases
+    hasta que alguien toque el formulario. 'dns' era una cuarentena a la lista de DNS."""
+    corta = {"cuarentena", "dns"}
+    if m.get("POL_BAJO", "nada") in corta:
+        return "siempre"
+    if m.get("POL_MEDIO", "nada") in corta:
+        return "medio"
+    if m.get("POL_ALTO", "nada") in corta:
+        return "alto"
+    if "notificar" in (m.get("POL_BAJO"), m.get("POL_MEDIO"), m.get("POL_ALTO")):
+        return "notificar"
+    return "nada"
+
+def politica_de_clase(cat, m=None):
+    """Politica de esa clase: POL_<CLASE> si existe; si no, la heredada de las bandas."""
+    m = m if m is not None else _mk_globales()
+    v = (m.get("POL_" + cat.upper(), "") or "").strip()
+    if v in POL_CLASE_VALORES:
+        return v
+    return _politica_heredada(m)
+
+def accion_para(cat, banda, m=None):
+    """'cuarentena', 'notificar' o 'nada' para un CPE de esa clase con esa banda."""
+    p = politica_de_clase(cat, m)
+    if p in ("nada", "notificar"):
+        return p
+    return "cuarentena" if _BANDA_NIVEL.get((banda or "").upper(), 0) >= _POL_UMBRAL[p] else "nada"
 
 def aplicar_politicas():
-    """Aplica las politicas por banda de riesgo del Top a los CPEs: envia a cuarentena/DNS,
-    solo notifica, o nada. Las entradas 'pol' las gestiona ESTA funcion (entran cuando el CPE
-    califica por banda, salen cuando deja de calificar). Solo con MikroTik habilitado y POL_AUTO."""
+    """Aplica la politica de cada CLASE a los CPEs del Top: cuarentena en la lista de su
+    clase, solo notificar, o nada. Las entradas 'pol' las gestiona ESTA funcion (entran
+    cuando el CPE califica, salen cuando deja de calificar). Solo con MikroTik habilitado
+    y POL_AUTO."""
     m = cargar_mk()
     if not (mk_configurado() and m.get("ENABLED") == "1" and m.get("POL_AUTO") == "1"):
         return
-    pol = {"BAJO": m.get("POL_BAJO", "nada"), "MEDIO": m.get("POL_MEDIO", "nada"),
-           "ALTO": m.get("POL_ALTO", "nada")}
     try:
         top = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8")).get("top_riesgo", [])
     except Exception:
         return
-    deseado_lst = {}; deseado_dns = {}; a_notificar = {}
+    deseado = {}; a_notificar = {}
     for c in top:
-        act = pol.get((c.get("banda", "") or "").upper(), "nada")
         ip = c.get("ip"); sc = c.get("riesgo", "")
         if not ip:
             continue
+        cat = categoria_de_cats(c.get("cats_top"))
+        act = accion_para(cat, c.get("banda", ""), m)
         k = clave_cpe(ip, c.get("router", ""))   # a que nodo pertenece este CPE
         if act == "cuarentena":
-            deseado_lst[k] = sc
-        elif act == "dns":
-            deseado_dns[k] = sc
+            deseado[k] = (sc, cat)
         elif act == "notificar":
-            a_notificar[k] = (sc, c.get("banda", ""))
+            a_notificar[k] = (sc, c.get("banda", ""), cat)
     # --- accion notificar (dedupe: 1 aviso cada 6h por IP) ---
     if a_notificar:
         try:
@@ -6747,10 +6785,10 @@ def aplicar_politicas():
         except Exception:
             nv = {}
         ahora = time.time(); cambio_n = False
-        for k, (sc, band) in a_notificar.items():
+        for k, (sc, band, cat) in a_notificar.items():
             if ahora - nv.get(k, 0) > 6 * 3600:
                 mk_log("POLITICA-NOTIFICAR", ip_de(k), "politica",
-                       f"riesgo={sc} banda={band}" + _suf_nodo(k))
+                       f"clase={cat} riesgo={sc} banda={band}" + _suf_nodo(k))
                 nv[k] = ahora; cambio_n = True
         nv = {k: v for k, v in nv.items() if ahora - v < 7 * 86400}   # limpiar viejos
         if cambio_n:
@@ -6760,42 +6798,60 @@ def aplicar_politicas():
                 os.replace(POL_NOTIF + ".tmp", POL_NOTIF)
             except OSError:
                 pass
-    # --- acciones que tocan el router (cuarentena / dns) ---
-    for list_key, deseado, sent_path in (("LIST", deseado_lst, MK_SENT),
-                                         ("LIST_DNS", deseado_dns, MK_SENT_DNS)):
-        env = cargar_enviados(sent_path); cambiado = False
-        for k, sc in deseado.items():
-            if k in env:
-                continue
-            # cada CPE se bloquea en SU router y en la lista que ese router tenga
-            r = router_de_clave(k); dr = cargar_mk_de(r); lst = dr.get(list_key, "")
-            if not lst or dr.get("ENABLED") != "1":
+    # --- cuarentena: cada CPE a la lista de SU clase, en SU router ---
+    env = cargar_enviados(MK_SENT); cambiado = False
+    for k, (sc, cat) in deseado.items():
+        if k in env:
+            continue
+        r = router_de_clave(k); dr = cargar_mk_de(r)
+        lst = lista_de_categoria(cat)
+        if not lst or dr.get("ENABLED") != "1":
+            continue
+        try:
+            ok, err = mk_add(ip_de(k), comment=f"suricata politica {cat} riesgo {sc} {time.strftime('%Y-%m-%d %H:%M')}",
+                             lista=lst, ttl="", router=r)
+        except Exception:
+            ok = False
+        if ok:
+            env[k] = {"cuando": int(time.time()), "score": sc, "por": "politica", "manual": False, "pol": True,
+                      "router": r.get("id", ""), "categoria": cat, "lista": lst, "motivo": _motivo_bloqueo(k)}
+            notificar_cuarentena(ip_de(k), "politica de clase %s" % cat, lst, quien="politica")
+            mk_log("POLITICA-ENVIADO", ip_de(k), "politica",
+                   f"lista={lst} clase={cat} riesgo={sc}" + _suf_nodo(k)); cambiado = True
+    for k in list(env.keys()):        # sacar los que entraron por politica y ya no califican
+        if env[k].get("pol") and k not in deseado:
+            r = router_de_clave(k); dr = cargar_mk_de(r)
+            # de la lista en la que ESTA (la guardada), no de la que le tocaria hoy
+            lst = env[k].get("lista") or dr.get("LIST", "")
+            if not lst:
                 continue
             try:
-                ok, err = mk_add(ip_de(k), comment=f"suricata politica riesgo {sc} {time.strftime('%Y-%m-%d %H:%M')}",
-                                 lista=lst, ttl="", router=r)
+                mk_remove(ip_de(k), lista=lst, router=r)
             except Exception:
-                ok = False
-            if ok:
-                env[k] = {"cuando": int(time.time()), "score": sc, "por": "politica", "manual": False, "pol": True,
-                          "router": r.get("id", ""), "motivo": _motivo_bloqueo(k)}
-                notificar_cuarentena(ip_de(k), "politica de riesgo", lst, quien="politica")
-                mk_log("POLITICA-ENVIADO", ip_de(k), "politica",
-                       f"lista={lst} riesgo={sc}" + _suf_nodo(k)); cambiado = True
-        for k in list(env.keys()):        # sacar los que entraron por politica y ya no califican
-            if env[k].get("pol") and k not in deseado:
-                r = router_de_clave(k); dr = cargar_mk_de(r); lst = dr.get(list_key, "")
-                if not lst:
-                    continue
-                try:
-                    mk_remove(ip_de(k), lista=lst, router=r)
-                except Exception:
-                    continue
-                env.pop(k, None)
-                mk_log("POLITICA-LIBERADO", ip_de(k), "politica", f"lista={lst}" + _suf_nodo(k))
-                cambiado = True
-        if cambiado:
-            guardar_enviados(env, sent_path)
+                continue
+            env.pop(k, None)
+            mk_log("POLITICA-LIBERADO", ip_de(k), "politica", f"lista={lst}" + _suf_nodo(k))
+            cambiado = True
+    if cambiado:
+        guardar_enviados(env, MK_SENT)
+    # --- la lista DNS heredada: la accion 'dns' ya no existe (la clase DNS tiene su propia
+    # lista), asi que lo que entro por politica ahi se libera y no vuelve a entrar ---
+    envd = cargar_enviados(MK_SENT_DNS); cambiado_d = False
+    for k in list(envd.keys()):
+        if envd[k].get("pol"):
+            r = router_de_clave(k); dr = cargar_mk_de(r)
+            lst = envd[k].get("lista") or dr.get("LIST_DNS", "")
+            if not lst:
+                continue
+            try:
+                mk_remove(ip_de(k), lista=lst, router=r)
+            except Exception:
+                continue
+            envd.pop(k, None)
+            mk_log("POLITICA-LIBERADO", ip_de(k), "politica", f"lista={lst}" + _suf_nodo(k))
+            cambiado_d = True
+    if cambiado_d:
+        guardar_enviados(envd, MK_SENT_DNS)
 
 # --- barrido rapido de ALTO: envio casi inmediato de infecciones confirmadas ---
 # El ciclo normal (reporte + aplicar_politicas) corre cada REFRESH_SECS (5 min), asi que
@@ -6829,10 +6885,9 @@ def barrido_alto_rapido(maxbytes=4_000_000):
     m = cargar_mk()
     if not (mk_configurado() and m.get("ENABLED") == "1" and m.get("POL_AUTO") == "1"):
         return
-    if m.get("POL_ALTO", "nada") != "cuarentena":
-        return                                  # el barrido solo actua si ALTO -> cuarentena
-    lst = m.get("LIST", "")
-    if not lst:
+    # infeccion confirmada = clase botnet: el barrido actua si esa clase corta en algun
+    # nivel (la confirmacion ya es la prueba; la banda no hace falta esperarla)
+    if politica_de_clase("botnet", m) not in _POL_UMBRAL:
         return
     try:
         with open(EVE, "rb") as f:
@@ -10321,27 +10376,31 @@ def _card_listas(m):
         % (esc(m.get("TTL", "1h")), esc(m.get("TTL_DNS", "1d"))))
 
 def _card_politicas(m):
-    """Sub-bloque de la tarjeta MikroTik: politicas por banda de riesgo del Top origenes."""
+    """Sub-bloque de la tarjeta MikroTik: politica por CLASE de abuso."""
     esc = html.escape
-    ops = [("nada", "Nada (solo mostrar)"), ("cuarentena", "Enviar a cuarentena"),
-           ("dns", "Enviar a lista DNS"), ("notificar", "Solo notificar (Log)")]
-    def _sel(name, actual):
-        o = "".join(f"<option value='{v}'{' selected' if v == actual else ''}>{esc(t)}</option>" for v, t in ops)
-        return f"<select name='{name}'>{o}</select>"
+    filas = ""
+    for cat, nom, _cats, _l in CAT_CPE + [CAT_OTROS]:
+        actual = politica_de_clase(cat, m)
+        o = "".join(f"<option value='{v}'{' selected' if v == actual else ''}>{esc(t)}</option>"
+                    for v, t in POL_CLASE)
+        filas += (f"<div class=field><label>{esc(nom)} "
+                  f"<span style='font-size:12px;color:#6b6a66;font-weight:400'>&middot; lista "
+                  f"<span class=mono>{esc(lista_de_categoria(cat))}</span></span></label>"
+                  f"<select name='pol_{esc(cat)}'>{o}</select></div>")
     auto = m.get("POL_AUTO") == "1"
-    return ("<div class=polbox><h3 class=ch>Politicas por riesgo (Top origenes)</h3>"
-            "<p class=sub2 style='margin:2px 0 10px'>Que hacer automaticamente con cada CPE del Top segun su banda de riesgo. "
-            "<b>Ojo:</b> riesgo alto no siempre es infeccion (un torrent puede dar alto). Por eso viene apagado.</p>"
-            "<div class=grid2>"
-            f"<div class=field><label>Riesgo BAJO (0-39)</label>{_sel('pol_bajo', m.get('POL_BAJO','nada'))}</div>"
-            f"<div class=field><label>Riesgo MEDIO (40-69)</label>{_sel('pol_medio', m.get('POL_MEDIO','nada'))}</div>"
-            f"<div class=field><label>Riesgo ALTO (70-100)</label>{_sel('pol_alto', m.get('POL_ALTO','nada'))}</div>"
-            "</div>"
+    return ("<div class=polbox><h3 class=ch>Politicas por clase de abuso</h3>"
+            "<p class=sub2 style='margin:2px 0 10px'>Que hacer solo con cada CPE del Top segun "
+            "<b>que hace</b>, no solo cuanto puntua: una botnet se corta en cuanto el riesgo "
+            "sube; un torrent puede dar riesgo ALTO sin ser una infeccion, y ahi conviene "
+            "<i>solo mostrar</i>. Cada clase va a <b>su</b> address-list (las de arriba).</p>"
+            "<div class=grid2>" + filas + "</div>"
             "<div class=field><label class=chk>"
             f"<input type=checkbox name=pol_auto value=1 {'checked' if auto else ''}> "
             "Aplicar politicas automaticamente</label>"
-            "<div class=hint>Activado: el panel envia/saca del MikroTik solo, segun la banda de cada CPE. "
-            "Apagado: las politicas no hacen nada (usa los botones a mano).</div></div></div>")
+            "<div class=hint>Activado: el panel envia/saca del MikroTik solo, segun la clase y el "
+            "riesgo de cada CPE, y libera al que deja de calificar. Apagado: las politicas no hacen "
+            "nada (usa los botones a mano). El barrido rapido (~60 s) de infecciones confirmadas "
+            "sigue la politica de <b>Botnet / CnC</b>.</div></div></div>")
 
 def _form_nodo(r, nuevo=False):
     """Formulario compacto de un nodo. La clave nunca se devuelve al navegador: si se
@@ -11470,7 +11529,7 @@ recargas y el feed de abajo si (ese es en vivo).</li>
 <b>entra o sale</b> un CPE de cualquiera de las dos listas (infectados o DNS), el resumen se
 regenera en unos segundos. Asi el Top no marca como en cuarentena a un CPE que acabas de
 quitar, ni deja sin marcar al que acaba de entrar (tambien cuando lo libera el sistema solo).</li>
-<li><b>Cuarentena automatica</b> (si esta activada): las politicas por banda se aplican junto
+<li><b>Cuarentena automatica</b> (si esta activada): las politicas por clase se aplican junto
 con el resumen (cada 5 min), pero hay un <b>barrido rapido cada ~60 s</b> que envia YA a los CPEs
 con <b>infeccion confirmada</b> (no esperan los 5 min). Ver "Cuarentena automatica" mas abajo.</li>
 <li><b>Ventana del resumen</b>: por defecto <b>24 h</b>. Se puede acortar para ver solo la
@@ -12174,24 +12233,33 @@ en <code>/etc/suricata-dashboard.conf</code>; por defecto son las privadas
 (<code>10/8</code>, <code>172.16/12</code>, <code>192.168/16</code>) mas CGNAT
 (<code>100.64/10</code>). Ojo: lo que pongas <b>reemplaza</b> el valor por defecto.</p>
 
-<h2>Cuarentena automatica (politicas por banda)</h2>
+<h2>Cuarentena automatica (politicas por clase de abuso)</h2>
 <p>Ademas de enviar a mano, el panel puede actuar solo. En <b>Ajustes &rarr; MikroTik</b>, con
-<b>Aplicar politicas automaticamente</b> activado, defines que hacer por <b>banda de riesgo</b>:</p>
-<table><tr><th>Banda</th><th>Accion posible</th></tr>
-<tr><td><b>ALTO</b> / <b>MEDIO</b> / <b>BAJO</b></td>
-<td><b>nada</b> (no hacer), <b>notificar</b> (solo avisar, dedupe 6&nbsp;h), <b>dns</b> (a la lista de
-DNS sospechoso) o <b>cuarentena</b> (a la address-list de bloqueo).</td></tr></table>
+<b>Aplicar politicas automaticamente</b> activado, defines que hacer con cada <b>clase</b> de CPE
+(Botnet/CnC, DNS de malware, Escaneo, Fuerza bruta, Spam, Criptominado, P2P, Otros). La clase
+sale de lo que el CPE hace de verdad (la mas grave que casa), y el destino es siempre la
+address-list de <b>esa</b> clase.</p>
+<table><tr><th>Politica de la clase</th><th>Que pasa</th></tr>
+<tr><td><b>Nada</b></td><td>solo se muestra.</td></tr>
+<tr><td><b>Solo notificar</b></td><td>bitacora, con dedupe de 6&nbsp;h por CPE.</td></tr>
+<tr><td><b>Cuarentena si ALTO</b> / <b>si MEDIO o ALTO</b> / <b>siempre</b></td>
+<td>a la lista de la clase en cuanto el riesgo alcanza ese nivel (o en cuanto aparece en el Top).</td></tr></table>
+<p>Por que por clase y no por banda: el riesgo mide <i>cuanto</i>, no <i>que</i>. Un torrent da
+ALTO sin ser una infeccion; una botnet confirmada no necesita esperar a puntuar alto. Las cajas
+que ya tenian politica por banda la heredan tal cual en todas las clases (ALTO&rarr;cuarentena
+pasa a "si ALTO" en todas, P2P incluido) hasta que se toque el formulario: nada cambia solo.</p>
 <p>Las politicas se aplican junto con el resumen (cada 5&nbsp;min) y <b>liberan solas</b> a los CPEs
-que dejan de calificar. Ademas:</p>
+que dejan de calificar, de la lista en la que estan (aunque la clase o el nombre hayan cambiado
+despues). Ademas:</p>
 <p><b>Por que se bloqueo cada uno:</b> las politicas eligen por <b>banda de riesgo</b>, no por
 infeccion confirmada, asi que el motivo guardado es el <b>desglose del puntaje</b> (severidad,
 destinos unicos, puertos unicos, persistencia, correlacion de flota y reputacion) junto con la
 banda y los conteos. La columna <b>Motivo</b> lo muestra tal cual, y la columna <b>Por</b> dice
 <code>politica</code> o <code>politica-rapida</code> segun quien lo envio.</p>
 <ul>
-<li><b>Barrido rapido de ALTO (~60&nbsp;s):</b> si <b>ALTO &rarr; cuarentena</b>, un chequeo ligero cada
-minuto envia <b>ya</b> a los CPEs con <b>infeccion confirmada</b> (firmas CnC repetidas), sin esperar
-los 5&nbsp;min. Es conservador (solo infeccion confirmada), respeta allowlist, destinos de confianza y
+<li><b>Barrido rapido (~60&nbsp;s):</b> si la clase <b>Botnet / CnC</b> corta en algun nivel, un chequeo
+ligero cada minuto envia <b>ya</b> a los CPEs con <b>infeccion confirmada</b> (firmas CnC repetidas o
+contacto con un C2 fichado), sin esperar los 5&nbsp;min. Es conservador (solo infeccion confirmada), respeta allowlist, destinos de confianza y
 exclusiones, con <b>anti-rebote de 60&nbsp;s</b> por CPE. MEDIO/BAJO siguen en el ciclo de 5&nbsp;min.</li>
 <li><b>Auto-mantener:</b> las IPs entran sin caducidad y se liberan cuando el CPE deja de atacar (en
 vez de caducar por TTL).</li>
@@ -16409,10 +16477,11 @@ class H(BaseHTTPRequestHandler):
                 else:
                     m.pop(_k, None)
             m["AUTO_MANTENER"] = "1" if q.get("auto") else "0"
-            _va = {"nada", "cuarentena", "dns", "notificar"}
-            m["POL_BAJO"] = (q.get("pol_bajo", ["nada"])[0]) if (q.get("pol_bajo", ["nada"])[0]) in _va else "nada"
-            m["POL_MEDIO"] = (q.get("pol_medio", ["nada"])[0]) if (q.get("pol_medio", ["nada"])[0]) in _va else "nada"
-            m["POL_ALTO"] = (q.get("pol_alto", ["nada"])[0]) if (q.get("pol_alto", ["nada"])[0]) in _va else "nada"
+            # politica por clase; un valor que no es de la lista se ignora (queda la anterior)
+            for _cat, _nom, _cs, _def in CAT_CPE + [CAT_OTROS]:
+                _v = (q.get("pol_" + _cat, [""])[0] or "").strip()
+                if _v in POL_CLASE_VALORES:
+                    m["POL_" + _cat.upper()] = _v
             m["POL_AUTO"] = "1" if q.get("pol_auto") else "0"
             m["TLS"] = "1" if q.get("tls") else "0"
             m["ENABLED"] = "1" if q.get("enabled") else "0"

@@ -22,7 +22,7 @@ DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
 ARBOL = ast.parse(DASH)
 
 PIEZAS = ("CAT_CPE", "CAT_OTROS", "_CPES_CACHE", "_cpes_de_reporte",
-          "lista_de_categoria", "nombre_categoria", "categoria_cpe", "listas_cpe_reglas",
+          "lista_de_categoria", "nombre_categoria", "categoria_de_cats", "categoria_cpe", "listas_cpe_reglas",
           "_TRAD", "traducir", "AIDB_SENAL", "senal_de_categorias", "listas_en_uso",
           "ros_lista", "_RE_ROS_RARO")
 

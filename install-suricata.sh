@@ -10002,24 +10002,19 @@ def _card_listas(m):
         "nombre por defecto (el que aparece en gris). Las reglas que necesita cada una "
         "estan en la pestana <b>Cuarentena</b>.</p>"
         "<div class=grid2>" + filas + "</div>"
-        "<h3 style='margin:18px 0 2px;font-size:15px'>Caducidad y listas heredadas</h3>"
-        "<p class=sub2 style='margin:0 0 10px'>El <b>TTL</b> es cuanto dura la entrada en "
-        "el router si no se mantiene sola. Las dos listas de abajo son las antiguas: se "
-        "siguen usando para sacar a un CPE de donde esta y para el diagnostico, pero los "
-        "envios nuevos van a las de arriba.</p>"
+        "<h3 style='margin:18px 0 2px;font-size:15px'>Caducidad</h3>"
+        "<p class=sub2 style='margin:0 0 10px'>Cuanto dura cada entrada en el router si no "
+        "se mantiene sola. Vale para todas las listas de arriba.</p>"
         "<div class=grid2>"
         "<div class=field><label>TTL cuarentena (timeout)</label>"
         "<input type=text name=ttl value=\"%s\" placeholder='1h, 30m, 1d (vacio = permanente)'></div>"
         "<div class=field><label>TTL DNS sospechoso (timeout)</label>"
         "<input type=text name=ttl_dns value=\"%s\" placeholder='1d, 12h (vacio = permanente)'></div>"
-        "<div class=field><label>Address-list de cuarentena (heredada)</label>"
-        "<input type=text name=list value=\"%s\"></div>"
-        "<div class=field><label>Address-list de DNS sospechoso (heredada)</label>"
-        "<input type=text name=list_dns value=\"%s\"></div>"
         "</div>"
-        % (esc(m.get("TTL", "1h")), esc(m.get("TTL_DNS", "1d")),
-           esc(m.get("LIST", "suricata-cuarentena")),
-           esc(m.get("LIST_DNS", "suricata-dns-sospechoso"))))
+        # LIST y LIST_DNS ya no se enseñan: ningun envio nuevo va ahi. La clave se conserva
+        # en el .conf porque sigue sirviendo para liberar entradas anteriores al enrutado
+        # por categoria, para el diagnostico y como guardia; se edita a mano si hace falta.
+        % (esc(m.get("TTL", "1h")), esc(m.get("TTL_DNS", "1d"))))
 
 def _card_politicas(m):
     """Sub-bloque de la tarjeta MikroTik: politicas por banda de riesgo del Top origenes."""
@@ -16446,7 +16441,8 @@ class H(BaseHTTPRequestHandler):
                 guardar_enviados(env)
                 mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={_lst} ttl={m.get('TTL')}"
                        + (" (manual)" if clave not in cand_ips else "") + _suf_nodo(clave))
-                notificar_cuarentena(ip, "Infeccion CnC", m.get("LIST", ""), quien=getattr(CTX, "user", "?"))
+                # la lista a la que FUE de verdad (la de su categoria), no la heredada
+                notificar_cuarentena(ip, "Infeccion CnC", _lst, quien=getattr(CTX, "user", "?"))
                 globals()["FORCE_REGEN"] = True   # regenerar pronto para que el Top muestre 'En cuarentena'
                 nota = " (ya estaba en la lista)" if err else ""
                 return _fin(True, f"{ip} en {_lst} ({nombre_categoria(_cat)}){nota}")

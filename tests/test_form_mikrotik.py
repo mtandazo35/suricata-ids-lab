@@ -11,8 +11,11 @@ Lo que se protege:
     signifique "el de siempre" y se pueda deshacer un cambio sin recordar cual era;
   - que lo configurado en MK_CONF se vea en el campo (si no, guardar el formulario lo
     borraria sin querer);
-  - que las listas heredadas sigan ahi, llamadas por su nombre: se usan para sacar a un
-    CPE de donde esta y para el diagnostico;
+  - que las listas heredadas ya NO esten en el formulario: ningun envio nuevo va ahi.
+    Pero la CLAVE se conserva en el .conf -libera entradas anteriores al enrutado por
+    categoria, sirve al diagnostico y de guardia-, asi que la ruta no puede borrarla al
+    guardar un formulario que ya no la trae;
+  - que los TTL si sigan: son vivos para todas las listas, tambien las de categoria;
   - y que un nombre con comillas no rompa el HTML: lo pone el ISP y puede llevar lo que sea.
 """
 import ast
@@ -71,14 +74,34 @@ def main():
     check("las no cambiadas siguen vacias, con su defecto",
           'name=lista_escaneo value=""' in h2, "")
 
-    # --- las heredadas siguen, y dicen que lo son ----------------------------------------
+    # --- las heredadas ya no se ensenan; los TTL si ---------------------------------------
+    # Ningun envio nuevo va a LIST ni a LIST_DNS: ensenarlas como "la lista de cuarentena"
+    # era prometer un destino y usar otro. Fuera del formulario.
     h3 = ns["_card_listas"]({"LIST": "Cliente Virus", "LIST_DNS": "suricata-dns-sospechoso",
                              "TTL": "2h", "TTL_DNS": "12h"})
-    check("la lista de cuarentena heredada sigue en el formulario",
-          'name=list value="Cliente Virus"' in h3, "")
-    check("y se dice que es heredada, no 'la' lista",
-          "heredada" in h3, "")
-    check("los TTL se conservan", 'name=ttl value="2h"' in h3 and 'name=ttl_dns value="12h"' in h3, "")
+    check("la lista de cuarentena heredada ya no esta en el formulario",
+          "name=list " not in h3 and "name=list value" not in h3, h3[-400:])
+    check("ni la de DNS heredada", "name=list_dns" not in h3, "")
+    check("y ya no se habla de 'heredadas'", "heredada" not in h3, "")
+    # el TTL es vivo: cuanto dura cada entrada en el router, en todas las listas
+    check("los TTL siguen, que son vivos",
+          'name=ttl value="2h"' in h3 and 'name=ttl_dns value="12h"' in h3, "")
+    check("bajo un apartado de caducidad a secas", "Caducidad</h3>" in h3, "")
+
+    # La clave NO puede borrarse al guardar: el formulario ya no la manda, asi que la ruta
+    # tiene que conservar el valor existente (es lo que libera entradas antiguas).
+    ruta_mk = DASH[DASH.index('if ruta == "/mikrotik":'):]
+    ruta_mk = ruta_mk[:ruta_mk.index('if ruta == "/routers/')]
+    check("al guardar, LIST se conserva aunque el formulario ya no la traiga",
+          'or m.get("LIST", "suricata-cuarentena")' in ruta_mk
+          or 'or "suricata-cuarentena"' in ruta_mk, "")
+
+    # Telegram decia que el CPE fue a LIST cuando fue a la de su categoria
+    env = DASH[DASH.index("if ruta == \"/cuarentena/enviar\":"):]
+    env = env[:env.index("\n        if ruta == ", 10)]
+    check("el aviso de Telegram nombra la lista a la que FUE, no la heredada",
+          'notificar_cuarentena(ip, "Infeccion CnC", _lst' in env
+          and 'notificar_cuarentena(ip, "Infeccion CnC", m.get("LIST"' not in env, "")
 
     # --- un nombre con comillas no rompe el HTML -----------------------------------------
     h4 = ns["_card_listas"]({"LISTA_BOTNET": 'mi "lista" <rara>'})

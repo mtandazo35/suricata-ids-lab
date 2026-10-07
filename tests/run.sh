@@ -111,6 +111,7 @@ correr "instalador: local o VPN sin colgar un curl|bash" bash tests/test_instala
 correr "formulario MikroTik: conexion aparte, listas por tipo de abuso" "$PY" tests/test_form_mikrotik.py
 correr "exclusiones -> threshold.config: solo las exactas, con -T antes" "$PY" tests/test_threshold_exclusiones.py
 correr "feeds -> dataset de Suricata: base64 y validado" "$PY" tests/test_dataset_feeds.py
+correr "resolutores DNS: el DNS no es la victima, la prueba es el dominio" "$PY" tests/test_resolutores_dns.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

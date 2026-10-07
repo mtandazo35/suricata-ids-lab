@@ -1142,6 +1142,41 @@ try:
 except OSError:
     pass
 
+# Resolutores DNS: un CPE que pregunta un dominio malicioso a uno de estos NO lo esta
+# atacando; lo esta USANDO. La prueba es el dominio, no la IP del DNS. Sin esta lista el
+# resolutor subia al "Top destinos mas atacados" como victima (y 1.1.1.2 es el DNS de
+# Cloudflare que bloquea malware). Los publicos vienen de serie porque no son de nadie
+# tuyo y nunca son victima de una consulta; los del ISP se anaden en Ajustes -> DNS.
+RESOLUTORES_FILE = "/etc/suricata-resolutores.lst"
+RESOLUTORES_DEFECTO = ("1.1.1.1", "1.1.1.2", "1.1.1.3", "1.0.0.1", "8.8.8.8", "8.8.4.4",
+                       "9.9.9.9", "149.112.112.112", "208.67.222.222", "208.67.220.220")
+import ipaddress as _ipr
+RESOLUTORES = []
+try:
+    for _l in open(RESOLUTORES_FILE, encoding="utf-8"):
+        _l = _l.split("#", 1)[0].strip()
+        if _l:
+            try:
+                RESOLUTORES.append(_ipr.ip_network(_l, strict=False))
+            except ValueError:
+                pass
+except OSError:
+    RESOLUTORES = [_ipr.ip_network(x) for x in RESOLUTORES_DEFECTO]
+
+def es_via_resolutor(dst, dport, sig="", cat=""):
+    """La alerta es una consulta DNS a un resolutor conocido: cuenta para el CPE, no como
+    ataque al destino. Tiene que ser DNS DE VERDAD (puerto 53 o firma de DNS): un resolutor
+    tambien puede ser atacado por otro puerto, y eso si es un ataque."""
+    if not RESOLUTORES or not dst or dst == "?":
+        return False
+    if str(dport) != "53" and not es_dns_sospechoso(sig, cat):
+        return False
+    try:
+        o = _ipr.ip_address(dst)
+    except ValueError:
+        return False
+    return any(o.version == r.version and o in r for r in RESOLUTORES)
+
 def campos(line):
     def g(k):
         m = _RE[k].search(line)
@@ -1536,6 +1571,8 @@ MAX_IPS = 300000       # tope de cardinalidad del set (proteje la RAM en flotas 
 NOW = time.time()
 sev_by_src = {}                    # peor severidad Suricata vista (1=alta..3=baja)
 dst_by_src = defaultdict(set)      # IPs destino distintas (barrido/propagacion)
+via_dns = Counter()                # consultas maliciosas POR resolutor (no es ataque al DNS)
+via_dns_src = defaultdict(set)     # que CPEs las hicieron, por resolutor
 dpt_by_src = defaultdict(set)      # puertos destino distintos (port-sweep)
 # Con CUENTA, no solo distintos: para saber si un CPE es "el del 25/tcp" hace falta el
 # volumen, no la variedad. Acotados igual que el resto para no comerse la RAM.
@@ -1708,7 +1745,15 @@ for p in files:
                                 _d["nodos"][_rid] += 1
                     elif _mio_dst and not _mio_src:        # internet golpeando tu red
                         dias_m[time.strftime("%Y-%m-%d", time.localtime(ts))]["ent"] += 1
-            by_dst[dst] += 1
+            # Un resolutor conocido NO es la victima de una consulta DNS maliciosa: es el
+            # canal. La alerta sigue contando para el CPE (by_src y todo lo de abajo); solo
+            # no se le apunta al DNS como "atacado".
+            if es_via_resolutor(dst, dport, sig, cat):
+                via_dns[dst] += 1
+                if len(via_dns_src[dst]) < MAX_CARD:
+                    via_dns_src[dst].add(src)
+            else:
+                by_dst[dst] += 1
             by_src[src] += 1
             _cc = pais(dst)                    # pais del destino (mapa "a donde atacan")
             if _cc:
@@ -2686,8 +2731,29 @@ def top_destinos_section(n_dst=5, n_sub=8):
             f"<th class='num'>Puerto destino</th><th>Protocolo</th><th class='num'>Peticiones</th>"
             f"</tr></thead><tbody>{rows}</tbody></table></div></div>")
     _guardar_ipinfo()
+    # Los resolutores, aparte y con la lectura correcta: no "atacados", sino "usados para
+    # preguntar dominios maliciosos". Lo que importa de esta fila es cuantos CPEs lo hacen.
+    res_html = ""
+    if via_dns:
+        filas = ""
+        for d, n in via_dns.most_common(5):
+            filas += ("<tr><td class='mono'>%s</td><td class='num'>%s</td>"
+                      "<td class='num'>%s</td></tr>"
+                      % (esc(d), format(n, ","), format(len(via_dns_src.get(d, ())), ",")))
+        res_html = (
+            "<div style='margin:0 0 12px;background:#f3f7fd;border:1px solid #d8e5f7;"
+            "border-radius:8px;padding:10px 12px'>"
+            "<b>Resolutores DNS usados para consultar dominios maliciosos</b>"
+            "<p class='muted' style='margin:4px 0 8px;font-size:13px'>No son blancos: son "
+            "los DNS a los que tus CPEs preguntan por dominios fichados. "
+            "La prueba es el dominio, no el DNS. Las alertas cuentan en el CPE, no aqui. Se gestionan en "
+            "<b>Ajustes &rarr; DNS</b>.</p>"
+            "<table style='font-size:13px'><thead><tr><th>Resolutor</th>"
+            "<th class='num'>Consultas maliciosas</th><th class='num'>CPEs distintos</th>"
+            "</tr></thead><tbody>" + filas + "</tbody></table></div>")
     return (
         "<section class=\"card\" style=\"margin-top:16px\"><h2>Top IPs destino mas atacadas (y quien las ataca)</h2>"
+        + res_html +
         "<p class=\"muted\" style=\"margin:0 0 12px\">El espejo del cuadro anterior: los blancos que reciben mas alertas y "
         "los CPEs de tu red que los atacan. Util para detectar un <b>destino comun</b> (un mismo C2 o servidor tocado por "
         "varios CPEs a la vez). El chip muestra el dueño/reputacion del destino.</p>"
@@ -3112,7 +3178,7 @@ td.num{{text-align:right;font-variant-numeric:tabular-nums}}
   <div class="grid">
     {hbar("Puertos de destino mas atacados", top(by_dport), "alertas", que="puerto", tip="Puertos de destino con mas alertas (443 HTTPS, 80 HTTP, 53 DNS, 22 SSH...). Muestra a que servicios apunta el trafico sospechoso. Solo el top; el total de puertos distintos esta en el recuadro de arriba.")}
     {hbar("IPs origen (atacantes)", top(by_src), "alertas", que="IP", tip="IPs de ORIGEN que mas alertas dispararon (los equipos/CPE que generan el trafico). Ojo: muchas pueden ser solo consultas DNS sospechosas, no ataque real. Solo el top; el total esta arriba.")}
-    {hbar("IPs destino (objetivos)", top(by_dst), "alertas", que="IP", tip="IPs de DESTINO mas frecuentes: hacia donde va el trafico alertado (el objetivo). Suele ser tu DNS y unos pocos servidores.")}
+    {hbar("IPs destino (objetivos)", top(by_dst), "alertas", que="IP", tip="IPs de DESTINO mas frecuentes: hacia donde va el trafico alertado (el objetivo). Los resolutores DNS conocidos NO cuentan aqui: una consulta maliciosa es culpa del CPE, no un ataque al DNS; van aparte, mas abajo, como resolutores usados (Ajustes -> DNS).")}
     {hbar("Firmas mas frecuentes (tipo de ataque)", firmas_top, "alertas", que="firma", tip="Tipos de ataque (firmas de Suricata) mas frecuentes, agrupados y traducidos al espanol. Indica que clase de amenaza predomina.")}
   </div>
   {top_sec}
@@ -5822,6 +5888,81 @@ def guardar_dest_ok_set(conjunto):
         os.replace(tmp, DEST_OK_FILE)
     except OSError:
         pass
+
+# --- resolutores DNS: a quien preguntan tus CPEs. Una consulta de dominio malicioso a uno
+# de estos NO es un ataque al DNS: la prueba es el dominio y la culpa es del CPE. El
+# generador los saca del ranking de victimas y la ficha lo dice como es. Distinto de
+# DEST_OK: ahi la alerta deja de contar para TODOS; aqui sigue contando para el CPE. ---
+RESOLUTORES_FILE = "/etc/suricata-resolutores.lst"
+RESOLUTORES_DEFECTO = ("1.1.1.1", "1.1.1.2", "1.1.1.3", "1.0.0.1", "8.8.8.8", "8.8.4.4",
+                       "9.9.9.9", "149.112.112.112", "208.67.222.222", "208.67.220.220")
+
+def cargar_resolutores():
+    """Texto de la lista tal cual esta en disco. Sin archivo: los publicos, para que el
+    formulario los ensene y al guardar queden escritos (y dejen de ser implicitos)."""
+    try:
+        return open(RESOLUTORES_FILE, encoding="utf-8").read()
+    except OSError:
+        return "# Resolutores DNS publicos (de serie). Anade los de tu ISP, uno por linea.\n" + \
+               "\n".join(RESOLUTORES_DEFECTO) + "\n"
+
+_RESOL_CACHE = {}
+
+def _resolutores_redes():
+    """Las redes de la lista, parseadas una vez por cambio del archivo."""
+    clave = _sello(RESOLUTORES_FILE)
+    hecho = _RESOL_CACHE.get(clave)
+    if hecho is None:
+        hecho = []
+        for l in cargar_resolutores().splitlines():
+            x = l.split("#", 1)[0].strip()
+            if not x:
+                continue
+            try:
+                hecho.append(ipaddress.ip_network(x, strict=False))
+            except ValueError:
+                pass
+        hecho = tuple(hecho)
+        _RESOL_CACHE.clear()
+        _RESOL_CACHE[clave] = hecho
+    return hecho
+
+def guardar_resolutores(texto):
+    """Guarda la lista; conserva solo IP o CIDR validos y comentarios. 600: es config."""
+    limpio = []
+    for l in (texto or "").splitlines():
+        x = l.split("#", 1)[0].strip()
+        if not x:
+            if l.strip().startswith("#"):
+                limpio.append(l.strip()[:120])
+            continue
+        try:
+            ipaddress.ip_network(x, strict=False) if "/" in x else ipaddress.ip_address(x)
+            limpio.append(x)
+        except ValueError:
+            pass
+    try:
+        tmp = RESOLUTORES_FILE + ".tmp"
+        open(tmp, "w", encoding="utf-8").write("\n".join(limpio) + ("\n" if limpio else ""))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, RESOLUTORES_FILE)
+    except OSError:
+        pass
+    return len([x for x in limpio if not x.startswith("#")])
+
+def es_via_resolutor(dst, dport, tipo=""):
+    """Esta prueba es una consulta DNS a un resolutor conocido. Tiene que ser DNS (puerto 53
+    o prueba de tipo dns): al mismo DNS se le puede atacar por otro puerto, y eso si es
+    un ataque."""
+    if not dst or dst == "?":
+        return False
+    if str(dport) != "53" and tipo != "dns":
+        return False
+    try:
+        o = ipaddress.ip_address(dst)
+    except ValueError:
+        return False
+    return any(o.version == r.version and o in r for r in _resolutores_redes())
 
 def excluir_destino(d):
     """Marca un destino como confiable (falso positivo) y libera de la cuarentena TODOS los
@@ -9977,6 +10118,7 @@ _IC_DL    = _ic("M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z")
 _IC_LOG   = _ic("M3 5h18v2H3V5zm0 6h18v2H3v-2zm0 6h12v2H3v-2z")
 _IC_BOOK  = _ic("M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z")
 _IC_AUDIT = _ic("M19 3h-4.18C14.4 1.84 13.3 1 12 1c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm-2 14l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z")
+_IC_DNS   = _ic("M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.93 9h-2.95a15.65 15.65 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.93 11zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96zM4.26 14C4.1 13.36 4 12.69 4 12s.1-1.36.26-2h3.38c-.08.66-.14 1.32-.14 2s.06 1.34.14 2H4.26zm.82 2h2.95c.32 1.25.78 2.45 1.38 3.56A7.987 7.987 0 0 1 5.08 16zm2.95-8H5.08a7.987 7.987 0 0 1 4.33-3.56A15.65 15.65 0 0 0 8.03 8zM12 19.96c-.83-1.2-1.48-2.53-1.91-3.96h3.82c-.43 1.43-1.08 2.76-1.91 3.96zM14.34 14H9.66c-.09-.66-.16-1.32-.16-2s.07-1.35.16-2h4.68c.09.65.16 1.32.16 2s-.07 1.34-.16 2zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56zM16.36 14c.08-.66.14-1.32.14-2s-.06-1.34-.14-2h3.38c.16.64.26 1.31.26 2s-.1 1.36-.26 2h-3.38z")
 _IC_FEED  = _ic("M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 4.5a2.5 2.5 0 0 1 2.5 2.5c0 1-.6 1.9-1.5 2.3V17h-2v-4.7A2.5 2.5 0 0 1 9.5 8 2.5 2.5 0 0 1 12 5.5z")
 
 def _card_listas(m):
@@ -10408,6 +10550,32 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<th class=num>Indicadores</th><th>Ultima valida</th><th>Caduca</th></tr></thead>"
             f"<tbody>{filas}</tbody></table></section>")
     # --- tarjeta: conexion al MikroTik para la cuarentena (solo admin) ---
+    # --- DNS: a que resolutores preguntan tus CPEs -------------------------------------
+    card_dns = ""
+    if es_admin and yo:
+        _n_res = len(_resolutores_redes())
+        card_dns = (
+            "<section class=card><h2>DNS &mdash; resolutores conocidos</h2>"
+            "<p class=sub2>Un CPE que pregunta por un dominio de malware a uno de estos DNS "
+            "<b>no lo esta atacando</b>: lo esta usando. La prueba contra el CPE es el "
+            "<b>dominio</b>, y asi lo dice su ficha (<i>consulta DNS maliciosa: tal dominio, "
+            "via tal resolutor</i>). Sin esta lista, el DNS aparecia en <b>Top destinos</b> "
+            "como la IP mas atacada de la red. Vienen de serie los publicos (Cloudflare, "
+            "Google, Quad9, OpenDNS); anade los de tu ISP.</p>"
+            "<form method=post action='/dns'>"
+            "<div class=field><label>Resolutores DNS (una IP o CIDR por linea) "
+            f"<span style='font-size:12px;color:#6b6a66;font-weight:400'>&middot; {_n_res} en uso</span></label>"
+            "<textarea name=resolutores rows=8 style='width:100%;box-sizing:border-box;"
+            "font:12px ui-monospace,Consolas,monospace;padding:8px;border:1px solid #d7d6d2;"
+            "border-radius:8px' placeholder='1.1.1.1&#10;203.0.113.53'>"
+            f"{esc(cargar_resolutores())}</textarea>"
+            "<div class=hint>Solo cuenta como <b>consulta</b> lo que va al puerto 53 o lleva "
+            "firma de DNS: si a uno de estos DNS le pegan por otro puerto, eso <b>si</b> es "
+            "un ataque y sigue saliendo como tal. El CPE conserva todas sus alertas; lo "
+            "unico que cambia es que ya no se inventa una victima. Las lineas que no sean "
+            "IP o CIDR se descartan al guardar.</div></div>"
+            "<div class=actions><button class=primary type=submit>Guardar resolutores</button>"
+            "</div></form></section>")
     card_mk = ""
     if es_admin and yo:
         m = cargar_mk()
@@ -10733,6 +10901,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
              + _tile("usuarios", "Usuarios y roles", _IC_USERS, bool(card_users))
              + _tile("acceso", "IPs de confianza", _IC_SHIELD, bool(card_acceso))
              + _tile("mikrotik", "MikroTik", _IC_RTR, bool(card_mk))
+             + _tile("dns", "DNS", _IC_DNS, bool(card_dns))
              + _tile("feeds", "Reputacion", _IC_FEED, bool(card_feeds))
              + _tile("update", "Actualizaciones", _IC_DL, bool(card_update))
              + _tile("log", "Accesos", _IC_LOG, es_admin)
@@ -10746,7 +10915,8 @@ def perfil_page(msg="", ok=False, edit_user=None):
     def _mcard(sid, card):
         return _modal(sid, card) if card else ""
     modals = (_mcard("perfil", card_pw) + _mcard("empresa", card_empresa) + _mcard("usuarios", card_users)
-              + _mcard("acceso", card_acceso) + _mcard("mikrotik", card_mk + (_card_nodos() if card_mk else "")) + _mcard("feeds", card_feeds)
+              + _mcard("acceso", card_acceso) + _mcard("mikrotik", card_mk + (_card_nodos() if card_mk else ""))
+              + _mcard("dns", card_dns) + _mcard("feeds", card_feeds)
               + _mcard("update", card_update))
     if es_admin:
         modals += _modal("log", "<iframe class=aptframe data-src='/log?embed=1'></iframe>")
@@ -11870,6 +12040,19 @@ vez de caducar por TTL).</li>
 pestana Cuarentena esta <b>Excluir destino (falso positivo)</b>: marca esa IP como <b>confiable</b>,
 sus alertas dejan de contar y se <b>liberan automaticamente</b> todos los CPEs que fueron a la lista
 por su culpa. Los destinos confiables se guardan en <code>/etc/suricata-destinos-confianza.lst</code>.</p>
+
+<h2>Resolutores DNS: el DNS no es la victima</h2>
+<p>Cuando un CPE pregunta por un dominio de malware, la alerta lleva como <b>destino</b> la IP del
+DNS al que pregunto (1.1.1.2, 8.8.8.8, el de tu ISP...). Sin mas, el panel contaria eso como un
+ataque <i>al DNS</i> y el resolutor subiria a <b>Top destinos mas atacados</b>. No lo es: la prueba
+es el <b>dominio</b>, y la culpa, del CPE. En <b>Ajustes &rarr; DNS</b> esta la lista de resolutores
+conocidos (<code>/etc/suricata-resolutores.lst</code>, de serie los publicos). Para una IP de esa
+lista, lo que va al <b>puerto 53</b> o lleva firma de DNS se cuenta como <b>consulta a traves de el</b>:
+sale aparte en Top destinos ("resolutores usados para consultar dominios maliciosos", con cuantos
+CPEs lo hacen), la ficha del CPE dice <i>consulta DNS maliciosa: tal dominio, via tal resolutor</i>,
+y el CPE <b>conserva todas sus alertas</b>. Es distinto de <i>excluir destino</i>: aquello deja de
+contar la alerta para todos; esto solo quita la victima falsa. Si a ese mismo DNS le pegan por otro
+puerto, eso <b>si</b> es un ataque y sigue saliendo como tal.</p>
 
 <h2>Allowlist "nunca bloquear"</h2>
 <p>En <b>Ajustes</b> puedes definir IPs/CIDR que <b>jamas</b> van a cuarentena (tu infraestructura,
@@ -14716,8 +14899,18 @@ def ficha_page(ip, embed=False):
         # Actividad (de las pruebas)
         act = []
         for p in (c.get("pruebas") or [])[:8]:
+            _via = es_via_resolutor(p.get("dst", ""), p.get("dport"), p.get("tipo", ""))
             if p.get("tipo") == "dns":
-                act.append("Consulta DNS a <span class=mono>" + esc(p.get("rrname") or p.get("dst", "")) + "</span>")
+                # la prueba es el DOMINIO; el resolutor es solo por donde paso la consulta
+                _dom = esc(p.get("rrname") or p.get("dst", ""))
+                act.append("Consulta DNS maliciosa: <span class=mono>" + _dom + "</span>"
+                           + (" <span class=rowmeta>via " + esc(p.get("dst", ""))
+                              + " (resolutor conocido)</span>" if _via and p.get("rrname") else ""))
+            elif _via:
+                # puerto 53 a un resolutor de la lista sin dominio capturado: sigue siendo
+                # una consulta DNS del CPE, no una 'comunicacion' con una victima
+                act.append("Consulta DNS a traves de <span class=mono>" + esc(p.get("dst", ""))
+                           + "</span> <span class=rowmeta>(resolutor conocido: no es la victima)</span>")
             else:
                 dst = esc(p.get("dst", "")) + ((":" + esc(str(p.get("dport")))) if p.get("dport") else "")
                 act.append("Comunicacion a <span class=mono>" + dst + "</span>")
@@ -16331,6 +16524,15 @@ class H(BaseHTTPRequestHandler):
                 return self._html(perfil_page("Clave de AbuseIPDB VALIDA y guardada (solo en este servidor).", ok=True))
             bitacora("CONFIG-ABUSEIPDB", f"guardada sin validar ({det})")
             return self._html(perfil_page(f"Clave guardada, pero {det}.", ok=True))
+        if ruta == "/dns":
+            if not self._admin():
+                return self._deny()
+            n = guardar_resolutores(q.get("resolutores", [""])[0])
+            bitacora("CONFIG-DNS", "%d resolutor(es)" % n)
+            return self._html(perfil_page(
+                "Resolutores DNS guardados (%d). Las consultas maliciosas a ellos "
+                "cuentan contra el CPE, no como ataque al DNS; se nota en el proximo reporte." % n,
+                ok=True))
         if ruta == "/feeds/groq":
             if not self._admin():
                 return self._deny()
@@ -17351,6 +17553,26 @@ VENTANA_MIN=360
 ${_MIS_REDES}
 CONF
   chmod 600 /etc/suricata-dashboard.conf
+fi
+
+# Resolutores DNS conocidos: una consulta maliciosa a ellos es culpa del CPE, no un ataque
+# al DNS. Nace con los publicos; los del ISP se anaden en Ajustes -> DNS. No se pisa.
+_RESOL="/etc/suricata-resolutores.lst"
+if [ ! -f "$_RESOL" ]; then
+  cat > "$_RESOL" <<'LST'
+# Resolutores DNS publicos (de serie). Anade los de tu ISP, uno por linea (IP o CIDR).
+1.1.1.1
+1.1.1.2
+1.1.1.3
+1.0.0.1
+8.8.8.8
+8.8.4.4
+9.9.9.9
+149.112.112.112
+208.67.222.222
+208.67.220.220
+LST
+  chmod 600 "$_RESOL"
 fi
 
 # Los extremos del tunel no son abonados, y por defecto el panel cree que si: sus redes

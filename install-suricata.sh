@@ -6242,6 +6242,26 @@ def listas_en_uso():
         out.append((cat, nom, lst, dentro.get(lst, 0)))
     return out
 
+def cpes_por_lista():
+    """{lista: [entradas]} de lo ya enviado, para desplegar QUIENES hay en cada address-list.
+
+    Cada entrada: clave (identidad router|IP), ip, router, cuando, por (quien lo mando) y
+    categoria. Misma fuente que listas_en_uso(): el registro de enviados, que guarda la
+    lista real con la que se mando cada uno. Ordenado por mas reciente primero."""
+    out = {}
+    for k, v in (cargar_enviados(MK_SENT) or {}).items():
+        v = v or {}
+        l = v.get("lista") or ""
+        if not l:
+            continue
+        out.setdefault(l, []).append({
+            "clave": k, "ip": ip_de(k), "router": v.get("router", "") or rid_de(k),
+            "cuando": int(v.get("cuando", 0) or 0), "por": str(v.get("por", "") or ""),
+            "categoria": v.get("categoria", "") or ""})
+    for l in out:
+        out[l].sort(key=lambda e: e["cuando"], reverse=True)
+    return out
+
 def listas_cpe_reglas():
     """Las reglas de cada lista. No todas se tratan igual, que es el motivo de separarlas."""
     def L(c):
@@ -15492,10 +15512,43 @@ def cuarentena_page(msg="", es_admin=False):
         operador ve 'enviado' y no sabe a donde ni con que consecuencia."""
         filas = ""
         total = 0
+        dentro = cpes_por_lista()
+        _mapa = cargar_abonados().get("mapa") or {}      # una lectura para todas las filas
+        _multi = len(cargar_routers()) > 1
+        def _quien(e):
+            por = e["por"]
+            if por in ("politica", "politica-rapida"):
+                return "politica"
+            return "a mano (%s)" % por if por and por != "?" else "a mano"
         for cat, nom, lst, n in listas_en_uso():
             total += n
+            miembros = dentro.get(lst, [])
+            if miembros:
+                items = ""
+                for e in miembros[:200]:
+                    ab = abonado_de(e["ip"], e["router"], _mapa) or {}
+                    nombre = (ab.get("nombre") or "").strip()
+                    items += ("<tr><td class=mono><button type=button class=evlink "
+                              "onclick=\"verFicha('%s')\" title='Ver la ficha'>%s</button>%s</td>"
+                              "<td>%s</td><td class=mono>%s</td><td>%s</td></tr>"
+                              % (esc(e["clave"]), esc(e["ip"]),
+                                 (" <span class=sub2>&middot; %s</span>" % esc(e["router"])) if _multi and e["router"] else "",
+                                 esc(nombre) or "<span class=sub2>&mdash;</span>",
+                                 time.strftime("%d/%m %H:%M", time.localtime(e["cuando"])) if e["cuando"] else "&mdash;",
+                                 esc(_quien(e))))
+                if len(miembros) > 200:
+                    items += ("<tr><td colspan=4 class=sub2>y %d mas (la pestana Cuarentena los "
+                              "lista todos)</td></tr>" % (len(miembros) - 200))
+                celda = ("<details class=ldet><summary style='cursor:pointer'>%s "
+                         "<span class=sub2>&middot; ver las %d IPs</span></summary>"
+                         "<table class=ut style='margin:6px 0 2px;font-size:12.5px'><thead><tr>"
+                         "<th>IP</th><th>Abonado</th><th>Desde</th><th>Quien</th></tr></thead>"
+                         "<tbody>%s</tbody></table></details>"
+                         % (esc(nom), len(miembros), items))
+            else:
+                celda = esc(nom)
             filas += ("<tr><td>%s</td><td class=mono>%s</td><td class=num>%s</td></tr>"
-                      % (esc(nom), esc(lst), ("%d" % n) if n else "&mdash;"))
+                      % (celda, esc(lst), ("%d" % n) if n else "&mdash;"))
         return ("<div class=seccion><div class=shead><div>"
                 "<h2>Las listas del MikroTik, una por categoria</h2>"
                 "<p class=sub>Cada CPE va a la lista de <b>su</b> categoria, porque no "
@@ -15506,6 +15559,10 @@ def cuarentena_page(msg="", es_admin=False):
                 + ("<b>%d CPE enviados</b> en total." % total if total
                    else "Todavia no se ha enviado ninguno.")
                 + "</p></div></div>"
+                "<style>.ldet summary{list-style:none}.ldet summary::-webkit-details-marker{display:none}"
+                ".ldet summary::before{content:'\\25B8';display:inline-block;width:14px;color:#6b6a66}"
+                ".ldet[open] summary::before{content:'\\25BE'}"
+                ".ldet .ut td,.ldet .ut th{padding:4px 8px;white-space:normal}</style>"
                 "<div class=card><table><thead><tr><th>Categoria</th>"
                 "<th>Address-list</th><th class=num>CPEs dentro</th></tr></thead>"
                 "<tbody>" + filas + "</tbody></table></div>"

@@ -23,7 +23,7 @@ ARBOL = ast.parse(DASH)
 
 PIEZAS = ("CAT_CPE", "CAT_OTROS", "_CPES_CACHE", "_cpes_de_reporte",
           "lista_de_categoria", "nombre_categoria", "categoria_cpe", "listas_cpe_reglas",
-          "_TRAD", "traducir", "AIDB_SENAL", "senal_de_categorias",
+          "_TRAD", "traducir", "AIDB_SENAL", "senal_de_categorias", "listas_en_uso",
           "ros_lista", "_RE_ROS_RARO")
 
 fallos = 0
@@ -34,9 +34,10 @@ def check(d, c, e=""):
         fallos += 1
 
 
-def entorno(tmp, globales=None):
+def entorno(tmp, globales=None, enviados=None):
     ns = {"json": json, "os": os, "time": __import__("time"), "re": __import__("re"),
-          "LOGDIR": tmp,
+          "LOGDIR": tmp, "MK_SENT": "",
+          "cargar_enviados": lambda path=None: dict(enviados or {}),
           "clave_cpe": lambda ip, rid: (rid + "|" + ip) if rid else ip,
           "_mk_globales": lambda: dict(globales or {})}
     for n in ARBOL.body:
@@ -236,6 +237,60 @@ def main():
     check("y Spamhaus sigue siendo mala reputacion, no spam",
           ns["traducir"]("ET DROP Spamhaus DROP Listed") == "Mala reputacion",
           ns["traducir"]("ET DROP Spamhaus DROP Listed"))
+
+    # =====================================================================================
+    # Lo que se promete en pantalla es lo que se usa al enviar
+    # =====================================================================================
+    # La seccion decia "-> lista suricata-dns-sospechoso" y el envio iba a
+    # clientes-dns-malware. El operador leia una lista y el sistema usaba otra, y eso pasaba
+    # en la pantalla donde se decide dejar sin internet a un abonado.
+    check("la fila dice a que lista va ESE CPE, no la de la seccion",
+          "lista_de_categoria(categoria_cpe(k))" in DASH, "")
+    check("y el modal de confirmacion nombra esa misma lista",
+          "entra en la lista {esc(_lst)}" in DASH, "")
+    check("la seccion ya no promete una lista unica",
+          "address-list de <b>su categoria</b>" in DASH, "")
+
+    # =====================================================================================
+    # Las listas se pueden ver: cuales son y quien esta dentro
+    # =====================================================================================
+    ns3 = entorno(tmp, enviados={
+        "10.0.0.1": {"lista": "clientes-botnet"},
+        "10.0.0.2": {"lista": "clientes-botnet"},
+        "10.0.0.3": {"lista": "clientes-p2p"},
+        "10.0.0.4": {},                      # sin lista guardada
+    })
+    uso = {l: n for _c, _nom, l, n in ns3["listas_en_uso"]()}
+    check("se cuenta cuantos CPEs hay en cada lista",
+          uso.get("clientes-botnet") == 2 and uso.get("clientes-p2p") == 1, uso)
+    check("las vacias salen igual, para saber que existen",
+          uso.get("clientes-spam") == 0, uso)
+    # el registro guarda la lista con la que se mando cada uno; uno sin ella no se puede
+    # colocar en ninguna sin adivinar, y adivinar aqui seria decir que esta cortado donde
+    # no lo esta
+    check("un enviado sin lista guardada no se cuela en ninguna",
+          sum(uso.values()) == 3, uso)
+    check("estan las siete categorias mas otros",
+          len(ns3["listas_en_uso"]()) == 8, len(ns3["listas_en_uso"]()))
+
+    # listas_cpe_reglas() generaba todo esto y no lo llamaba nadie: codigo muerto
+    check("el panel ensena las listas y sus reglas",
+          "listas_cpe_reglas()" in DASH and "Las listas del MikroTik" in DASH, "")
+    check("y avisa de que sin regla el panel dice enviado y no pasa nada",
+          "dice <b>enviado</b> y no pasa nada" in DASH, "")
+
+    # =====================================================================================
+    # El diagnostico vigila las listas que se USAN
+    # =====================================================================================
+    # Antes miraba LIST y LIST_GRAD y nunca las clientes-*: avisaba de listas que no se
+    # usan y callaba sobre las que si. "La lista de cuarentena NO corta nada" podia estar
+    # en verde y aun asi no cortarse nada.
+    check("el diagnostico incluye las listas de categoria en uso",
+          "listas_en_uso() if n]" in DASH, "")
+    # y solo las que tienen a alguien: una instalacion recien montada no puede salir con
+    # siete avisos de listas vacias que nadie ha usado todavia
+    check("pero solo las que tienen a alguien dentro",
+          "for _c, nom, l, n in listas_en_uso() if n]" in DASH, "")
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

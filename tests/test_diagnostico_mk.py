@@ -39,7 +39,11 @@ def entorno(tablas, listas=None):
           "_mk_reply": lambda s: (True, [], ""),
           # doble: lo que se comprueba aqui es el diagnostico, no como se averigua
           # la IP (eso es tests/test_ip_sensor.py)
-          "ip_del_sensor": lambda hacia="": "10.0.0.9"}
+          "ip_del_sensor": lambda hacia="": "10.0.0.9",
+          # sin nadie enviado, no hay listas de categoria que vigilar: aqui se prueba
+          # el diagnostico base, y que con listas en uso tambien las mire va en
+          # tests/test_listas_categoria.py
+          "listas_en_uso": lambda: []}
     for n in ARBOL.body:
         nom = getattr(n, "name", None) or (
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")

@@ -5194,9 +5194,15 @@ def mk_diagnostico(router=None):
                     "streaming-server=%s:37008 filter-stream=yes\n/tool sniffer start"
                     % ip_del_sensor(d.get("HOST", ""))))
 
-    # 2) las address-lists tienen que tener una regla que las use
-    for lista, que in ((d.get("LIST", ""), "cuarentena"),
-                       (d.get("LIST_GRAD", ""), "cuarentena graduada")):
+    # 2) las address-lists tienen que tener una regla que las use.
+    #    Incluidas las de CATEGORIA, que son a las que el panel manda de verdad: antes se
+    #    comprobaban solo LIST y LIST_GRAD, asi que avisaba de listas que no se usan y
+    #    callaba sobre las que si. Solo se miran las que tienen a alguien dentro, para no
+    #    llenar esto de avisos de listas vacias en una instalacion recien montada.
+    _por_cat = [(l, "categoria %s" % nom.lower())
+                for _c, nom, l, n in listas_en_uso() if n]
+    for lista, que in ([(d.get("LIST", ""), "cuarentena"),
+                        (d.get("LIST_GRAD", ""), "cuarentena graduada")] + _por_cat):
         if not lista:
             continue
         if usa_lista(lista):
@@ -5737,6 +5743,23 @@ def categoria_cpe(clave):
         if suyas & set(cats):
             return cat
     return CAT_OTROS[0]
+
+def listas_en_uso():
+    """[(categoria, nombre humano, lista, cuantos CPEs hay dentro)] de lo ya enviado.
+
+    Sale del registro de enviados, que guarda la lista con la que se mando cada uno: si
+    manana cambia la categoria de un CPE o el nombre de la lista, hay que seguir sabiendo
+    de donde sacarlo."""
+    dentro = {}
+    for _k, v in (cargar_enviados(MK_SENT) or {}).items():
+        l = (v or {}).get("lista") or ""
+        if l:
+            dentro[l] = dentro.get(l, 0) + 1
+    out = []
+    for cat, nom, _cats, _l in CAT_CPE + [CAT_OTROS]:
+        lst = lista_de_categoria(cat)
+        out.append((cat, nom, lst, dentro.get(lst, 0)))
+    return out
 
 def listas_cpe_reglas():
     """Las reglas de cada lista. No todas se tratan igual, que es el motivo de separarlas."""
@@ -14761,12 +14784,17 @@ def cuarentena_page(msg="", es_admin=False):
                 meta_html = f"<div class='rowmeta'>desde {cuando}{(' · ' + meta) if meta else ''}</div>"
                 return f"<span class='enq' title='En {esc(lista_name)} desde {cuando}'>En lista</span> {quitar}{meta_html}"
             if es_admin and activo:
+                # la lista REAL de ese CPE, no la de la seccion: el envio enruta por
+                # categoria (clientes-botnet, clientes-escaneo...). Decir otra cosa aqui
+                # es prometer un destino y usar otro.
+                _lst = lista_de_categoria(categoria_cpe(k))
                 return (f"<form method=post action='/{pref}/enviar' style='display:inline'>"
                         f"<input type=hidden name=ip value='{esc(k)}'><input type=hidden name=score value='{c.get('riesgo',0)}'>"
                         f"<button class='qbtn send' onclick=\"return ask(this,"
-                        f"'Enviar al MikroTik','{esc(ip)} entra en la lista {esc(lista_name)}. "
+                        f"'Enviar al MikroTik','{esc(ip)} entra en la lista {esc(_lst)}. "
                         f"Lo que le pase a ese CPE depende de la regla que uses con esa "
-                        f"lista.','Enviar')\">Enviar</button></form>")
+                        f"lista.','Enviar')\">Enviar</button>"
+                        f"<div class=rowmeta>a <span class=mono>{esc(_lst)}</span></div></form>")
             return "<span class='dry' title='Configura y habilita el MikroTik en Ajustes para activar el envio'>solo sugerencia</span>"
         filas = "".join(
             f"<tr><td data-label='CPE' class='mono ipx'>{esc(c.get('ip',''))}"
@@ -14800,7 +14828,9 @@ def cuarentena_page(msg="", es_admin=False):
                    f"'Enviar {len(pend_alta)}','danger')\">"
                    f"&#9888; Enviar confirmados ({len(pend_alta)})</button></form>")
         return (f"<div class='seccion'><div class='shead'><div><h2>{titulo}</h2>"
-                f"<p class='sub'>{sub} · {len(candidatos)} candidato(s).</p></div>{btn}</div>"
+                f"<p class='sub'>{sub} · {len(candidatos)} candidato(s). "
+                f"Cada CPE va a la address-list de <b>su categoria</b>, que sale en su fila."
+                f"</p></div>{btn}</div>"
                 "<div class='card'><table><thead><tr>"
                 "<th>CPE (IP origen)</th><th>Riesgo / confianza</th><th>Motivo y evidencia</th>"
                 "<th class='num'>Destinos</th><th class='num'>Puertos</th>"
@@ -14809,6 +14839,42 @@ def cuarentena_page(msg="", es_admin=False):
                 "<th class='num' title='Todas las alertas de este CPE en la ventana, "
                 "no solo las de esta categoria'>Alertas</th><th>Accion</th>"
                 f"</tr></thead><tbody>{filas}</tbody></table></div></div>")
+
+    def _sec_listas():
+        """Las address-lists por categoria: cuales son, quien hay dentro y que regla usa.
+
+        No todas se tratan igual, y ese es justo el motivo de separarlas: una botnet se
+        corta, el P2P se encola y el DNS de malware se redirige. Sin esta tabla el
+        operador ve 'enviado' y no sabe a donde ni con que consecuencia."""
+        filas = ""
+        total = 0
+        for cat, nom, lst, n in listas_en_uso():
+            total += n
+            filas += ("<tr><td>%s</td><td class=mono>%s</td><td class=num>%s</td></tr>"
+                      % (esc(nom), esc(lst), ("%d" % n) if n else "&mdash;"))
+        return ("<div class=seccion><div class=shead><div>"
+                "<h2>Las listas del MikroTik, una por categoria</h2>"
+                "<p class=sub>Cada CPE va a la lista de <b>su</b> categoria, porque no "
+                "todas se tratan igual: una botnet se corta, el P2P se encola y el DNS de "
+                "malware se redirige al resolutor. El nombre de cada lista se puede cambiar "
+                "en <code>/etc/suricata-mikrotik.conf</code> con "
+                "<code>LISTA_&lt;CATEGORIA&gt;</code>. "
+                + ("<b>%d CPE enviados</b> en total." % total if total
+                   else "Todavia no se ha enviado ninguno.")
+                + "</p></div></div>"
+                "<div class=card><table><thead><tr><th>Categoria</th>"
+                "<th>Address-list</th><th class=num>CPEs dentro</th></tr></thead>"
+                "<tbody>" + filas + "</tbody></table></div>"
+                "<details style='margin-top:8px'><summary style='cursor:pointer;"
+                "font-size:13px;font-weight:600'>Las reglas que necesita cada lista</summary>"
+                "<p class=hint style='margin:6px 0 4px'>Sin una regla que use la lista, el "
+                "panel dice <b>enviado</b> y no pasa nada. Son distintas a proposito: lo que "
+                "hay que cortar, lo que hay que encolar y lo que hay que redirigir.</p>"
+                "<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;"
+                "padding:10px;overflow-x:auto;font-size:12px'>"
+                + esc(listas_cpe_reglas()) + "</pre></details></div>")
+
+    sec_listas = _sec_listas()
 
     sec_inf = _seccion("Infectados (malware/CnC)",
                        "<b>Confirmado</b> = ≥2 pruebas <b>independientes</b> (firmas distintas, reputacion "
@@ -15104,6 +15170,9 @@ def cuarentena_page(msg="", es_admin=False):
             f"<p class='sub'>Ventana {vmin} min · lista de hace {edad}. Dos categorias: <b>infectados</b> (malware/CnC) "
             "y <b>DNS sospechoso</b> (consultan dominios de botnet), cada una a su address-list del MikroTik.</p>"
             + _salud_html() + flash + estado + sec_fp + sec_inf + sec_dns + sec_dst + sec_manual +
+            # al final: se consulta cuando hace falta saber a donde fue algo, no
+            # cada vez que se abre la pagina a ver quien esta atacando
+            sec_listas +
             "<div id=fichamodal class=fichaov onclick=\"if(event.target===this)this.style.display='none'\">"
             "<div class=fichabox><button type=button class=fichax "
             "onclick=\"document.getElementById('fichamodal').style.display='none'\">&times;</button>"

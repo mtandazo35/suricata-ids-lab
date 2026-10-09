@@ -7,8 +7,8 @@ como "la lista de cuarentena", y el envio NO manda ahi: enruta por categoria
 de verdad reciben a los CPEs, solo se podian cambiar editando MK_CONF a mano.
 
 Lo que se protege:
-  - que haya un campo por categoria, con el nombre por defecto a la vista, para que vacio
-    signifique "el de siempre" y se pueda deshacer un cambio sin recordar cual era;
+  - que haya un campo por categoria con el nombre por defecto CARGADO (editable); vacio o
+    el propio defecto significan "el de siempre" y no se guardan como cambio;
   - que lo configurado en MK_CONF se vea en el campo (si no, guardar el formulario lo
     borraria sin querer);
   - que las listas heredadas ya NO esten en el formulario: ningun envio nuevo va ahi.
@@ -59,9 +59,8 @@ def main():
     h = ns["_card_listas"]({})
     for cat, nom, _c, por_defecto in cats:
         check("hay campo para '%s'" % cat, "name=lista_%s" % cat in h, "")
-        check("  con el nombre por defecto como pista, no como valor",
-              'placeholder="%s"' % por_defecto in h
-              and 'name=lista_%s value=""' % cat in h, "")
+        check("  con el nombre por defecto CARGADO como valor (editable)",
+              'name=lista_%s value="%s"' % (cat, por_defecto) in h, "")
     check("son las ocho (siete categorias mas otros)",
           h.count("name=lista_") == 8, h.count("name=lista_"))
 
@@ -71,8 +70,8 @@ def main():
     check("una lista cambiada en MK_CONF aparece en su campo",
           'name=lista_botnet value="abusivos-botnet"' in h2, "")
     check("y otra tambien", 'name=lista_p2p value="cola-p2p"' in h2, "")
-    check("las no cambiadas siguen vacias, con su defecto",
-          'name=lista_escaneo value=""' in h2, "")
+    check("las no cambiadas traen su defecto cargado",
+          'name=lista_escaneo value="clientes-escaneo"' in h2, "")
 
     # --- las heredadas ya no se ensenan; los TTL si ---------------------------------------
     # Ningun envio nuevo va a LIST ni a LIST_DNS: ensenarlas como "la lista de cuarentena"
@@ -115,9 +114,9 @@ def main():
     check("la ruta guarda las listas por categoria",
           'for _cat, _nom, _cs, _def in CAT_CPE + [CAT_OTROS]:' in ruta
           and '"LISTA_" + _cat.upper()' in ruta, "")
-    # vacio = borrar la clave: asi vuelve el nombre por defecto sin tener que escribirlo
-    check("un campo vacio borra la clave y vuelve el defecto",
-          "m.pop(_k, None)" in ruta, "")
+    # vacio o el propio defecto = borrar la clave: no se guarda el defecto como cambio
+    check("un campo vacio o con el defecto borra la clave",
+          "m.pop(_k, None)" in ruta and "_v != _def" in ruta, "")
     check("y la conexion y las listas se guardan en el mismo envio",
           'm["HOST"]' in ruta and "lista_" in ruta, "")
 

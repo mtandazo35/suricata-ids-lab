@@ -10452,7 +10452,9 @@ def _card_listas(m):
     esc = html.escape
     filas = ""
     for cat, nom, _cats, por_defecto in CAT_CPE + [CAT_OTROS]:
-        actual = (m.get("LISTA_" + cat.upper(), "") or "").strip()
+        # el nombre por defecto va CARGADO en el campo (editable), no solo como pista: el
+        # usuario queria ver y poder cambiar el nombre real, no un gris que no se guarda
+        actual = (m.get("LISTA_" + cat.upper(), "") or "").strip() or por_defecto
         filas += ("<div class=field><label>%s</label>"
                   "<input type=text name=lista_%s value=\"%s\" placeholder=\"%s\">"
                   "</div>" % (esc(nom), esc(cat), esc(actual), esc(por_defecto)))
@@ -10460,9 +10462,9 @@ def _card_listas(m):
         "<h3 style='margin:18px 0 2px;font-size:15px'>Listas por tipo de abuso</h3>"
         "<p class=sub2 style='margin:0 0 10px'>Cada CPE va a la address-list de <b>su</b> "
         "categoria, porque no todas se tratan igual: una botnet se corta, el P2P se encola "
-        "y el DNS de malware se redirige a tu resolutor. Deja un campo vacio para usar el "
-        "nombre por defecto (el que aparece en gris). Las reglas que necesita cada una "
-        "estan en la pestana <b>Cuarentena</b>.</p>"
+        "y el DNS de malware se redirige a tu resolutor. Vienen cargados los nombres por "
+        "defecto: cambia el que quieras (vacio = volver al defecto). Las reglas que "
+        "necesita cada una estan en la pestana <b>Cuarentena</b>.</p>"
         "<div class=grid2>" + filas + "</div>"
         "<h3 style='margin:18px 0 2px;font-size:15px'>Caducidad</h3>"
         "<p class=sub2 style='margin:0 0 10px'>Cuanto dura cada entrada en el router si no "
@@ -16620,7 +16622,7 @@ class H(BaseHTTPRequestHandler):
             for _cat, _nom, _cs, _def in CAT_CPE + [CAT_OTROS]:
                 _k = "LISTA_" + _cat.upper()
                 _v = (q.get("lista_" + _cat, [""])[0]).strip()[:64]
-                if _v:
+                if _v and _v != _def:          # el defecto viene cargado: no es un cambio
                     m[_k] = _v
                 else:
                     m.pop(_k, None)

@@ -2375,6 +2375,23 @@ def reputacion_de(ip):
                 return (src, f"{(net >> 24) & 255}.{(net >> 16) & 255}.{(net >> 8) & 255}.{net & 255}/{pl}")
     return ("", "")
 
+_FLUJOS_POR_SRC = None
+
+def flujos_de(src):
+    """Las claves de `flujos` de ese CPE, por indice construido UNA vez.
+
+    Perezoso a proposito: `flujos` ya esta completo cuando alguien pide el primero (las
+    secciones corren despues del bucle). Antes, cada candidato recorria los 200k flujos
+    enteros para la correlacion de flota: con 3.000 candidatos eran 600 M comparaciones y
+    el 41%% del tiempo del generador (banco de 1,5 M de lineas: 14,8 s de 36)."""
+    global _FLUJOS_POR_SRC
+    if _FLUJOS_POR_SRC is None:
+        idx = defaultdict(list)
+        for k in flujos:
+            idx[k[0]].append(k)
+        _FLUJOS_POR_SRC = idx
+    return _FLUJOS_POR_SRC.get(src, ())
+
 def riesgo(src):
     """Puntaje de riesgo 0-100 del CPE (IP origen) combinando senales, en vez de
     clasificar por el texto de la firma. Devuelve (score, banda, color, desglose)."""
@@ -2387,11 +2404,10 @@ def riesgo(src):
     p += min(6, by_src.get(src, 0) / 60 * 6)           # persistente en la ventana
     c_per = min(20, p)
     otros = 0                                          # correlacion: otros CPE, mismo patron
-    for k in flujos:
-        if k[0] == src:
-            n = len(patron_src.get((k[5], k[3]), ())) - 1
-            if n > otros:
-                otros = n
+    for k in flujos_de(src):
+        n = len(patron_src.get((k[5], k[3]), ())) - 1
+        if n > otros:
+            otros = n
     c_cor = min(5, otros)
     rep_hits = 0                                       # destinos del CPE en feeds de reputacion
     if REP_OK:
@@ -3105,7 +3121,7 @@ try:
                 # "toco una IP fichada" y "hablo con el C2 por donde el C2 escucha"
                 _pc2 = REP_PORTS.get(d)
                 _coincide = bool(_pc2) and any(
-                    k[0] == src and k[2] == d and str(k[3]) in _pc2 for k in flujos)
+                    k[2] == d and str(k[3]) in _pc2 for k in flujos_de(src))
                 out.append({"ip": d, "cidr": cidr, "fuente": fuente,
                             "categoria": mm.get("categoria", ""), "vigente": mm.get("vigente", False),
                             "fetched_valid": mm.get("fetched_valid", 0), "expira": mm.get("expira", 0),

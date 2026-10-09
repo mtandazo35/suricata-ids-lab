@@ -47,7 +47,7 @@ def entorno(tablas, listas=None):
           # la accion por clase: por defecto ninguna configurada (se prueba aparte abajo)
           "_mk_globales": lambda: {},
           "accion_de_clase": lambda cat, m=None: "nada",
-          "_plan_en": lambda s_, cat, accion=None, m=None: {"cambios": 0, "acciones": [], "aviso": "", "lista": "l"}}
+          "_plan_en": lambda s_, cat, accion=None, m=None, **k: {"cambios": 0, "acciones": [], "aviso": "", "lista": "l"}}
     for n in ARBOL.body:
         nom = getattr(n, "name", None) or (
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
@@ -153,7 +153,7 @@ def main():
     ns6 = entorno({"/tool/sniffer/print": [{"running": "true", "streaming-enabled": "true", "streaming-server": "10.0.0.9:37008"}],
                    "/ip/settings/print": [{"rp-filter": "strict"}]})
     ns6["accion_de_clase"] = lambda cat, m=None: {"botnet": "cortar", "spam": "sin-correo"}.get(cat, "nada")
-    ns6["_plan_en"] = lambda s_, cat, accion=None, m=None: (
+    ns6["_plan_en"] = lambda s_, cat, accion=None, m=None, **k: (
         {"cambios": 0, "acciones": [1], "aviso": "", "lista": "clientes-botnet"} if cat == "botnet"
         else {"cambios": 3, "acciones": [1, 2, 3], "aviso": "", "lista": "clientes-spam"})
     c6 = ns6["mk_diagnostico"]()

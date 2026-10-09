@@ -95,6 +95,10 @@ def main():
     ns["cargar_routers"] = lambda: [{"id": "r1", "HOST": "192.0.2.1", "nombre": "Centro"}, {"id": "r2", "HOST": "192.0.2.2", "nombre": "Norte"}]
     h2 = ns["_card_listas"]({})
     check("con dos routers, selector de router", "id=accrid" in h2 and "Norte" in h2, "")
+    check("boton 'Verificar mis reglas' por categoria, visible solo con 'propias'",
+          h.count("reglasVerificar('") == 8 and "id=verif_botnet style='display:block" in h
+          and "id=verif_escaneo style='display:none" in h, "")
+    check("la vista previa ensena la verificacion y sin errores deja aplicar", "_accVer(V)" in h and "(L.length&&!hayE)" in h, "")
     check("el modal usa fromCharCode, no escapes que se rompen al incrustar", "String.fromCharCode(10)" in h and "\\n" not in h[h.index("<script>"):h.index("</script>")], "")
 
     # ---------- la ruta de guardado ----------
@@ -106,7 +110,8 @@ def main():
     check("la lista WAN: solo si viene el campo; vacio se guarda como 'ninguna'",
           'if "accion_wan_list" in q:' in ruta and '"ninguna"' in ruta, "")
     check("guarda las reglas propias y avisa si no parsean",
-          "guardar_reglas_propias(_cat" in ruta and "_err_reglas.append" in ruta and "NO se guardaron porque no" in ruta, "")
+          "guardar_reglas_propias(_cat" in ruta and "_err_reglas.append" in ruta and "NO se guardaron (el" in ruta
+          and "_av_reglas.append" in ruta and "El verificador avisa" in ruta, "")
 
     # ---------- plan / aplicar / quitar ----------
     cuerpo = cuerpo_ruta_in(("/mikrotik/reglas/plan",))
@@ -120,7 +125,7 @@ def main():
             def send_header(self, *a): pass
             def end_headers(self, *a): pass
             wfile = type("W", (), {"write": lambda self, b: visto.update({"texto": b.decode("utf-8")})})()
-        n2 = piezas(("ACCIONES", "ACCIONES_POR_CAT"))
+        n2 = piezas(("ACCIONES", "ACCIONES_POR_CAT", "lineas_verificacion"))
         n2.update({"self": Self(), "q": {k: [v] for k, v in campos.items()}, "ruta": ruta_,
                    "CTX": type("C", (), {"user": "admin"})(),
                    "cargar_routers": lambda: [{"id": "r1", "HOST": "h", "USER": "u", "PASS": "p", "nombre": "Centro"},

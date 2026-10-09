@@ -5205,6 +5205,7 @@ def reglas_desde_rsc(texto, lista=""):
             if lista:
                 v = v.replace("{LISTA}", lista)
             if k == "comment":
+                props["_comentario"] = v       # no se manda (lo pone el panel); lo mira el verificador
                 continue
             if k == "place-before":
                 v = v.strip()
@@ -5224,10 +5225,170 @@ def reglas_desde_rsc(texto, lista=""):
                 raise ValueError("linea %d: %s=%s es una expresion de consola; por la API "
                                  "hay que poner el valor" % (ln, k, v[:40]))
             props[k] = v
-        if not props:
+        if not [k for k in props if not k.startswith("_")]:
             raise ValueError("linea %d: 'add' sin propiedades" % ln)
+        props["_linea"] = str(ln)
         out.append((tabla, props))
     return out
+
+
+# --- Verificador de reglas ------------------------------------------------------------
+# RouterOS acepta sin quejarse una regla que corta el correo de toda la red porque le
+# falta la address-list, o un `port=` que tambien casa las respuestas. El verificador
+# mira lo que la sintaxis no ve. error = no se guarda ni se aplica; aviso = se dice.
+_CADENAS_BASE = {T_RAW: ("prerouting", "output"), T_NAT: ("srcnat", "dstnat"),
+                 T_FILTER: ("input", "forward", "output"),
+                 T_MANGLE: ("prerouting", "input", "forward", "output", "postrouting")}
+_ACCIONES_TABLA = {
+    T_RAW: ("accept", "drop", "jump", "return", "log", "notrack", "passthrough",
+            "add-src-to-address-list", "add-dst-to-address-list"),
+    T_FILTER: ("accept", "drop", "jump", "return", "log", "passthrough", "reject", "tarpit",
+               "fasttrack-connection", "add-src-to-address-list", "add-dst-to-address-list"),
+    T_NAT: ("accept", "jump", "return", "log", "passthrough", "dst-nat", "src-nat", "redirect",
+            "masquerade", "netmap", "same", "endpoint-independent-nat",
+            "add-src-to-address-list", "add-dst-to-address-list"),
+    T_MANGLE: ("accept", "jump", "return", "log", "passthrough", "mark-connection", "mark-packet",
+               "mark-routing", "change-dscp", "change-mss", "change-ttl", "clear-df",
+               "fasttrack-connection", "route", "set-priority", "sniff-tzsp", "sniff-pc",
+               "strip-ipv4-options", "add-src-to-address-list", "add-dst-to-address-list"),
+}
+_TERMINALES = ("accept", "drop", "return", "reject", "tarpit", "dst-nat", "src-nat", "redirect",
+               "masquerade", "netmap", "same")
+# lo que NO restringe a que paquetes aplica una regla (todo lo demas es un criterio)
+_NO_CRITERIO = ("chain", "action", "jump-target", "to-addresses", "to-ports", "disabled", "log",
+                "log-prefix", "new-connection-mark", "new-packet-mark", "new-routing-mark",
+                "passthrough", "address-list", "address-list-timeout", "reject-with")
+_PROTO_CON_PUERTO = ("tcp", "udp", "6", "17", "udp-lite", "dccp", "sctp")
+_LISTAS_IF_SISTEMA = ("all", "none", "dynamic", "static")
+
+
+def verificar_reglas(reglas, lista):
+    """Revision estatica de un bloque [(tabla, props)]: [{nivel, donde, msg}]."""
+    out = []
+
+    def nota(nivel, p, i, msg):
+        out.append({"nivel": nivel, "msg": msg,
+                    "donde": ("linea %s" % p["_linea"]) if p.get("_linea") else ("regla %d" % i)})
+
+    con_reglas = {(t, p.get("chain")) for t, p in reglas}
+    saltos = {(t, p.get("jump-target")) for t, p in reglas
+              if p.get("action") == "jump" and p.get("jump-target")}
+    marcas = set()            # marcas que pone el bloque
+    marcas_acotadas = set()   # ... y que solo reciben trafico de la lista
+    cortado = {}              # (tabla, cadena) -> regla que corta todo sin criterio
+    for i, (t, p) in enumerate(reglas, 1):
+        if t == T_QUEUE:
+            if not p.get("name") or not p.get("parent"):
+                nota("error", p, i, "una cola necesita name y parent")
+            if p.get("packet-mark") and p["packet-mark"] not in marcas:
+                nota("aviso", p, i, "la cola usa la marca '%s', que ninguna regla del bloque pone: "
+                                    "no limitara nada salvo que la ponga otra regla del router" % p["packet-mark"])
+            continue
+        ch = p.get("chain", "")
+        ac = p.get("action", "accept")
+        if not ch:
+            nota("error", p, i, "falta chain")
+            continue
+        base = ch in _CADENAS_BASE.get(t, ())
+        if ac not in _ACCIONES_TABLA.get(t, ()):
+            nota("error", p, i, "la accion '%s' no existe en %s" % (ac, _TABLA_RSC.get(t, t)))
+        if ac == "jump":
+            tgt = p.get("jump-target", "")
+            if not tgt:
+                nota("error", p, i, "un jump necesita jump-target")
+            elif tgt in _CADENAS_BASE.get(t, ()):
+                nota("error", p, i, "no se puede saltar a una cadena del sistema (%s)" % tgt)
+            elif (t, tgt) not in con_reglas:
+                nota("aviso", p, i, "salta a '%s', que no tiene reglas en este bloque: si en el router "
+                                    "tampoco las tiene, el jump no hace nada" % tgt)
+        if ac == "dst-nat" and not p.get("to-addresses") and not p.get("to-ports"):
+            nota("error", p, i, "dst-nat sin to-addresses ni to-ports")
+        if t == T_NAT and ac in ("dst-nat", "redirect", "netmap") and ch == "srcnat":
+            nota("error", p, i, "%s va en dstnat, no en srcnat" % ac)
+        if t == T_NAT and ac in ("src-nat", "masquerade") and ch == "dstnat":
+            nota("error", p, i, "%s va en srcnat, no en dstnat" % ac)
+        if any(p.get(k) for k in ("dst-port", "src-port", "port")) and \
+                (p.get("protocol") or "").lower() not in _PROTO_CON_PUERTO:
+            nota("error", p, i, "un puerto solo vale con protocol=tcp o udp (el router la rechaza)")
+        if p.get("port"):
+            nota("aviso", p, i, "port= casa el puerto de ORIGEN o de DESTINO: tambien corta las "
+                                "respuestas de los servidores. Lo normal es dst-port=")
+        if not base and (t, ch) not in saltos:
+            nota("aviso", p, i, "la cadena '%s' no la usa ningun jump del bloque: esta regla no se "
+                                "evalua salvo que el router ya salte ahi" % ch)
+        # alcance: en una cadena del sistema, la regla tiene que mirar la lista de la clase
+        sl = p.get("src-address-list", "")
+        acotada = (sl == lista) or (p.get("connection-mark") in marcas_acotadas) \
+            or (p.get("packet-mark") in marcas_acotadas)
+        if base and not acotada:
+            if sl and not sl.startswith("!"):
+                nota("aviso", p, i, "usa la lista '%s', no la de esta categoria ('%s'): afecta a todos "
+                                    "los de esa lista, esten o no en cuarentena" % (sl, lista))
+            else:
+                nota("aviso", p, i, "no mira la lista de la categoria ('%s'): afecta a TODO el trafico "
+                                    "que pasa por el router, no solo a los CPEs en cuarentena" % lista)
+        for mk_ in ("new-connection-mark", "new-packet-mark"):
+            if p.get(mk_):
+                marcas.add(p[mk_])
+                if acotada or not base:
+                    marcas_acotadas.add(p[mk_])
+        # el comentario dice una cosa y la accion otra
+        com = (p.get("_comentario") or "").lower()
+        if com:
+            pasa = any(w in com for w in ("acepta", "permite", "deja pasar"))
+            corta = any(w in com for w in ("bloquea", "descarta", "corta", "rechaza"))
+            if ac in ("drop", "reject", "tarpit") and pasa and not corta:
+                nota("aviso", p, i, "el comentario dice que acepta/permite, pero la accion es %s" % ac)
+            if ac in ("accept", "return") and corta and not pasa:
+                nota("aviso", p, i, "el comentario dice que bloquea, pero la accion es %s" % ac)
+        # inalcanzable: detras de una regla que corta todo en la misma cadena
+        if (t, ch) in cortado:
+            nota("error", p, i, "nunca se evalua: la %s corta todo antes en la cadena '%s'"
+                                % (cortado[(t, ch)], ch))
+        criterios = [k for k in p if not k.startswith("_") and k not in _NO_CRITERIO]
+        if not criterios and ac in _TERMINALES and (t, ch) not in cortado:
+            cortado[(t, ch)] = ("linea %s" % p["_linea"]) if p.get("_linea") else ("regla %d" % i)
+            if base and ac in ("drop", "reject", "tarpit"):
+                nota("error", p, i, "%s sin ningun criterio en '%s': corta TODO el trafico del router" % (ac, ch))
+    return out
+
+
+def _mk_contar(s_, cmd, filtro):
+    _mk_send(s_, [cmd, "=.proplist=.id", filtro])
+    _ok, frases, _err = _mk_reply(s_)
+    return sum(1 for f in frases if f and f[0] == "!re")
+
+
+def verificar_en_router(s_, reglas, lista):
+    """Lo que solo se sabe mirando ESE router: [{nivel, donde, msg}]."""
+    out = []
+    ifl = sorted({(p.get(k) or "").lstrip("!") for _t, p in reglas
+                  for k in ("in-interface-list", "out-interface-list") if p.get(k)})
+    if ifl:
+        hay = {f.get("name") for f in _mk_print(s_, "/interface/list/print", ["name"])}
+        for n in ifl:
+            if n not in hay and n not in _LISTAS_IF_SISTEMA:
+                out.append({"nivel": "error", "donde": "router",
+                            "msg": "no existe la interface-list '%s' en este router: rechazara la regla "
+                                   "(creala o cambia el nombre en Ajustes)" % n})
+    propias = {(t, p.get("chain")) for t, p in reglas}
+    for t, tgt in sorted({(t, p["jump-target"]) for t, p in reglas
+                          if p.get("action") == "jump" and p.get("jump-target")} - propias):
+        if not any(f.get("chain") == tgt for f in _mk_print(s_, t + "/print", ["chain"])):
+            out.append({"nivel": "aviso", "donde": "router",
+                        "msg": "la cadena '%s' no existe ni en el bloque ni en el router: el jump no hace nada" % tgt})
+    otras = sorted({(p.get(k) or "").lstrip("!") for _t, p in reglas
+                    for k in ("src-address-list", "dst-address-list") if p.get(k)} - {lista, ""})
+    for l in otras:
+        if not _mk_contar(s_, "/ip/firewall/address-list/print", "?list=" + l):
+            out.append({"nivel": "aviso", "donde": "router",
+                        "msg": "la address-list '%s' esta vacia en este router: esa regla no afecta a nadie" % l})
+    return out
+
+
+def lineas_verificacion(ver):
+    """Para el modal: una linea por hallazgo, '!E ', '!W ' o '!I ' delante."""
+    return ["!%s %s: %s" % ({"error": "E", "aviso": "W"}.get(v["nivel"], "I"), v["donde"], v["msg"]) for v in ver]
 
 
 def cargar_reglas_propias(cat):
@@ -5239,14 +5400,18 @@ def cargar_reglas_propias(cat):
 
 def guardar_reglas_propias(cat, texto):
     """Guarda el bloque tal cual, pero solo si parsea: un error aqui es mejor que en el router."""
-    reglas_desde_rsc(texto, "x")           # valida (lanza ValueError con la linea)
+    lista = lista_de_categoria(cat)
+    reglas = reglas_desde_rsc(texto, lista)   # valida la sintaxis (ValueError con la linea)
+    errs = [v for v in verificar_reglas(reglas, lista) if v["nivel"] == "error"]
+    if errs:                                  # y lo que la sintaxis no ve
+        raise ValueError("; ".join("%s: %s" % (v["donde"], v["msg"]) for v in errs[:4]))
     os.makedirs(REGLAS_DIR, mode=0o700, exist_ok=True)
     ruta = os.path.join(REGLAS_DIR, cat + ".rsc")
     with open(ruta + ".tmp", "w", encoding="utf-8") as f:
         f.write((texto or "").strip() + ("\n" if (texto or "").strip() else ""))
     os.chmod(ruta + ".tmp", 0o600)
     os.replace(ruta + ".tmp", ruta)
-    return len(reglas_desde_rsc(texto, "x"))
+    return len(reglas)
 
 
 def _com_regla(cat, n):
@@ -5321,7 +5486,7 @@ def _plan(cat, deseadas, existentes):
     return acciones
 
 
-def _plan_en(s_, cat, accion=None, m=None):
+def _plan_en(s_, cat, accion=None, m=None, verificar=True):
     """El plan de una clase sobre una conexion YA abierta (el diagnostico lo llama ocho
     veces con el mismo socket: un login por router, no por clase)."""
     m = m if m is not None else _mk_globales()
@@ -5341,6 +5506,21 @@ def _plan_en(s_, cat, accion=None, m=None):
         aviso = "Falta el limite (ACCION_LIMITE_%s, p.ej. 2M): sin el no se aplica nada." % cat.upper()
     existentes = _reglas_nuestras(s_, cat, deseadas)
     acciones = _plan(cat, deseadas, existentes)
+    ver = []
+    if verificar and deseadas:
+        ver = verificar_reglas(deseadas, lista)
+        try:
+            ver += verificar_en_router(s_, deseadas, lista)
+        except Exception as ex:
+            ver.append({"nivel": "info", "donde": "router", "msg": "no se pudo comprobar contra el router: %s" % ex})
+    # en cada 'set', que campo difiere y como: si tras aplicar sigue difiriendo, es que el
+    # router guarda el valor de otra forma (normalizado) y hay que decirlo
+    dif = {}
+    for op, t, p, c, rid in acciones:
+        if op == "set":
+            act = next((f for f in existentes.get(t, []) if f.get(".id") == rid), {})
+            dif[c] = [(k, str(v), str(act.get(k, ""))) for k, v in p.items()
+                      if not k.startswith("_") and str(act.get(k, "")) != str(v)]
     # una regla pegada con place-before=[find ... comment="X"]: si X no existe en ESTE
     # router, ira la primera de su cadena. Se dice antes de aplicar, no despues.
     _refs = {(t, p["_antes_de"], p.get("_antes_cadena", "")) for op, t, p, _c, _i in acciones
@@ -5354,7 +5534,8 @@ def _plan_en(s_, cat, accion=None, m=None):
                 "las primeras de su cadena." % com_ref)
     rsc = [("# %s" % op.upper()) + " " + rsc_de(t, p, c) for op, t, p, c, _i in acciones if op != "igual"]
     return {"accion": accion, "lista": lista, "acciones": acciones, "aviso": aviso, "rsc": rsc,
-            "cambios": sum(1 for a in acciones if a[0] != "igual")}
+            "cambios": sum(1 for a in acciones if a[0] != "igual"), "verificacion": ver,
+            "bloqueado": any(v["nivel"] == "error" for v in ver), "diferencias": dif}
 
 
 def plan_reglas(router, cat, accion=None, m=None):
@@ -5415,6 +5596,9 @@ def aplicar_reglas(router, cat, accion=None, quien="?"):
     falla, se para ahi y se dice cual (lo ya hecho queda, y el plan siguiente lo ve)."""
     m = _mk_globales()
     plan = plan_reglas(router, cat, accion, m)
+    if plan.get("bloqueado"):
+        return (False, "el verificador encontro errores, no se toca el router: " + "; ".join(
+            "%s: %s" % (v["donde"], v["msg"]) for v in plan["verificacion"] if v["nivel"] == "error"), plan)
     if plan["aviso"] and not plan["acciones"]:
         return (False, plan["aviso"], plan)
     if not plan["cambios"]:
@@ -5469,8 +5653,26 @@ def aplicar_reglas(router, cat, accion=None, quien="?"):
     mk_log("REGLAS-APLICADAS", "-", quien, "router=%s clase=%s accion=%s +%d ~%d -%d respaldo=%s" % (
         (router or {}).get("id", ""), cat, plan["accion"], hechos["add"], hechos["set"], hechos["remove"],
         respaldo))
-    return (True, "aplicado: %d nueva(s), %d corregida(s), %d quitada(s). Respaldo: %s" % (
-        hechos["add"], hechos["set"], hechos["remove"], respaldo), plan)
+    msg = "aplicado: %d nueva(s), %d corregida(s), %d quitada(s). Respaldo: %s" % (
+        hechos["add"], hechos["set"], hechos["remove"], respaldo)
+    # verificacion tras aplicar: se relee el router. Si no devuelve lo mismo que se mando
+    # (un valor que guarda normalizado), la proxima vez se reescribiria sin motivo.
+    try:
+        p2 = plan_reglas(router, cat, plan["accion"], m)
+        if p2["cambios"]:
+            ej = []
+            for c, difs in list(p2.get("diferencias", {}).items())[:3]:
+                for k, mandado, leido in difs[:2]:
+                    ej.append("%s %s: mandado '%s', el router guarda '%s'" % (c, k, mandado, leido))
+            msg += (". OJO: al releer el router quedan %d diferencia(s)%s. Pasale esto a quien "
+                    "mantiene el panel para ajustar la plantilla." % (p2["cambios"], (" (" + "; ".join(ej) + ")") if ej else ""))
+            mk_log("REGLAS-DIFIEREN", "-", quien, "router=%s clase=%s %s" % (
+                (router or {}).get("id", ""), cat, "; ".join(ej)[:300]))
+        else:
+            msg += ". Verificado: el router tiene exactamente estas reglas"
+    except Exception as ex:
+        msg += ". No se pudo releer el router para verificar (%s)" % ex
+    return (True, msg, plan)
 
 
 def quitar_reglas(router, cat, quien="?"):
@@ -6109,7 +6311,7 @@ def mk_diagnostico(router=None):
             if _acc == "nada":
                 continue
             try:
-                _p = _plan_en(s_, _cat, _acc, _m)
+                _p = _plan_en(s_, _cat, _acc, _m, verificar=False)
             except Exception as ex:
                 _acc_checks.append(("aviso", f"No se pudo comprobar la accion de {_nom}", str(ex)[:120], ""))
                 continue
@@ -10947,9 +11149,12 @@ def _card_listas(m):
                   "La address-list y las IPs que tenga se quedan.','Quitar',''))reglasQuitar('%s')\">Quitar del router</button></div>"
                   "<textarea name=reglas_%s id=reglas_%s class=rsc rows=6 style='display:%s' "
                   "placeholder='/ip firewall raw&#10;add chain=prerouting action=drop src-address-list={LISTA} place-before=0'>%s</textarea>"
+                  "<div id=verif_%s style='display:%s;margin-top:6px'><button type=button class=cancelbtn "
+                  "onclick=\"reglasVerificar('%s')\">Verificar mis reglas</button></div>"
                   "</div>" % (esc(nom), esc(cat), esc(actual), esc(por_defecto),
                               cat, cat, ops, extra, cat, esc(nom), cat, cat,
-                              cat, cat, "block" if acc == "propias" else "none", esc(propias)))
+                              cat, cat, "block" if acc == "propias" else "none", esc(propias),
+                              cat, "block" if acc == "propias" else "none", cat))
     # con varios routers, a cual se le miran/aplican las reglas
     sel_router = ""
     if len(routers) > 1:
@@ -10966,6 +11171,7 @@ def _card_listas(m):
         "<script>"
         "function accCambio(sel,cat){var t=document.getElementById('reglas_'+cat);"
         "if(t)t.style.display=(sel.value==='propias')?'block':'none';"
+        "var vb=document.getElementById('verif_'+cat);if(vb)vb.style.display=(sel.value==='propias')?'block':'none';"
         "var l=sel.form.querySelector('[name=limite_'+cat+']');if(l)l.style.display=(sel.value==='limitar')?'inline-block':'none';"
         "if(cat==='dns'){var d=sel.form.querySelector('[name=accion_dns_ip]');if(d)d.style.display=(sel.value==='redirigir-dns'||sel.value==='dns-protegido')?'inline-block':'none';}}"
         "function _accRid(){var s=document.getElementById('accrid');return s?s.value:'';}"
@@ -10984,12 +11190,14 @@ def _card_listas(m):
         "if(!ok){_accBox(\"<div style='font-size:30px'>&#9940;</div><div><b>No se pudo leer el plan</b><br><span style='font-size:13px'>\"+_accEsc(c)+\"</span>"
         "<div class=actions style='margin-top:10px'><button type=button class=cancelbtn onclick='_accCerrar()'>Cerrar</button></div></div>\");return;}"
         "var L=c.split(String.fromCharCode(10));var cab=L.shift();"
+        "var V=L.filter(function(x){return x.charAt(0)==='!';});L=L.filter(function(x){return x.charAt(0)!=='!';});"
+        "var hayE=V.some(function(x){return x.indexOf('!E')===0;});var ver=_accVer(V);"
         "var pre=L.length?\"<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;padding:10px;max-height:50vh;overflow:auto;"
         "font-size:12px;white-space:pre-wrap;margin:0'>\"+_accEsc(L.join(String.fromCharCode(10)))+\"</pre>\""
         ":\"<p style='margin:0'>El router ya tiene exactamente estas reglas.</p>\";"
         "_accBox(\"<div style='width:100%'><b>Vista previa &middot; \"+_accEsc(cat)+\"</b>"
-        "<div style='font-size:13px;color:#52514e;margin:4px 0 8px'>\"+_accEsc(cab)+\"</div>\"+pre+"
-        "\"<div class=actions style='margin-top:12px'>\"+(L.length?\"<button type=button class=primary onclick=\\\"reglasAplicar('\"+cat+\"')\\\">Aplicar en el router</button>\":'')+"
+        "<div style='font-size:13px;color:#52514e;margin:4px 0 8px'>\"+_accEsc(cab)+\"</div>\"+ver+pre+"
+        "\"<div class=actions style='margin-top:12px'>\"+((L.length&&!hayE)?\"<button type=button class=primary onclick=\\\"reglasAplicar('\"+cat+\"')\\\">Aplicar en el router</button>\":'')+"
         "\"<button type=button class=cancelbtn onclick='_accCerrar()'>Cerrar</button></div></div>\");});}"
         "function _accResultado(ruta,cat,titulo){_accPost(ruta,cat,function(t){var ok=t.indexOf('OK')===0;"
         "var c=t.replace(/^OK ?/,'').replace(/^ERR: /,'');"
@@ -11001,6 +11209,19 @@ def _card_listas(m):
         "_accResultado('/mikrotik/reglas/aplicar',cat,'Aplicado');}"
         "function reglasQuitar(cat){_accBox(\"<div class='mkspin'></div><div><b>Quitando&hellip;</b></div>\");"
         "_accResultado('/mikrotik/reglas/quitar',cat,'Quitadas');}"
+        "function _accVer(V){if(!V.length)return '';return \"<ul style='margin:0 0 10px;padding-left:18px;font-size:13px'>\"+"
+        "V.map(function(x){var k=x.charAt(1);return \"<li style='margin:3px 0;color:\"+(k==='E'?'#b42318':(k==='W'?'#a15c12':'#52514e'))+\"'>\"+"
+        "(k==='E'?'<b>Error</b> ':(k==='W'?'<b>Aviso</b> ':''))+_accEsc(x.slice(3))+\"</li>\";}).join('')+\"</ul>\";}"
+        "function reglasVerificar(cat){var t=document.getElementById('reglas_'+cat);"
+        "_accBox(\"<div class='mkspin'></div><div><b>Verificando&hellip;</b></div>\");"
+        "var d=new URLSearchParams();d.set('cat',cat);d.set('rid',_accRid());d.set('texto',t?t.value:'');"
+        "fetch('/mikrotik/reglas/verificar',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:d.toString()})"
+        ".then(function(r){return r.text();}).then(function(x){var L=x.replace(/^OK ?/,'').split(String.fromCharCode(10));var cab=L.shift();"
+        "var V=L.filter(function(y){return y.charAt(0)==='!';});var bien=!V.some(function(y){return y.indexOf('!E')===0||y.indexOf('!W')===0;});"
+        "_accBox(\"<div style='width:100%'><b>\"+(bien?'&#9989; Sin problemas':'Verificacion de tus reglas')+\" &middot; \"+_accEsc(cat)+\"</b>"
+        "<div style='font-size:13px;color:#52514e;margin:4px 0 8px'>\"+_accEsc(cab)+\"</div>\"+_accVer(V)+"
+        "\"<div class=actions style='margin-top:10px'><button type=button class=cancelbtn onclick='_accCerrar()'>Cerrar</button></div></div>\");})"
+        ".catch(function(e){_accBox(\"<div><b>Error</b><br>\"+_accEsc(String(e))+\"</div>\");});}"
         "</script>")
     return (
         js_acc +
@@ -12955,6 +13176,25 @@ address-list de la clase; el <code>comment</code> lo pone el panel y <code>place
 esa regla y, si en ese router no existe, la vista previa lo avisa y va la primera. Varias reglas "arriba"
 conservan su orden; las que no dicen posicion van al final, como en la consola. Un bloque que no parsea
 no se guarda y se dice en que linea.</td></tr></table>
+<h3>Verificador de reglas</h3>
+<p>RouterOS acepta sin quejarse reglas que hacen algo que no querias: una regla en <code>prerouting</code>
+sin la address-list corta a <b>toda</b> la red; <code>port=</code> casa origen o destino y tambien corta las
+respuestas; un jump a una cadena vacia no hace nada. El verificador lo revisa en cuatro momentos: al
+pulsar <i>Verificar mis reglas</i> (sin guardar ni aplicar), al <b>guardar</b>, en la <b>vista previa</b> y
+<b>despues de aplicar</b>.</p>
+<ul>
+<li><b>Errores</b> (no se guarda ni se aplica): accion que no existe en esa tabla, jump sin destino o a una
+cadena del sistema, puerto sin <code>protocol=tcp/udp</code>, NAT en la cadena equivocada, una regla que
+nunca se evalua porque otra corta todo antes, un drop sin ningun criterio en una cadena del sistema, y una
+<code>interface-list</code> que no existe en el router.</li>
+<li><b>Avisos</b> (se guarda, pero se dice): regla que no mira la lista de la categoria (afecta a todo el
+trafico) o que mira otra lista, <code>port=</code> en vez de <code>dst-port=</code>, comentario que dice
+"acepta" en una regla que descarta (o al reves), cadena propia a la que no salta nadie, jump a una cadena
+que no existe ni en el bloque ni en el router, address-list vacia en el router, cola con una marca que
+nadie pone.</li>
+<li><b>Tras aplicar</b> se relee el router: si no guarda exactamente lo que se mando (valores que RouterOS
+normaliza), se dice que campo y como, y queda en la bitacora; si coincide, "Verificado".</li>
+</ul>
 <p>Las plantillas de DNS y escaneo llevan <code>in-interface-list=!WAN</code>: el nombre de esa
 interface-list se pone en Ajustes (vacio = sin esa condicion) y tiene que existir en el router.</p>
 <p><b>Como se aplica.</b> Guarda primero. <i>Ver / aplicar en el router</i> ensena las lineas exactas que se
@@ -17222,7 +17462,7 @@ class H(BaseHTTPRequestHandler):
             m["TTL_DNS"] = (q.get("ttl_dns", [""])[0]).strip()[:16]
             # Las listas por categoria. Vacio = se borra la clave y vuelve el nombre por
             # defecto; asi se puede deshacer un cambio sin tener que recordar cual era.
-            _err_reglas = []
+            _err_reglas = []; _av_reglas = []
             for _cat, _nom, _cs, _def in CAT_CPE + [CAT_OTROS]:
                 _k = "LISTA_" + _cat.upper()
                 _v = (q.get("lista_" + _cat, [""])[0]).strip()[:64]
@@ -17242,7 +17482,12 @@ class H(BaseHTTPRequestHandler):
                         m.pop("ACCION_LIMITE_" + _cat.upper(), None)
                 if ("reglas_" + _cat) in q:
                     try:
-                        guardar_reglas_propias(_cat, q.get("reglas_" + _cat, [""])[0])
+                        _txr = q.get("reglas_" + _cat, [""])[0]
+                        if guardar_reglas_propias(_cat, _txr):
+                            _lr = lista_de_categoria(_cat)
+                            for _v in verificar_reglas(reglas_desde_rsc(_txr, _lr), _lr):
+                                if _v["nivel"] == "aviso":
+                                    _av_reglas.append("%s, %s: %s" % (_nom, _v["donde"], _v["msg"]))
                     except ValueError as ex:
                         _err_reglas.append("%s: %s" % (_nom, ex))
             if "accion_wan_list" in q:   # un formulario viejo sin el campo no la borra
@@ -17281,8 +17526,12 @@ class H(BaseHTTPRequestHandler):
                                         f"doble_senal={'si' if q.get('doble') else 'no'}")
             if _err_reglas:
                 return self._html(perfil_page(
-                    "Conexion y listas guardadas, pero estas reglas propias NO se guardaron porque no "
-                    "parsean: " + " | ".join(_err_reglas), ok=False))
+                    "Conexion y listas guardadas, pero estas reglas propias NO se guardaron (el "
+                    "verificador las rechaza): " + " | ".join(_err_reglas), ok=False))
+            if _av_reglas:
+                return self._html(perfil_page(
+                    "Guardado. El verificador avisa en tus reglas (se guardaron igual; revisalas "
+                    "antes de aplicar): " + " | ".join(_av_reglas[:6]), ok=True))
             return self._html(perfil_page("Conexion al MikroTik guardada.", ok=True))
         if ruta == "/routers/guardar":
             # Alta o edicion de un nodo. El primero se edita desde la tarjeta de MikroTik;
@@ -17346,6 +17595,45 @@ class H(BaseHTTPRequestHandler):
             return self._html(perfil_page(
                 "Nodo quitado del panel. Si tenia CPEs en cuarentena, siguen bloqueados en "
                 "ese MikroTik: quitalos desde el propio router.", ok=True))
+        if ruta == "/mikrotik/reglas/verificar":
+            # Verificar un bloque de reglas propias SIN guardarlo ni aplicarlo: estatico y,
+            # si hay router configurado, contra el router. Texto para el modal.
+            if not self._admin():
+                return self._deny()
+            def _txtv(texto):
+                b = ("OK " + texto).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers(); self.wfile.write(b)
+            cat = (q.get("cat", [""])[0]).strip()
+            if cat not in ACCIONES_POR_CAT:
+                return _txtv("clase desconocida")
+            lista = lista_de_categoria(cat)
+            try:
+                reglas = reglas_desde_rsc(q.get("texto", [""])[0], lista)
+            except ValueError as ex:
+                return _txtv("no parsea\n!E sintaxis: %s" % ex)
+            if not reglas:
+                return _txtv("el bloque esta vacio")
+            ver = verificar_reglas(reglas, lista)
+            rid = (q.get("rid", [""])[0]).strip()
+            r = next((x for x in cargar_routers() if x.get("id") == rid), None) if rid else router_defecto()
+            if r and r.get("HOST") and r.get("USER") and r.get("PASS"):
+                try:
+                    s_ = mk_conectar(cargar_mk_de(r))
+                    try:
+                        ver += verificar_en_router(s_, reglas, lista)
+                    finally:
+                        try: s_.close()
+                        except Exception: pass
+                except Exception as ex:
+                    ver.append({"nivel": "info", "donde": "router", "msg": "no se pudo consultar el router: %s" % ex})
+            else:
+                ver.append({"nivel": "info", "donde": "router", "msg": "sin router configurado: solo la revision estatica"})
+            ne = sum(1 for v in ver if v["nivel"] == "error"); na = sum(1 for v in ver if v["nivel"] == "aviso")
+            cab = "%d regla(s) &middot; %d error(es) &middot; %d aviso(s)" % (len(reglas), ne, na)
+            return _txtv(cab + "\n" + "\n".join(lineas_verificacion(ver)))
         if ruta in ("/mikrotik/reglas/plan", "/mikrotik/reglas/aplicar", "/mikrotik/reglas/quitar"):
             # Las reglas de una clase en UN router: vista previa (sin tocar), aplicar o quitar.
             # Responde texto plano para el modal: "OK <cabecera>\n<rsc...>" o "ERR: motivo".
@@ -17372,7 +17660,10 @@ class H(BaseHTTPRequestHandler):
                         p["cambios"], r.get("nombre") or r.get("HOST", ""), ACCIONES.get(p["accion"], p["accion"]), p["lista"])
                     if p["aviso"]:
                         cab += " &middot; " + p["aviso"]
-                    return _txt(True, cab + (("\n" + "\n".join(p["rsc"])) if p["rsc"] else ""))
+                    if p.get("bloqueado"):
+                        cab += " &middot; el verificador encontro errores: no se puede aplicar"
+                    _lin = lineas_verificacion(p.get("verificacion", [])) + p["rsc"]
+                    return _txt(True, cab + (("\n" + "\n".join(_lin)) if _lin else ""))
                 if ruta.endswith("/aplicar"):
                     okr, msg, _p = aplicar_reglas(r, cat, quien=quien)
                 else:

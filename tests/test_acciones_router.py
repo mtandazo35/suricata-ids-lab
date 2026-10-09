@@ -40,7 +40,8 @@ def check(d, c, e=""):
 
 
 PIEZAS = ("ACCIONES", "ACCIONES_POR_CAT", "ACCION_DEFECTO", "T_RAW", "T_NAT", "T_MANGLE", "T_QUEUE", "T_FILTER",
-          "_RSC_TABLA", "REGLAS_DIR", "_RE_KV", "_RE_FIND_COMMENT", "_RE_FIND_CHAIN", "DNS_PROTEGIDO_DEFECTO", "reglas_desde_rsc", "cargar_reglas_propias", "guardar_reglas_propias",
+          "_RSC_TABLA", "REGLAS_DIR", "_RE_KV", "_CADENAS_BASE", "_ACCIONES_TABLA", "_TERMINALES", "_NO_CRITERIO",
+          "_PROTO_CON_PUERTO", "_LISTAS_IF_SISTEMA", "verificar_reglas", "_mk_contar", "verificar_en_router", "lineas_verificacion", "_RE_FIND_COMMENT", "_RE_FIND_CHAIN", "DNS_PROTEGIDO_DEFECTO", "reglas_desde_rsc", "cargar_reglas_propias", "guardar_reglas_propias",
           "_TABLA_RSC", "_PROPS_TABLA", "RESPALDOS_MK", "accion_de_clase", "reglas_de_accion",
           "_com_regla", "_prefijo_regla", "_rsc_val", "rsc_de", "_reglas_nuestras", "_params_accion",
           "_plan", "_plan_en", "plan_reglas", "_mk_print_todo", "_mk_print", "respaldar_firewall", "aplicar_reglas",
@@ -51,7 +52,8 @@ class RouterFalso(object):
     """Lo justo de la API de RouterOS: tablas con .id, print/add/set/remove."""
     def __init__(self):
         self.t = {"/ip/firewall/raw": [], "/ip/firewall/nat": [], "/ip/firewall/filter": [],
-                  "/ip/firewall/mangle": [], "/queue/tree": []}
+                  "/ip/firewall/mangle": [], "/queue/tree": [],
+                  "/interface/list": [{".id": "*L1", "name": "WAN"}], "/ip/firewall/address-list": []}
         self.n = 0; self.ordenes = []; self.fallar = None; self.pend = None
 
     def _id(self):

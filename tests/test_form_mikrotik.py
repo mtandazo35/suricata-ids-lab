@@ -121,6 +121,27 @@ def main():
     check("y la conexion y las listas se guardan en el mismo envio",
           'm["HOST"]' in ruta and "lista_" in ruta, "")
 
+    # --- guardar de verdad: lo que la ruta mete en m tiene que llegar al archivo ----------
+    # (2026-10-09: guardar_mk escribia una lista fija de claves y tiraba LISTA_* y POL_*;
+    # el usuario rellenaba sus listas, guardaba, y volvian vacias)
+    import os, tempfile
+    ns_g = {"os": os}
+    for n in ARBOL.body:
+        nom = getattr(n, "name", None) or (
+            getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
+        if nom in ("guardar_mk", "_mk_globales"):
+            exec(ast.get_source_segment(DASH, n) or "", ns_g)
+    td = tempfile.mkdtemp(); ns_g["MK_CONF"] = os.path.join(td, "mk.conf")
+    ns_g["guardar_mk"]({"HOST": "192.0.2.1", "USER": "u", "PASS": "p", "ENABLED": "1",
+                        "LISTA_BOTNET": "abusivos-botnet", "LISTA_DNS": "clientes-malware",
+                        "POL_BOTNET": "alto", "POL_P2P": "nada", "LISTA_SPAM": ""})
+    g = ns_g["_mk_globales"]()
+    check("guardar_mk conserva las listas por categoria",
+          g.get("LISTA_BOTNET") == "abusivos-botnet" and g.get("LISTA_DNS") == "clientes-malware", g)
+    check("y las politicas por clase", g.get("POL_BOTNET") == "alto" and g.get("POL_P2P") == "nada", g)
+    check("una lista vacia no se escribe (vuelve el defecto)", "LISTA_SPAM" not in g, g)
+    check("y lo de siempre sigue", g.get("HOST") == "192.0.2.1" and g.get("ENABLED") == "1", g)
+
     # --- la tarjeta ya no se llama 'cuarentena' a secas ---------------------------------
     check("la tarjeta separa la conexion de lo demas",
           "MikroTik &mdash; conexion" in DASH, "")

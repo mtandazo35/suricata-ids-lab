@@ -75,6 +75,17 @@ def main():
     r3 = fus(r2, {hoy: {"sal": 1, "ent": 0, "cpes": set(), "puertos": {}, "cats": {}, "nodos": {}}},
              3000, True)
     check("un corte de datos deja el dia marcado", r3["dias"][hoy].get("hueco") is True, r3["dias"][hoy])
+    # el agujero marca SOLO los dias que toca: ayer perdido entero aparece gris, hoy no se
+    # mancha por estar en la misma corrida
+    ayer = dia(-1); otro = dia(-2)
+    # prev fresco: fusionar_metricas trabaja sobre el dict que recibe (r1 ya arrastra r3)
+    r4 = fus({"dias": {}}, {hoy: {"sal": 5, "ent": 0, "cpes": set(), "puertos": {}, "cats": {}, "nodos": {}}},
+             4000, {ayer})
+    check("el dia del agujero aparece aunque no tenga datos, y gris",
+          r4["dias"].get(ayer, {}).get("hueco") is True and r4["dias"][ayer]["sal"] == 0, r4["dias"].get(ayer))
+    check("y el dia de la corrida que NO toca el agujero no se marca",
+          r4["dias"][hoy].get("hueco") is not True, r4["dias"][hoy])
+    check("un dia fuera del agujero no se inventa", otro not in r4["dias"], "")
 
     # retencion y colapso de la lista de CPEs
     viejo = dia(-10)
@@ -133,7 +144,12 @@ def main():
     json.dump({"dias": dias}, open(d["METRICAS_FILE"], "w", encoding="utf-8"))
 
     pag = d["historico_page"](30)
-    check("sale el dato de hoy", "123" in pag, "")
+    check("sale el dato de hoy (como pista, parcial)", "hoy (parcial): 123" in pag, "")
+    check("el cuadro grande es el total del periodo elegido", "ataques salientes en 30 dias" in pag
+          and "media diaria (30 dias)" in pag, "")
+    pag7 = d["historico_page"](7)
+    check("y cambia con el periodo", "ataques salientes en 7 dias" in pag7 and "media diaria (7 dias)" in pag7, "")
+    check("la tendencia dice que compara", "tendencia (7 dias vs los 7 anteriores)" in pag, "")
     check("y la tendencia a la baja, en verde", "&darr;" in pag and "#3a9d5d" in pag,
           "flecha=%s" % ("&darr;" in pag))
     check("se cuentan las cuarentenas del periodo", "puestos en cuarentena" in pag)
@@ -153,7 +169,7 @@ def main():
               open(d["METRICAS_FILE"], "w", encoding="utf-8"))
     ph = d["historico_page"](7)
     check("un dia con datos incompletos no se pinta como bueno",
-          "#c8ccd1" in ph and "sensor estuvo parado" in ph)
+          "#c8ccd1" in ph and "el panel estuvo parado" in ph and "sensor estuvo parado" not in ph)
 
     # ---------- que cuenta como abuso, y como se nombra ----------
     t = piezas(GEN, ("_TRAD", "_TRAD_CACHE", "_TRAD_CACHE_MAX", "_traducir_lento", "traducir", "CATS_NO_ABUSO"), extra={"re": __import__("re")})

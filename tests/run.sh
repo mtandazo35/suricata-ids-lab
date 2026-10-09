@@ -117,6 +117,7 @@ correr "dominios maliciosos consultados: cual, quien y por donde" "$PY" tests/te
 correr "politicas por clase de abuso: que hacer depende de que hace el CPE" "$PY" tests/test_politicas_clase.py
 correr "listas por categoria: desplegable con las IPs de cada una" "$PY" tests/test_listas_desplegable.py
 correr "rendimiento del generador: indice de flujos y memorias, mismos resultados" "$PY" tests/test_perf_generador.py
+correr "seleccionar texto dentro de un modal no lo cierra" "$PY" tests/test_overlay_seleccion.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

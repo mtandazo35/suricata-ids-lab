@@ -3283,7 +3283,7 @@ except Exception:
     pass
 
 # el mismo modal que el panel: este informe es una pagina suelta y no hereda su barra
-_ASK = ('<style>.askov{display:none;position:fixed;inset:0;background:rgba(11,11,11,.55);z-index:160;align-items:center;justify-content:center;padding:24px}.askov .askbox{background:#fff;color:#0b0b0b;border-radius:14px;max-width:460px;width:100%;padding:22px 24px;box-shadow:0 16px 54px rgba(0,0,0,.45)}.askov h3{margin:0 0 8px;font-size:19px}.askov p{margin:0 0 18px;color:#52514e;font-size:14px;line-height:1.5}.askov .askacts{display:flex;gap:10px;justify-content:flex-end}.askov .askno{background:#eef0f2;color:#33322f;border:1px solid #d7d6d2;padding:10px 16px;border-radius:9px;font:600 14px system-ui;cursor:pointer}.askov .askno:hover{background:#e2e5e8}.askov .askok{background:#2a78d6;color:#fff;border:0;padding:10px 18px;border-radius:9px;font:600 14px system-ui;cursor:pointer}.askov .askok:hover{background:#1c5cab}.askov .askok.danger{background:#c0392b}.askov .askok.danger:hover{background:#9c2f22}</style><div id=askov class=askov onclick="if(event.target===this)askNo()"><div class=askbox role=dialog aria-modal=true aria-labelledby=asktit><h3 id=asktit></h3><p id=asktxt></p><div class=askacts><button type=button class=askno id=askno onclick=askNo()>Cancelar</button><button type=button class=askok id=askok>Confirmar</button></div></div></div>'
+_ASK = ('<style>.askov{display:none;position:fixed;inset:0;background:rgba(11,11,11,.55);z-index:160;align-items:center;justify-content:center;padding:24px}.askov .askbox{background:#fff;color:#0b0b0b;border-radius:14px;max-width:460px;width:100%;padding:22px 24px;box-shadow:0 16px 54px rgba(0,0,0,.45)}.askov h3{margin:0 0 8px;font-size:19px}.askov p{margin:0 0 18px;color:#52514e;font-size:14px;line-height:1.5}.askov .askacts{display:flex;gap:10px;justify-content:flex-end}.askov .askno{background:#eef0f2;color:#33322f;border:1px solid #d7d6d2;padding:10px 16px;border-radius:9px;font:600 14px system-ui;cursor:pointer}.askov .askno:hover{background:#e2e5e8}.askov .askok{background:#2a78d6;color:#fff;border:0;padding:10px 18px;border-radius:9px;font:600 14px system-ui;cursor:pointer}.askov .askok:hover{background:#1c5cab}.askov .askok.danger{background:#c0392b}.askov .askok.danger:hover{background:#9c2f22}</style><div id=askov class=askov onmousedown="this._dn=event.target" onclick="if(event.target===this&&this._dn===this){askNo()}"><div class=askbox role=dialog aria-modal=true aria-labelledby=asktit><h3 id=asktit></h3><p id=asktxt></p><div class=askacts><button type=button class=askno id=askno onclick=askNo()>Cancelar</button><button type=button class=askok id=askok>Confirmar</button></div></div></div>'
         "<script>var _askE=null;function askNo(){var m=document.getElementById('askov');if(m)m.style.display='none';_askE=null;}function _askAbrir(t,x,ok,tono,solo){document.getElementById('asktit').textContent=t;document.getElementById('asktxt').textContent=x||'';var k=document.getElementById('askok'),n=document.getElementById('askno');k.textContent=ok||'Confirmar';k.className='askok'+(tono?' '+tono:'');n.style.display=solo?'none':'';document.getElementById('askov').style.display='flex';k.focus();}function ask(e,t,x,ok,tono){if(e.dataset.ok){e.dataset.ok='';return true;}_askE=e;_askAbrir(t,x,ok,tono,0);return false;}function aviso(t,x){_askE=null;_askAbrir(t,x,'Entendido','',1);}document.getElementById('askok').addEventListener('click',function(){var e=_askE;askNo();if(!e)return;if(e.tagName==='FORM'){e.submit();return;}e.dataset.ok='1';e.click();});document.addEventListener('keydown',function(ev){if(ev.key==='Escape')askNo();});</script>")
 
 doc = f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
@@ -3547,9 +3547,16 @@ def fusionar_metricas(prev, nuevos, ts_max, hueco, ahora=None):
             for k, n in (v.get(campo) or {}).items():
                 acum[k] = int(acum.get(k, 0)) + int(n)
             e[campo] = dict(sorted(acum.items(), key=lambda kv: kv[1], reverse=True)[:20])
-        if hueco:
+        if hueco is True or (hueco and d in hueco):
             e["hueco"] = True
         dias[d] = e
+    # un dia perdido ENTERO (el panel no conto nada de el) tiene que existir, y gris: si
+    # no, no aparece en la serie y se lee como un dia tranquilo
+    if hueco and hueco is not True:
+        for d in hueco:
+            if d not in dias:
+                dias[d] = {"sal": 0, "ent": 0, "ruido": 0, "cpes_n": 0, "cpes": [],
+                           "puertos": {}, "cats": {}, "nodos": {}, "hueco": True}
     corte_set = time.strftime("%Y-%m-%d", time.localtime(ahora - 3 * 86400))
     for k, v2 in dias.items():
         if k < corte_set and isinstance(v2, dict):
@@ -3561,7 +3568,16 @@ def fusionar_metricas(prev, nuevos, ts_max, hueco, ahora=None):
 try:
     # Si el generador estuvo parado mas que la ventana hay un agujero: se deja anotado en
     # vez de fingir que esos dias fueron tranquilos.
-    _hueco = bool(METR_DESDE and ts_min and ts_min > METR_DESDE + 60)
+    # Solo los DIAS que toca el agujero [ultimo contado, primer evento leido]. Antes se
+    # marcaba todo dia que tocara la corrida, para siempre: con ventana corta y un
+    # reinicio de 35 min quedaban grises dias enteros.
+    _hueco = set()
+    if METR_DESDE and ts_min and ts_min > METR_DESDE + 60:
+        _t = int(METR_DESDE)
+        while _t <= int(ts_min):
+            _hueco.add(time.strftime("%Y-%m-%d", time.localtime(_t)))
+            _t += 3600
+        _hueco.add(time.strftime("%Y-%m-%d", time.localtime(ts_min)))
     _nuevos = {d: {"sal": v["sal"], "ent": v["ent"], "ruido": v["ruido"], "cpes": v["cpes"],
                    "puertos": dict(v["puertos"]), "cats": dict(v["cats"]),
                    "nodos": dict(v["nodos"])}
@@ -4804,9 +4820,16 @@ def router_defecto():
 def guardar_mk(d):
     orden = ["HOST", "PORT", "TLS", "USER", "PASS", "LIST", "TTL", "LIST_DNS", "TTL_DNS",
              "AUTO_MANTENER", "ENABLED", "CERT_FP", "POL_AUTO", "POL_BAJO", "POL_MEDIO", "POL_ALTO"]
+    # Las claves por categoria (LISTA_<CAT>) y por clase (POL_<CLASE>) no estaban en esta
+    # lista fija: el formulario las leia, la ruta las ponia en `d`... y aqui se tiraban al
+    # escribir. El usuario rellenaba sus listas, guardaba, y volvian vacias (2026-10-09).
+    extra = sorted(k for k, v in d.items()
+                   if k not in orden and (k.startswith("LISTA_") or k.startswith("POL_"))
+                   and str(v or "").strip())
     txt = ("# Conexion API al MikroTik para la cuarentena. La clave se usa para autenticar\n"
            "# (no se puede hashear). Archivo con permisos 600.\n"
-           + "".join(f"{k}={d.get(k,'')}\n" for k in orden))
+           + "".join(f"{k}={d.get(k,'')}\n" for k in orden)
+           + "".join(f"{k}={d[k]}\n" for k in extra))
     tmp = MK_CONF + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(txt)
@@ -10281,7 +10304,7 @@ def nav(active=""):
                        "onclick=\"document.getElementById('updov').style.display='flex'\">"
                        '<span class=uddot></span>Actualizacion</button>')
             upd_modal = (
-                "<div id=updov class=updov onclick=\"if(event.target===this)this.style.display='none'\">"
+                "<div id=updov class=updov onmousedown=\"this._dn=event.target\" onclick=\"if(event.target===this&&this._dn===this){this.style.display='none'}\">"
                 "<div class=updbox>"
                 "<button type=button class=updx onclick=\"document.getElementById('updov').style.display='none'\">&times;</button>"
                 "<h3>Actualizacion disponible</h3>"
@@ -10295,7 +10318,7 @@ def nav(active=""):
     updask = ""
     if getattr(CTX, "role", None) == "admin":
         updask = (
-            "<div id=updask class=updask onclick=\"if(event.target===this)updaskHide()\">"
+            "<div id=updask class=updask onmousedown=\"this._dn=event.target\" onclick=\"if(event.target===this&&this._dn===this){updaskHide()}\">"
             "<div class=updaskbox><h3>Actualizar el panel</h3>"
             "<p>Se bajara y aplicara la ultima version del panel desde GitHub. "
             "El panel se reiniciara en unos segundos.</p>"
@@ -10326,7 +10349,7 @@ def nav(active=""):
 # confirmaciones y avisos del panel, en un modal propio: el dialogo del navegador sale
 # con el nombre del host delante, no cabe explicar que pasa despues de aceptar y no se
 # puede distinguir una accion que corta a un abonado de una que no.
-_ASK = ('<div id=askov class=askov onclick="if(event.target===this)askNo()"><div class=askbox role=dialog aria-modal=true aria-labelledby=asktit><h3 id=asktit></h3><p id=asktxt></p><div class=askacts><button type=button class=askno id=askno onclick=askNo()>Cancelar</button><button type=button class=askok id=askok>Confirmar</button></div></div></div>'
+_ASK = ('<div id=askov class=askov onmousedown="this._dn=event.target" onclick="if(event.target===this&&this._dn===this){askNo()}"><div class=askbox role=dialog aria-modal=true aria-labelledby=asktit><h3 id=asktit></h3><p id=asktxt></p><div class=askacts><button type=button class=askno id=askno onclick=askNo()>Cancelar</button><button type=button class=askok id=askok>Confirmar</button></div></div></div>'
         "<script>var _askE=null;function askNo(){var m=document.getElementById('askov');if(m)m.style.display='none';_askE=null;}function _askAbrir(t,x,ok,tono,solo){document.getElementById('asktit').textContent=t;document.getElementById('asktxt').textContent=x||'';var k=document.getElementById('askok'),n=document.getElementById('askno');k.textContent=ok||'Confirmar';k.className='askok'+(tono?' '+tono:'');n.style.display=solo?'none':'';document.getElementById('askov').style.display='flex';k.focus();}function ask(e,t,x,ok,tono){if(e.dataset.ok){e.dataset.ok='';return true;}_askE=e;_askAbrir(t,x,ok,tono,0);return false;}function aviso(t,x){_askE=null;_askAbrir(t,x,'Entendido','',1);}document.getElementById('askok').addEventListener('click',function(){var e=_askE;askNo();if(!e)return;if(e.tagName==='FORM'){e.submit();return;}e.dataset.ok='1';e.click();});document.addEventListener('keydown',function(ev){if(ev.key==='Escape')askNo();});</script>")
 
 # compat: algunas plantillas todavia interpolan {NAV} (barra sin pestana activa marcada)
@@ -10931,7 +10954,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<button class=primary type=submit>Guardar</button>"
             "<button class=cancelbtn type=button onclick=\"mktest(this)\">Probar conexion</button>"
             "</div></form>"
-            "<div id=mkwait class=mkwait onclick=\"if(event.target===this)this.style.display='none'\">"
+            "<div id=mkwait class=mkwait onmousedown=\"this._dn=event.target\" onclick=\"if(event.target===this&&this._dn===this){this.style.display='none'}\">"
             "<div class=mkbox><div class=mkspin></div><div><b>Probando conexion&hellip;</b></div></div></div>"
             "<style>.mkwait{display:none;position:fixed;inset:0;background:rgba(11,11,11,.5);z-index:100;"
             "align-items:center;justify-content:center}"
@@ -10995,7 +11018,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
                 f"<button class='ic danger' title=Eliminar type=submit>{_IC_DEL}</button></form>"
                 "</td></tr>")
         modal_new = (
-            "<div id=ovlNew class=ovl hidden onclick=\"if(event.target===this)cerrar('ovlNew')\">"
+            "<div id=ovlNew class=ovl hidden onmousedown=\"this._dn=event.target\" onclick=\"if(event.target===this&&this._dn===this){cerrar('ovlNew')}\">"
             "<div class=modal><div class=mhead><h3>Nuevo usuario</h3>"
             "<button class=mx type=button onclick=\"cerrar('ovlNew')\" aria-label=Cerrar>&times;</button></div>"
             "<form method=post action='/perfil'><input type=hidden name=accion value=add_user>"
@@ -11017,7 +11040,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<div class=mfoot><button class=cancelbtn type=button onclick=\"cerrar('ovlNew')\">Cancelar</button>"
             "<button class=primary type=submit>Crear usuario</button></div></form></div></div>")
         modal_edit = (
-            "<div id=ovlEdit class=ovl hidden onclick=\"if(event.target===this)cerrar('ovlEdit')\">"
+            "<div id=ovlEdit class=ovl hidden onmousedown=\"this._dn=event.target\" onclick=\"if(event.target===this&&this._dn===this){cerrar('ovlEdit')}\">"
             "<div class=modal><div class=mhead><h3>Editar usuario</h3>"
             "<button class=mx type=button onclick=\"cerrar('ovlEdit')\" aria-label=Cerrar>&times;</button></div>"
             "<form method=post action='/perfil'><input type=hidden name=accion value=edit_user>"
@@ -11210,7 +11233,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
              + _tile("doc", "Documentacion", _IC_BOOK, True))
     hub = f"<div class=hubgrid>{tiles}</div>"
     def _modal(sid, contenido):
-        return (f"<div class=aptmodal id=m-{sid} onclick=\"if(event.target===this)closem()\">"
+        return (f"<div class=aptmodal id=m-{sid} onmousedown=\"this._dn=event.target\" onclick=\"if(event.target===this&&this._dn===this){{closem()}}\">"
                 f"<div class=aptbox><button type=button class=aptx onclick=closem() title=Cerrar>&times;</button>"
                 f"<div class=aptscroll>{contenido}</div></div></div>")
     def _mcard(sid, card):
@@ -11397,7 +11420,7 @@ padding:5px 10px 5px 5px;background:#fafbfc;cursor:pointer;max-width:100%}}
 <div class=card><table><thead><tr><th>Tipo</th><th>IP</th><th>Puertos</th><th>Firma (SID)</th><th>Vigencia</th><th>Motivo</th><th></th></tr></thead>
 <tbody>{tabla}</tbody></table></div>
 
-<div class=exmodal id=exmodal data-edit="{es_edit}" onclick="if(event.target===this)cerrarEx()">
+<div class=exmodal id=exmodal data-edit="{es_edit}" onmousedown="this._dn=event.target" onclick="if(event.target===this&&this._dn===this){{cerrarEx()}}">
 <div class=exbox>
 <button type=button class=exx onclick=cerrarEx() title=Cerrar>&times;</button>
 <h2>{titulo_form}</h2>
@@ -11773,8 +11796,9 @@ las columnas y el cliente termina leyendo el dato de otro abonado.</p>
 de tu red</b>. Es el dato que hace que las IPs publicas acaben en listas negras, y el unico que sirve
 para demostrarle a alguien &mdash;a quien te deslista, o a tu cliente&mdash; que la limpieza
 funciona.</p>
-<p>Arriba salen los numeros de cabecera: ataques salientes <b>hoy</b> y ayer, la <b>media diaria de 7
-dias</b>, la <b>tendencia</b> (los ultimos 7 dias frente a los 7 anteriores, en verde si baja), el
+<p>Arriba salen los numeros de cabecera <b>del periodo elegido</b> (7, 30, 90 o 365 dias): el total
+de ataques salientes en ese periodo (con hoy, que es parcial, y ayer como pista), la <b>media diaria</b>
+del periodo, la <b>tendencia</b> (siempre los ultimos 7 dias frente a los 7 anteriores, en verde si baja), el
 maximo de <b>CPEs distintos atacando</b> y cuantos se pusieron en cuarentena y cuantos se liberaron.
 Debajo, una barra por dia (7, 30, 90 o 365) y dos tablas: <b>por que atacan</b> y <b>por que puerto
 salen</b>, que es justo lo que hay que mirar para decidir la regla de salida que mas abuso corta.</p>
@@ -11785,8 +11809,10 @@ acumula aparte en <code>/var/log/suricata-metricas.json</code> y se guarda <b>40
 <li>Se cuenta de forma <b>incremental</b> (solo lo posterior a la corrida anterior), no recontando la
 ventana. Importa: si bajas la ventana a 30 minutos, recontar daria un "hoy" ridiculamente bajo y sin
 avisar de nada. Asi el total del dia es correcto sea cual sea la ventana.</li>
-<li>Si el generador estuvo parado mas que la ventana, ese dia queda <b>marcado como incompleto</b> y
-su barra sale gris: un dia sin datos no es un dia tranquilo.</li>
+<li>Si el panel estuvo parado mas que la ventana, ese tramo no se conto: los dias que toca el agujero
+quedan <b>marcados como incompletos</b> y su barra sale gris (un dia perdido entero tambien aparece, en
+gris). Un dia sin datos no es un dia tranquilo. La marca es por dia y no se extiende a los demas dias
+de esa corrida.</li>
 <li>Las cuarentenas se cuentan aparte, en el archivo del panel, porque el log de cuarentena solo
 guarda 15 dias.</li>
 <li>La tendencia necesita <b>14 dias</b> de datos para poder comparar; antes de eso lo dice.</li>
@@ -13549,7 +13575,7 @@ def _grafico(serie, esc):
         cpes = int((d or {}).get("cpes_n", 0))
         t = f"{f}: {v:,} ataques salientes, {cpes:,} CPE distintos"
         if (d or {}).get("hueco"):
-            t += " (faltan datos: el sensor estuvo parado)"
+            t += " (faltan datos: el panel estuvo parado mas que la ventana)"
         barras.append(
             f"<g><title>{esc(t)}</title>"
             f"<rect x='{x:.1f}' y='{y:.1f}' width='{max(1.0, bw - 1.5):.1f}' height='{max(0.0, h):.1f}' "
@@ -14818,10 +14844,13 @@ def historico_page(dias_n=30):
         return (f"<div class=kpi><div class=kv>{v}</div><div class=kt>{esc(t)}</div>"
                 + (f"<div class=kh>{h}</div>" if h else "") + "</div>")
 
+    # El cuadro grande es el del PERIODO elegido: con '7 dias' pulsado, ensenar solo 'hoy'
+    # (las ultimas horas) desconcertaba. Hoy y ayer quedan como pista; hoy es parcial.
     kpis = ("<div class=kpis>"
-            + _kpi(f"{hoy:,}", "ataques salientes hoy", f"ayer: {ayer:,}")
-            + _kpi(f"{ult7:,.0f}", "media diaria (7 dias)")
-            + _kpi(var_val, "tendencia", var_hint)
+            + _kpi(f"{total:,}", f"ataques salientes en {dias_n} dias",
+                   f"hoy (parcial): {hoy:,} &middot; ayer: {ayer:,}")
+            + _kpi(f"{_media(serie):,.0f}", f"media diaria ({dias_n} dias)")
+            + _kpi(var_val, "tendencia (7 dias vs los 7 anteriores)", var_hint)
             + _kpi(f"{cpes_pico:,}", "CPEs distintos atacando", "maximo en el periodo")
             + _kpi(f"{ruido:,}", "no abusivo", "P2P, chequeos de conectividad: no banean")
             + _kpi(f"{enviados:,}", "puestos en cuarentena", f"liberados: {liberados:,}")
@@ -15097,7 +15126,8 @@ def historico_page(dias_n=30):
             + kpis
             + "<section class=card><h2 style='font-size:15px;margin:0 0 4px'>Ataques salientes por dia</h2>"
             + f"<p class=sub2 style='margin:0 0 8px'>{total:,} en los ultimos {dias_n} dias. "
-              "Las barras grises son dias con datos incompletos (el sensor estuvo parado).</p>"
+              "Las barras grises son dias con datos incompletos: el panel estuvo parado mas "
+              "que la ventana y ese tramo no se conto.</p>"
             + _grafico(serie, esc) + "</section>"
             + f"<div class=doscol>{_tabla('cats', 'Por que atacan')}{_tabla('puertos', 'Por que puerto salen')}</div>"
             + reglas_html
@@ -15772,7 +15802,7 @@ def cuarentena_page(msg="", es_admin=False):
                  "Quitar seleccionados <span id=nmasivo>(0)</span></button>"
                  "<span class=mashint>Marca las casillas para sacar varias IPs de una vez</span></div>"
                  ) if es_admin else ""
-        modal = ("<div id=mmasivo class=masov onclick=\"if(event.target===this)masCerrar()\">"
+        modal = ("<div id=mmasivo class=masov onmousedown=\"this._dn=event.target\" onclick=\"if(event.target===this&&this._dn===this){masCerrar()}\">"
                  "<div class=masbox><h3>Quitar de la lista</h3>"
                  "<p class=massub id=massub>Se sacaran del MikroTik estas IPs. Es <b>reversible</b>: puedes volver "
                  "a enviarlas cuando quieras.</p>"
@@ -15933,7 +15963,7 @@ def cuarentena_page(msg="", es_admin=False):
             # al final: se consulta cuando hace falta saber a donde fue algo, no
             # cada vez que se abre la pagina a ver quien esta atacando
             sec_listas +
-            "<div id=fichamodal class=fichaov onclick=\"if(event.target===this)this.style.display='none'\">"
+            "<div id=fichamodal class=fichaov onmousedown=\"this._dn=event.target\" onclick=\"if(event.target===this&&this._dn===this){this.style.display='none'}\">"
             "<div class=fichabox><button type=button class=fichax "
             "onclick=\"document.getElementById('fichamodal').style.display='none'\">&times;</button>"
             "<iframe id=fichafr class=fichafr></iframe></div></div>"

@@ -138,7 +138,7 @@ def main():
     # el de tendencia usaba su propia estructura y metia la aclaracion DENTRO del hueco
     # del numero, asi que salia en grande y por encima de la etiqueta
     check("el cuadro de tendencia se arma como los demas",
-          '_kpi(var_val, "tendencia", var_hint)' in DASH, "")
+          '_kpi(var_val, "tendencia (7 dias vs los 7 anteriores)", var_hint)' in DASH, "")
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

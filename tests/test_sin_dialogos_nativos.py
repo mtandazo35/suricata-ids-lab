@@ -56,7 +56,7 @@ for nom, prog in (("panel", DASH), ("informe", HREP)):
     check("el %s define ask() y aviso()" % nom,
           "function ask(e,t,x,ok,tono)" in prog and "function aviso(t,x)" in prog, "")
     check("en el %s se puede cerrar pulsando fuera" % nom,
-          "if(event.target===this)askNo()" in prog, "")
+          "if(event.target===this&&this._dn===this){askNo()}" in prog, "")   # con guarda de seleccion
 
 # El panel lo cuelga de la barra de navegacion, que es lo unico que llevan TODAS sus
 # paginas. Si estuviera en una sola pagina, los botones de las demas no harian nada.

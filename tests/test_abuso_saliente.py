@@ -156,7 +156,7 @@ def main():
           "#c8ccd1" in ph and "sensor estuvo parado" in ph)
 
     # ---------- que cuenta como abuso, y como se nombra ----------
-    t = piezas(GEN, ("_TRAD", "traducir", "CATS_NO_ABUSO"), extra={"re": __import__("re")})
+    t = piezas(GEN, ("_TRAD", "_TRAD_CACHE", "_TRAD_CACHE_MAX", "_traducir_lento", "traducir", "CATS_NO_ABUSO"), extra={"re": __import__("re")})
     tr = t["traducir"]
     casos = [
         ("ET HUNTING Terse Unencrypted Request for Google - Likely Connectivity Check",

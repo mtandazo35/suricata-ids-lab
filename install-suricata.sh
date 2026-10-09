@@ -1500,7 +1500,22 @@ _TRAD = [
     (("http",), "Anomalia HTTP"),
     (("stream", "tcp "), "Anomalia TCP"),
 ]
+_TRAD_CACHE = {}
+_TRAD_CACHE_MAX = 20_000        # firmas distintas; ET Open entera cabe de sobra
+
 def traducir(sig):
+    """Categoria humana de una firma. Con memoria por firma: la tabla _TRAD se recorria
+    entera por ALERTA (11,7 M comparaciones en 1,5 M de lineas) y las firmas distintas
+    son pocas centenas."""
+    v = _TRAD_CACHE.get(sig)
+    if v is not None:
+        return v
+    v = _traducir_lento(sig)
+    if len(_TRAD_CACHE) < _TRAD_CACHE_MAX:
+        _TRAD_CACHE[sig] = v
+    return v
+
+def _traducir_lento(sig):
     s = sig.lower()
     for claves, txt in _TRAD:
         if any(k in s for k in claves):
@@ -3981,7 +3996,22 @@ _TRAD = [
     (("http",), "Anomalia HTTP"),
     (("stream", "tcp "), "Anomalia TCP"),
 ]
+_TRAD_CACHE = {}
+_TRAD_CACHE_MAX = 20_000        # firmas distintas; ET Open entera cabe de sobra
+
 def traducir(sig):
+    """Categoria humana de una firma. Con memoria por firma: la tabla _TRAD se recorria
+    entera por ALERTA (11,7 M comparaciones en 1,5 M de lineas) y las firmas distintas
+    son pocas centenas."""
+    v = _TRAD_CACHE.get(sig)
+    if v is not None:
+        return v
+    v = _traducir_lento(sig)
+    if len(_TRAD_CACHE) < _TRAD_CACHE_MAX:
+        _TRAD_CACHE[sig] = v
+    return v
+
+def _traducir_lento(sig):
     s = sig.lower()
     for claves, txt in _TRAD:
         if any(k in s for k in claves):

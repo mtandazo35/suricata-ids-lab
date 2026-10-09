@@ -30,7 +30,7 @@ ARBOL = ast.parse(DASH)
 PIEZAS = ("CONDUCTA_FILE", "CONDUCTA_DIAS", "CONDUCTA_TOPE", "CONDUCTA_MAX",
           "CONDUCTA_CADA", "_CD_TS", "_cd_abrir", "_cd_ts", "_cd_top", "_cd_podar",
           "conducta_recolectar", "conducta_csv", "guardar_conducta", "cargar_conducta",
-          "_TRAD", "traducir", "CAT_CPE", "CAT_OTROS", "nombre_categoria",
+          "_TRAD", "_TRAD_CACHE", "_TRAD_CACHE_MAX", "_traducir_lento", "traducir", "CAT_CPE", "CAT_OTROS", "nombre_categoria",
           "CONDUCTA_GUIA", "conducta_categoria", "_CD_COLORES", "conducta_barras",
           "PUERTO_NOMBRE", "nombre_puerto", "_cd_agrupa", "_cd_minibarras",
           "_CD_CSS", "_CD_JS", "_CD_AZUL", "conducta_page", "_cd_doc",

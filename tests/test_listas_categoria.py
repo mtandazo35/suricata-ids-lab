@@ -23,7 +23,7 @@ ARBOL = ast.parse(DASH)
 
 PIEZAS = ("CAT_CPE", "CAT_OTROS", "_CPES_CACHE", "_cpes_de_reporte",
           "lista_de_categoria", "nombre_categoria", "categoria_de_cats", "categoria_cpe", "listas_cpe_reglas",
-          "_TRAD", "traducir", "AIDB_SENAL", "senal_de_categorias", "listas_en_uso",
+          "_TRAD", "_TRAD_CACHE", "_TRAD_CACHE_MAX", "_traducir_lento", "traducir", "AIDB_SENAL", "senal_de_categorias", "listas_en_uso",
           "ros_lista", "_RE_ROS_RARO")
 
 fallos = 0

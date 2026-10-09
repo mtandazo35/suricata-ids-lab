@@ -5266,10 +5266,9 @@ def _plan(cat, deseadas, existentes):
     return acciones
 
 
-def plan_reglas(router, cat, accion=None, m=None):
-    """Que haria 'Aplicar' en ESE router para esa clase, sin tocar nada.
-    {"accion", "lista", "acciones": [...], "aviso", "rsc": [lineas], "cambios": n}"""
-    d = cargar_mk_de(router)
+def _plan_en(s_, cat, accion=None, m=None):
+    """El plan de una clase sobre una conexion YA abierta (el diagnostico lo llama ocho
+    veces con el mismo socket: un login por router, no por clase)."""
     m = m if m is not None else _mk_globales()
     accion = accion or accion_de_clase(cat, m)
     lista = lista_de_categoria(cat)
@@ -5285,16 +5284,23 @@ def plan_reglas(router, cat, accion=None, m=None):
         deseadas = reglas_de_accion(cat, accion, lista, _params_accion(cat, m))
     if accion == "limitar" and not deseadas:
         aviso = "Falta el limite (ACCION_LIMITE_%s, p.ej. 2M): sin el no se aplica nada." % cat.upper()
-    s_ = mk_conectar(d)
-    try:
-        existentes = _reglas_nuestras(s_, cat, deseadas)
-    finally:
-        try: s_.close()
-        except Exception: pass
+    existentes = _reglas_nuestras(s_, cat, deseadas)
     acciones = _plan(cat, deseadas, existentes)
     rsc = [("# %s" % op.upper()) + " " + rsc_de(t, p, c) for op, t, p, c, _i in acciones if op != "igual"]
     return {"accion": accion, "lista": lista, "acciones": acciones, "aviso": aviso, "rsc": rsc,
             "cambios": sum(1 for a in acciones if a[0] != "igual")}
+
+
+def plan_reglas(router, cat, accion=None, m=None):
+    """Que haria 'Aplicar' en ESE router para esa clase, sin tocar nada.
+    {"accion", "lista", "acciones": [...], "aviso", "rsc": [lineas], "cambios": n}"""
+    d = cargar_mk_de(router)
+    s_ = mk_conectar(d)
+    try:
+        return _plan_en(s_, cat, accion, m)
+    finally:
+        try: s_.close()
+        except Exception: pass
 
 
 def _mk_print_todo(s_, cmd):
@@ -6017,6 +6023,29 @@ def mk_diagnostico(router=None):
         sniffer = _mk_print(s_, "/tool/sniffer/print",
                             ["running", "streaming-enabled", "streaming-server",
                              "filter-interface"])
+        # 2b) la ACCION configurada por clase: aplicada en este router o le faltan cambios
+        _acc_checks = []
+        _m = _mk_globales()
+        for _cat, _nom, _cs, _def in CAT_CPE + [CAT_OTROS]:
+            _acc = accion_de_clase(_cat, _m)
+            if _acc == "nada":
+                continue
+            try:
+                _p = _plan_en(s_, _cat, _acc, _m)
+            except Exception as ex:
+                _acc_checks.append(("aviso", f"No se pudo comprobar la accion de {_nom}", str(ex)[:120], ""))
+                continue
+            if _p["aviso"] and not _p["acciones"]:
+                _acc_checks.append(("aviso", f"{_nom}: la accion '{ACCIONES.get(_acc, _acc)}' no se puede aplicar",
+                                    _p["aviso"], "Ajustes -> MikroTik -> " + _nom))
+            elif _p["cambios"] == 0:
+                _acc_checks.append(("ok", f"{_nom}: '{ACCIONES.get(_acc, _acc)}' aplicada en el router",
+                                    f"Las reglas del panel para '{_p['lista']}' estan tal como toca.", ""))
+            else:
+                _acc_checks.append(("falta", f"{_nom}: '{ACCIONES.get(_acc, _acc)}' NO esta aplicada ({_p['cambios']} cambio(s))",
+                                    "La accion esta configurada en el panel pero el router no tiene (o tiene distintas) "
+                                    "las reglas. Sin ellas, meter al CPE en la lista no hace nada.",
+                                    "Ajustes -> MikroTik -> " + _nom + " -> Ver / aplicar en el router"))
     finally:
         try: s_.close()
         except OSError: pass
@@ -6059,6 +6088,8 @@ def mk_diagnostico(router=None):
                         f"/ip firewall filter add chain=forward "
                         f"src-address-list={ros_lista(lista)} "
                         f'action=drop comment="Suricata: {que}"'))
+
+    out.extend(_acc_checks)        # 2b, en su sitio: tras las listas, antes del rp-filter
 
     # 3) el origen falsificado no lo ve NINGUN IDS
     rp = (ajustes[0].get("rp-filter") if ajustes else "") or "no"
@@ -12813,6 +12844,38 @@ exclusiones, con <b>anti-rebote de 60&nbsp;s</b> por CPE. MEDIO/BAJO siguen en e
 vez de caducar por TTL).</li>
 </ul>
 
+<h2>Acciones por categoria: lo que el router hace con cada lista</h2>
+<p>Meter un CPE en una address-list no hace nada si ninguna regla la usa. En <b>Ajustes &rarr;
+MikroTik</b>, bajo cada lista, eliges la <b>accion</b> que el router aplica a esa clase y el panel
+<b>pone las reglas por la API</b>:</p>
+<table><tr><th>Accion</th><th>Que pone</th></tr>
+<tr><td><b>Cortar todo</b></td><td>un <code>drop</code> en <code>raw prerouting</code> por la lista.</td></tr>
+<tr><td><b>Solo navegacion</b></td><td>una cadena propia que deja pasar DNS (53) y 80/443 y corta lo demas,
+con un <code>jump</code> desde <code>prerouting</code>. Util con portal cautivo; ojo: una botnet que hable
+por 443 sigue hablando.</td></tr>
+<tr><td><b>Sin correo saliente</b></td><td>corta 25/465/587 (spam) y nada mas.</td></tr>
+<tr><td><b>Redirigir DNS</b></td><td>fuerza el 53 a tu resolutor (dst-nat a la IP que pongas; vacio =
+<code>redirect</code> al propio router, que entonces debe resolver).</td></tr>
+<tr><td><b>Limitar</b></td><td>marca de conexion + marca de paquete + cola (<code>queue tree</code>) con el
+limite que pongas (p.ej. <code>2M</code> o <code>2M/2M</code>). Sin limite no se aplica.</td></tr>
+<tr><td><b>Mis reglas</b></td><td>pegas tu bloque de RouterOS tal cual (tablas <code>raw</code>, <code>nat</code>,
+<code>filter</code>, <code>mangle</code>, <code>queue tree</code>). Escribe <code>{{LISTA}}</code> donde vaya la
+address-list de la clase; el <code>comment</code> lo pone el panel y <code>place-before=0</code> significa
+"la primera de su cadena". Un bloque que no parsea no se guarda y se dice en que linea.</td></tr></table>
+<p><b>Como se aplica.</b> Guarda primero. <i>Ver / aplicar en el router</i> ensena las lineas exactas que se
+van a crear, corregir o quitar en ese router; solo si confirmas se toca. Antes del primer cambio se
+<b>respalda</b> el firewall (raw, nat, filter, mangle y queue tree) en <code>/root/backups/panel/</code>; si
+el respaldo falla, no se toca nada. Cada regla del panel lleva <code>comment="Suricata:&lt;clase&gt;:&lt;n&gt;"</code>
+y la reconciliacion es <b>idempotente</b> (aplicar dos veces no cambia nada) y <b>acotada</b>: jamas toca una
+regla que no lleve ese comentario. <i>Quitar del router</i> elimina solo las del panel para esa clase; la
+lista y sus IPs se quedan.</p>
+<p><b>Por que en raw prerouting.</b> Se evalua antes del fasttrack y de conntrack: corta aunque la conexion
+ya este establecida y sin depender del orden del <code>filter</code>. Las acciones de NAT y de colas van en su
+tabla. Meter un CPE en la lista <b>no</b> cierra lo que ya tiene abierto: para eso
+<code>/ip firewall connection remove [find src-address~"^IP:"]</code>.</p>
+<p>El <b>diagnostico</b> del router (segundo plano) dice por clase si la accion configurada esta aplicada o
+cuantos cambios le faltan, ademas de si alguna lista con CPEs dentro no la usa ninguna regla.</p>
+
 <h2>Falsos positivos: excluir un destino y liberar en cadena</h2>
 <p>Si una IP <b>destino</b> (p.ej. un DNS publico) dispara falsos positivos en muchos CPEs, en la
 pestana Cuarentena esta <b>Excluir destino (falso positivo)</b>: marca esa IP como <b>confiable</b>,
@@ -16078,8 +16141,10 @@ def cuarentena_page(msg="", es_admin=False):
                          % (esc(nom), len(miembros), items))
             else:
                 celda = esc(nom)
-            filas += ("<tr><td>%s</td><td class=mono>%s</td><td class=num>%s</td></tr>"
-                      % (celda, esc(lst), ("%d" % n) if n else "&mdash;"))
+            _acc = accion_de_clase(cat)
+            filas += ("<tr><td>%s</td><td class=mono>%s</td><td>%s</td><td class=num>%s</td></tr>"
+                      % (celda, esc(lst), esc(ACCIONES.get(_acc, _acc)) if _acc != "nada"
+                         else "<span class=sub2>sin accion</span>", ("%d" % n) if n else "&mdash;"))
         return ("<div class=seccion><div class=shead><div>"
                 "<h2>Las listas del MikroTik, una por categoria</h2>"
                 "<p class=sub>Cada CPE va a la lista de <b>su</b> categoria, porque no "
@@ -16095,13 +16160,16 @@ def cuarentena_page(msg="", es_admin=False):
                 ".ldet[open] summary::before{content:'\\25BE'}"
                 ".ldet .ut td,.ldet .ut th{padding:4px 8px;white-space:normal}</style>"
                 "<div class=card><table><thead><tr><th>Categoria</th>"
-                "<th>Address-list</th><th class=num>CPEs dentro</th></tr></thead>"
+                "<th>Address-list</th><th>Accion en el router</th><th class=num>CPEs dentro</th></tr></thead>"
                 "<tbody>" + filas + "</tbody></table></div>"
                 "<details style='margin-top:8px'><summary style='cursor:pointer;"
                 "font-size:13px;font-weight:600'>Las reglas que necesita cada lista</summary>"
                 "<p class=hint style='margin:6px 0 4px'>Sin una regla que use la lista, el "
                 "panel dice <b>enviado</b> y no pasa nada. Son distintas a proposito: lo que "
-                "hay que cortar, lo que hay que encolar y lo que hay que redirigir.</p>"
+                "hay que cortar, lo que hay que encolar y lo que hay que redirigir. "
+                "<b>Ya no hace falta pegarlas</b>: en <b>Ajustes &rarr; MikroTik</b> eliges la "
+                "accion de cada clase (o pegas tus propias reglas) y el panel las pone en el "
+                "router por la API, con vista previa y respaldo. Esto queda como referencia.</p>"
                 "<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;"
                 "padding:10px;overflow-x:auto;font-size:12px'>"
                 + esc(listas_cpe_reglas()) + "</pre></details></div>")

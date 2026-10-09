@@ -43,7 +43,7 @@ PIEZAS = ("ACCIONES", "ACCIONES_POR_CAT", "ACCION_DEFECTO", "T_RAW", "T_NAT", "T
           "_RSC_TABLA", "REGLAS_DIR", "_RE_KV", "reglas_desde_rsc", "cargar_reglas_propias", "guardar_reglas_propias",
           "_TABLA_RSC", "_PROPS_TABLA", "RESPALDOS_MK", "accion_de_clase", "reglas_de_accion",
           "_com_regla", "_prefijo_regla", "_rsc_val", "rsc_de", "_reglas_nuestras", "_params_accion",
-          "_plan", "plan_reglas", "_mk_print_todo", "_mk_print", "respaldar_firewall", "aplicar_reglas",
+          "_plan", "_plan_en", "plan_reglas", "_mk_print_todo", "_mk_print", "respaldar_firewall", "aplicar_reglas",
           "quitar_reglas", "guardar_mk", "_mk_globales")
 
 

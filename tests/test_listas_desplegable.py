@@ -68,6 +68,8 @@ def main():
     codigo = textwrap.dedent(sec)
     ns2 = {"time": __import__("time"), "esc": __import__("html").escape,
            "cpes_por_lista": ns["cpes_por_lista"],
+           "accion_de_clase": lambda c, m=None: "cortar" if c == "botnet" else "nada",
+           "ACCIONES": {"cortar": "Cortar todo", "nada": "Nada"},
            "cargar_abonados": lambda: {"mapa": {"r1|10.0.0.7": {"nombre": "Juan <Perez>"}}},
            "cargar_routers": lambda: [{"id": "r1"}, {"id": "r2"}],
            "abonado_de": lambda ip, rid="", mapa=None: (mapa or {}).get("%s|%s" % (rid, ip), {}),
@@ -88,6 +90,8 @@ def main():
     check("y quien lo mando", "a mano (admin)" in h and h.count(">politica<") == 2, h.count(">politica<"))
     check("con varios routers se dice el nodo", "&middot; r2</span>" in h, "")
     check("el total sigue sumando", "<b>3 CPE enviados</b>" in h, "")
+    check("la tabla dice la accion configurada por clase", "Accion en el router" in h and "Cortar todo" in h
+          and "sin accion" in h, "")
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

@@ -18,7 +18,7 @@ _i = SRC.index("cat > /usr/local/bin/suricata-dashboard <<'DASH'")
 DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
 ARBOL = ast.parse(DASH)
 
-PIEZAS = ("_mk_print", "mk_diagnostico", "ros_lista", "_RE_ROS_RARO")
+PIEZAS = ("_mk_print", "mk_diagnostico", "ros_lista", "_RE_ROS_RARO", "ACCIONES", "CAT_CPE", "CAT_OTROS")
 
 fallos = 0
 def check(d, c, e=""):
@@ -43,7 +43,11 @@ def entorno(tablas, listas=None):
           # sin nadie enviado, no hay listas de categoria que vigilar: aqui se prueba
           # el diagnostico base, y que con listas en uso tambien las mire va en
           # tests/test_listas_categoria.py
-          "listas_en_uso": lambda: []}
+          "listas_en_uso": lambda: [],
+          # la accion por clase: por defecto ninguna configurada (se prueba aparte abajo)
+          "_mk_globales": lambda: {},
+          "accion_de_clase": lambda cat, m=None: "nada",
+          "_plan_en": lambda s_, cat, accion=None, m=None: {"cambios": 0, "acciones": [], "aviso": "", "lista": "l"}}
     for n in ARBOL.body:
         nom = getattr(n, "name", None) or (
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
@@ -144,6 +148,21 @@ def main():
     det = [d for _e, t, d, _f in c5 if "falsificada" in t][0]
     check("y se avisa de que 'strict' rompe con rutas asimetricas",
           "asimetric" in det.lower(), det[:120])
+
+    # --- la accion configurada por clase: aplicada o le faltan cambios ---
+    ns6 = entorno({"/tool/sniffer/print": [{"running": "true", "streaming-enabled": "true", "streaming-server": "10.0.0.9:37008"}],
+                   "/ip/settings/print": [{"rp-filter": "strict"}]})
+    ns6["accion_de_clase"] = lambda cat, m=None: {"botnet": "cortar", "spam": "sin-correo"}.get(cat, "nada")
+    ns6["_plan_en"] = lambda s_, cat, accion=None, m=None: (
+        {"cambios": 0, "acciones": [1], "aviso": "", "lista": "clientes-botnet"} if cat == "botnet"
+        else {"cambios": 3, "acciones": [1, 2, 3], "aviso": "", "lista": "clientes-spam"})
+    c6 = ns6["mk_diagnostico"]()
+    e6 = estados(c6)
+    check("la accion aplicada sale en verde", any(k.startswith("Botnet / CnC: 'Cortar todo' aplicada") and v == "ok" for k, v in e6.items()), e6)
+    check("la accion sin aplicar sale como falta, con los cambios que le faltan",
+          any(k.startswith("Spam: 'Sin correo saliente (25/465/587)' NO esta aplicada (3 cambio(s))") and v == "falta" for k, v in e6.items()), e6)
+    check("una clase sin accion no aparece", not any(k.startswith("Escaneo:") for k in e6), e6)
+    check("y el arreglo apunta a Ajustes", any("Ver / aplicar en el router" in f for _e, _t, _d, f in c6), "")
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

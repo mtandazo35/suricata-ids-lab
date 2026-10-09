@@ -40,7 +40,7 @@ def check(d, c, e=""):
 
 
 PIEZAS = ("ACCIONES", "ACCIONES_POR_CAT", "ACCION_DEFECTO", "T_RAW", "T_NAT", "T_MANGLE", "T_QUEUE", "T_FILTER",
-          "_RSC_TABLA", "REGLAS_DIR", "_RE_KV", "reglas_desde_rsc", "cargar_reglas_propias", "guardar_reglas_propias",
+          "_RSC_TABLA", "REGLAS_DIR", "_RE_KV", "_RE_FIND_COMMENT", "_RE_FIND_CHAIN", "DNS_PROTEGIDO_DEFECTO", "reglas_desde_rsc", "cargar_reglas_propias", "guardar_reglas_propias",
           "_TABLA_RSC", "_PROPS_TABLA", "RESPALDOS_MK", "accion_de_clase", "reglas_de_accion",
           "_com_regla", "_prefijo_regla", "_rsc_val", "rsc_de", "_reglas_nuestras", "_params_accion",
           "_plan", "_plan_en", "plan_reglas", "_mk_print_todo", "_mk_print", "respaldar_firewall", "aplicar_reglas",
@@ -140,14 +140,14 @@ def main():
 
     # ---------- plantillas ----------
     c = R("botnet", "cortar", "clientes-botnet")
-    check("cortar = un drop en raw prerouting por la lista",
-          c == [(T_RAW, {"chain": "prerouting", "action": "drop", "src-address-list": "clientes-botnet"})], c)
+    check("cortar = un drop en raw prerouting por la lista, arriba del todo",
+          c == [(T_RAW, {"chain": "prerouting", "action": "drop", "src-address-list": "clientes-botnet", "_arriba": "1"})], c)
     w = R("botnet", "solo-web", "clientes-botnet")
     check("solo-web = cadena propia (DNS udp/tcp, 80/443) + drop + jump desde prerouting",
           len(w) == 5 and [x[1]["action"] for x in w] == ["return", "return", "return", "drop", "jump"]
           and w[4][1]["jump-target"] == "SURICATA-BOTNET" and w[2][1]["dst-port"] == "80,443", w)
     sc = R("spam", "sin-correo", "clientes-spam")
-    check("sin-correo = drop tcp 25,465,587", sc[0][1]["dst-port"] == "25,465,587" and sc[0][1]["protocol"] == "tcp", sc)
+    check("sin-correo = drop tcp 25,465,587,2525 (como la del ISP)", sc[0][1]["dst-port"] == "25,465,587,2525" and sc[0][1]["protocol"] == "tcp", sc)
     rd = R("dns", "redirigir-dns", "clientes-dns-malware", {"dns_ip": ""})
     check("redirigir sin IP = redirect al propio router, udp y tcp",
           [x[1]["action"] for x in rd] == ["redirect", "redirect"] and {x[1]["protocol"] for x in rd} == {"udp", "tcp"}, rd)
@@ -158,9 +158,30 @@ def main():
     check("limitar con limite = marca de conexion + marca de paquete + cola", [x[0] for x in li] == [T_MANGLE, T_MANGLE, T_QUEUE]
           and li[2][1]["max-limit"] == "2M" and li[1][1]["new-packet-mark"] == "suricata-p2p", li)
     check("nada = vacio", R("otros", "nada", "l") == [], "")
-    check("la accion por defecto: botnet corta, p2p nada, spam sin correo",
-          ns["accion_de_clase"]("botnet", {}) == "cortar" and ns["accion_de_clase"]("p2p", {}) == "nada"
+    check("los defectos son las reglas probadas del ISP: botnet solo-web, dns protegido, escaneo frenado",
+          ns["accion_de_clase"]("botnet", {}) == "solo-web" and ns["accion_de_clase"]("dns", {}) == "dns-protegido"
+          and ns["accion_de_clase"]("escaneo", {}) == "frenar-escaneo" and ns["accion_de_clase"]("p2p", {}) == "nada"
           and ns["accion_de_clase"]("spam", {}) == "sin-correo", "")
+
+    # ---------- las plantillas que salen de las reglas del ISP ----------
+    dp = R("dns", "dns-protegido", "clientes-dns-malware", {"dns_ip": "", "wan": "WAN"})
+    check("DNS protegido: 7 reglas (2 nat, 2 drop DoT, cadena de tope de 2 y su jump)", len(dp) == 7
+          and [x[0] for x in dp] == [T_NAT, T_NAT, T_RAW, T_RAW, T_RAW, T_RAW, T_RAW], [x[0] for x in dp])
+    check("  el 53 va a Quad9 por defecto, con !WAN", dp[0][1]["to-addresses"] == "9.9.9.9"
+          and dp[0][1]["in-interface-list"] == "!WAN" and dp[0][1]["action"] == "dst-nat", dp[0])
+    check("  corta DoT/DoQ y puertos alternativos como la del ISP",
+          dp[2][1]["dst-port"] == "853,8853,9953" and dp[3][1]["dst-port"] == "784,853,8853,9953", (dp[2], dp[3]))
+    check("  tope de 50/s por cliente con rafaga 100", dp[4][1]["dst-limit"] == "50,100,src-address/10s", dp[4])
+    dp2 = R("dns", "dns-protegido", "l", {"dns_ip": "192.0.2.53", "wan": ""})
+    check("  con IP propia y sin lista WAN: a esa IP y sin la condicion",
+          dp2[0][1]["to-addresses"] == "192.0.2.53" and all("in-interface-list" not in x[1] for x in dp2), dp2[0])
+    fe = R("escaneo", "frenar-escaneo", "clientes-escaneo", {"wan": "WAN"})
+    check("frenar escaneo: tope de 30 SYN/s (rafaga 60) y jump con syn,!ack y !WAN",
+          fe[0][1]["dst-limit"] == "30,60,src-address/10s" and fe[2][1]["tcp-flags"] == "syn,!ack"
+          and fe[2][1]["in-interface-list"] == "!WAN" and fe[2][1]["jump-target"] == "SURICATA-ESCANEO-TOPE", fe)
+    pa = ns["_params_accion"]("dns", {})
+    check("la lista WAN por defecto es 'WAN'; 'ninguna' la quita",
+          pa["wan"] == "WAN" and ns["_params_accion"]("dns", {"ACCION_WAN_LIST": "ninguna"})["wan"] == "", pa)
     check("una accion que no es de esa clase cae al defecto", ns["accion_de_clase"]("otros", {"ACCION_OTROS": "limitar"}) == "nada", "")
     check("rsc entrecomilla lo que lo necesita", 'src-address-list="Cliente Virus"' in ns["rsc_de"](T_RAW, {"src-address-list": "Cliente Virus"})
           and "src-address-list=clientes-botnet" in ns["rsc_de"](T_RAW, {"src-address-list": "clientes-botnet"}, "Suricata:botnet:01"), "")
@@ -168,6 +189,7 @@ def main():
     # ---------- aplicar: respaldo antes, idempotente, lo ajeno intacto ----------
     rt.t[T_RAW].append({".id": rt._id(), "chain": "prerouting", "action": "accept", "comment": "mio: gestion"})
     router = {"id": "r1"}
+    m["ACCION_BOTNET"] = "cortar"          # el defecto ya es solo-web: aqui se prueba cortar
     ok, msg, plan = ns["aplicar_reglas"](router, "botnet", quien="admin")
     check("aplicar 'cortar' en botnet: ok", ok is True, msg)
     nuestras = rt.reglas(T_RAW, "Suricata:botnet:")
@@ -285,6 +307,83 @@ add action=jump chain=prerouting comment="Restringe clientes botnet" jump-target
     m["ACCION_ESCANEO"] = "propias"
     oke, msge, plane = ns["aplicar_reglas"](router, "escaneo", quien="admin")
     check("propias sin bloque pegado: no toca nada y lo dice", oke is False and "No hay reglas propias" in msge, msge)
+
+    # ---------- las reglas REALES del ISP (2026-10-09), pegadas tal cual ----------
+    DNS_ISP = """/ip firewall nat
+add action=dst-nat chain=dstnat comment="Fuerza DNS UDP" dst-port=53 in-interface-list=!WAN protocol=udp src-address-list={LISTA} to-addresses=9.9.9.9 to-ports=53 place-before=0
+add action=dst-nat chain=dstnat comment="Fuerza DNS TCP" dst-port=53 in-interface-list=!WAN protocol=tcp src-address-list={LISTA} to-addresses=9.9.9.9 to-ports=53 place-before=0
+
+/ip firewall raw
+add action=drop chain=prerouting comment="DoT TCP" dst-port=853,8853,9953 in-interface-list=!WAN protocol=tcp src-address-list={LISTA}
+add action=drop chain=prerouting comment="DoT UDP" dst-port=784,853,8853,9953 in-interface-list=!WAN protocol=udp src-address-list={LISTA}
+
+/ip firewall raw
+add action=return chain=DNS-MALWARE-LIMIT comment="hasta 50/s" dst-limit=50,100,src-address/10s
+add action=drop chain=DNS-MALWARE-LIMIT comment="exceso"
+add action=jump chain=prerouting comment="tope" dst-port=53 in-interface-list=!WAN jump-target=DNS-MALWARE-LIMIT place-before=0 protocol=udp src-address-list={LISTA}
+"""
+    rd_isp = ns["reglas_desde_rsc"](DNS_ISP, "clientes-dns-malware")
+    check("el bloque DNS del ISP parsea entero (7 reglas, nat y raw)", len(rd_isp) == 7
+          and [x[0] for x in rd_isp].count(T_NAT) == 2, [x[0] for x in rd_isp])
+    check("  !WAN y dst-limit llegan tal cual", rd_isp[0][1]["in-interface-list"] == "!WAN"
+          and rd_isp[4][1]["dst-limit"] == "50,100,src-address/10s", (rd_isp[0], rd_isp[4]))
+    ESC_ISP = """/ip firewall raw
+add action=return chain=ESCANEO-CONTROL comment="30/s" dst-limit=30,60,src-address/10s
+add action=drop chain=ESCANEO-CONTROL comment="exceso"
+add action=jump chain=prerouting comment="Controla SYN" in-interface-list=!WAN jump-target=ESCANEO-CONTROL place-before=[find where chain=prerouting comment="Drop Malware"] protocol=tcp src-address-list={LISTA} tcp-flags=syn,!ack
+"""
+    re_isp = ns["reglas_desde_rsc"](ESC_ISP, "clientes-escaneo")
+    j = re_isp[2][1]
+    check("place-before=[find ...] NO se parte: la cadena sigue siendo prerouting y no se cuela 'where'",
+          j["chain"] == "prerouting" and "where" not in j and j.get("_antes_de") == "Drop Malware"
+          and j.get("_antes_cadena") == "prerouting" and j["tcp-flags"] == "syn,!ack", j)
+    check("y la vista previa lo escribe como en la consola",
+          'place-before=[find where chain=prerouting comment="Drop Malware"]' in ns["rsc_de"](T_RAW, j), ns["rsc_de"](T_RAW, j))
+    try:
+        ns["reglas_desde_rsc"]("/ip firewall raw\nadd chain=prerouting action=drop place-before=[find where dynamic=yes]", "l"); m_pb = ""
+    except ValueError as ex:
+        m_pb = str(ex)
+    check("un place-before que no se sabe resolver es un error con su linea", "linea 2" in m_pb and "place-before" in m_pb, m_pb)
+
+    # aplicar el de escaneo en un router CON la regla 'Drop Malware'
+    rt3 = RouterFalso()
+    for c_ in ("mio: gestion", "Drop Malware", "mio: final"):
+        rt3.t[T_RAW].append({".id": rt3._id(), "chain": "prerouting", "action": "accept" if c_ != "Drop Malware" else "drop", "comment": c_})
+    ns["mk_conectar"] = lambda d, timeout=6: rt3
+    ns["RESPALDOS_MK"] = os.path.join(td, "backups3")
+    ns["REGLAS_DIR"] = os.path.join(td, "reglas3")
+    ns["guardar_reglas_propias"]("escaneo", ESC_ISP)
+    m["ACCION_ESCANEO"] = "propias"
+    p3 = ns["plan_reglas"](router, "escaneo")
+    check("con 'Drop Malware' en el router, la vista previa no avisa", "Drop Malware" not in p3["aviso"], p3["aviso"])
+    ok_e, msg_e, _ = ns["aplicar_reglas"](router, "escaneo", quien="admin")
+    pre3 = [f.get("comment") for f in rt3.t[T_RAW] if f.get("chain") == "prerouting"]
+    check("el jump queda justo DELANTE de 'Drop Malware', no arriba del todo",
+          ok_e and pre3 == ["mio: gestion", "Suricata:escaneo:03", "Drop Malware", "mio: final"], pre3)
+
+    # ... y en un router SIN esa regla: aviso en la vista previa y va la primera
+    rt4 = RouterFalso(); rt4.t[T_RAW].append({".id": rt4._id(), "chain": "prerouting", "action": "accept", "comment": "mio"})
+    ns["mk_conectar"] = lambda d, timeout=6: rt4
+    p4 = ns["plan_reglas"](router, "escaneo")
+    check("sin 'Drop Malware', la vista previa lo avisa ANTES de aplicar", "no hay ninguna regla 'Drop Malware'" in p4["aviso"], p4["aviso"])
+    ok4b, _m4, _ = ns["aplicar_reglas"](router, "escaneo", quien="admin")
+    pre4 = [f.get("comment") for f in rt4.t[T_RAW] if f.get("chain") == "prerouting"]
+    check("  y el jump va el primero de prerouting", ok4b and pre4[0] == "Suricata:escaneo:03", pre4)
+
+    # orden: varias 'arriba' conservan su orden (antes salian al reves)
+    ORDEN = """/ip firewall raw
+add chain=prerouting action=accept protocol=tcp dst-port=587 src-address-list={LISTA} place-before=0
+add chain=prerouting action=drop protocol=tcp dst-port=587 place-before=0
+add chain=prerouting action=drop protocol=tcp dst-port=25
+"""
+    rt5 = RouterFalso(); rt5.t[T_RAW].append({".id": rt5._id(), "chain": "prerouting", "action": "accept", "comment": "mio"})
+    ns["mk_conectar"] = lambda d, timeout=6: rt5
+    ns["guardar_reglas_propias"]("spam", ORDEN)
+    m["ACCION_SPAM"] = "propias"
+    ns["aplicar_reglas"](router, "spam", quien="admin")
+    pre5 = [f.get("comment") for f in rt5.t[T_RAW] if f.get("chain") == "prerouting"]
+    check("dos reglas 'arriba' conservan su orden (accept antes que drop) y lo que no dice posicion va al final",
+          pre5 == ["Suricata:spam:01", "Suricata:spam:02", "mio", "Suricata:spam:03"], pre5)
 
     # ---------- guardar_mk conserva ACCION_* ----------
     ns["MK_CONF"] = os.path.join(td, "mk.conf")

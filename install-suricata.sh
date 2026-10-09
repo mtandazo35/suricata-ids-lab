@@ -5051,25 +5051,30 @@ ACCIONES = {
     "nada":          "Nada (solo la lista)",
     "cortar":        "Cortar todo",
     "solo-web":      "Solo navegacion (DNS, 80 y 443)",
-    "sin-correo":    "Sin correo saliente (25/465/587)",
+    "sin-correo":    "Sin correo saliente (25/465/587/2525)",
+    "dns-protegido": "DNS protegido (Quad9, sin DoT, tope 50/s)",
     "redirigir-dns": "Redirigir DNS a tu resolutor",
+    "frenar-escaneo": "Frenar escaneo (tope 30 SYN/s)",
     "limitar":       "Limitar ancho de banda",
     "propias":       "Mis reglas (pegadas en RouterOS)",
 }
 ACCIONES_POR_CAT = {
-    "botnet":  ("cortar", "solo-web", "propias", "nada"),
-    "escaneo": ("cortar", "solo-web", "propias", "nada"),
+    "botnet":  ("solo-web", "cortar", "propias", "nada"),
+    "escaneo": ("frenar-escaneo", "cortar", "solo-web", "propias", "nada"),
     "fuerza":  ("cortar", "solo-web", "propias", "nada"),
     "spam":    ("sin-correo", "cortar", "propias", "nada"),
-    "dns":     ("redirigir-dns", "cortar", "propias", "nada"),
+    "dns":     ("dns-protegido", "redirigir-dns", "cortar", "propias", "nada"),
     "minado":  ("limitar", "cortar", "propias", "nada"),
     "p2p":     ("limitar", "cortar", "propias", "nada"),
     "otros":   ("nada", "cortar", "propias"),
 }
 # P2P y minado nacen en 'nada': no son un ataque, son consumo, y 'limitar' exige un
 # limite que solo el ISP conoce.
-ACCION_DEFECTO = {"botnet": "cortar", "escaneo": "cortar", "fuerza": "cortar", "spam": "sin-correo",
-                  "dns": "redirigir-dns", "minado": "nada", "p2p": "nada", "otros": "nada"}
+# Los defectos de botnet, DNS, escaneo y spam son las reglas que el ISP probo en su
+# router (2026-10-09). Un defecto solo preselecciona: nada se aplica sin "Aplicar".
+ACCION_DEFECTO = {"botnet": "solo-web", "escaneo": "frenar-escaneo", "fuerza": "cortar", "spam": "sin-correo",
+                  "dns": "dns-protegido", "minado": "nada", "p2p": "nada", "otros": "nada"}
+DNS_PROTEGIDO_DEFECTO = "9.9.9.9"     # Quad9: resuelve y bloquea dominios de malware
 T_RAW, T_NAT, T_MANGLE, T_QUEUE = "/ip/firewall/raw", "/ip/firewall/nat", "/ip/firewall/mangle", "/queue/tree"
 T_FILTER = "/ip/firewall/filter"
 _TABLA_RSC = {T_RAW: "/ip firewall raw", T_NAT: "/ip firewall nat", T_FILTER: "/ip firewall filter",
@@ -5100,8 +5105,11 @@ def reglas_de_accion(cat, accion, lista, params=None):
     """Las reglas que esa accion necesita, en orden: [(tabla, props)]. Sin comentario: lo
     pone quien reconcilia. 'limitar' sin limite devuelve [] (no se aplica a ciegas)."""
     p = params or {}
+    # `_arriba`: va delante de todo en su cadena (place-before=0). Solo lo llevan las
+    # reglas que lo necesitan: el jump/drop de prerouting y el dst-nat.
+    wan = {"in-interface-list": "!" + p["wan"]} if p.get("wan") else {}
     if accion == "cortar":
-        return [(T_RAW, {"chain": "prerouting", "action": "drop", "src-address-list": lista})]
+        return [(T_RAW, {"chain": "prerouting", "action": "drop", "src-address-list": lista, "_arriba": "1"})]
     if accion == "solo-web":
         ch = "SURICATA-" + cat.upper()
         return [(T_RAW, {"chain": ch, "action": "return", "protocol": "udp", "dst-port": "53"}),
@@ -5109,10 +5117,33 @@ def reglas_de_accion(cat, accion, lista, params=None):
                 (T_RAW, {"chain": ch, "action": "return", "protocol": "tcp", "dst-port": "80,443"}),
                 (T_RAW, {"chain": ch, "action": "drop"}),
                 (T_RAW, {"chain": "prerouting", "action": "jump", "jump-target": ch,
-                         "src-address-list": lista})]
+                         "src-address-list": lista, "_arriba": "1"})]
     if accion == "sin-correo":
         return [(T_RAW, {"chain": "prerouting", "action": "drop", "src-address-list": lista,
-                         "protocol": "tcp", "dst-port": "25,465,587"})]
+                         "protocol": "tcp", "dst-port": "25,465,587,2525", "_arriba": "1"})]
+    if accion == "dns-protegido":
+        # las del ISP: el 53 a un resolutor que filtra, sin DNS cifrado ni puertos
+        # alternativos por donde escaparse, y con tope de consultas por cliente
+        ip = (p.get("dns_ip") or "").strip() or DNS_PROTEGIDO_DEFECTO
+        ch = "SURICATA-DNS-TOPE"
+        nat = {"chain": "dstnat", "action": "dst-nat", "src-address-list": lista, "dst-port": "53",
+               "to-addresses": ip, "to-ports": "53", "_arriba": "1"}
+        return [(T_NAT, dict(nat, protocol="udp", **wan)),
+                (T_NAT, dict(nat, protocol="tcp", **wan)),
+                (T_RAW, dict({"chain": "prerouting", "action": "drop", "src-address-list": lista,
+                              "protocol": "tcp", "dst-port": "853,8853,9953", "_arriba": "1"}, **wan)),
+                (T_RAW, dict({"chain": "prerouting", "action": "drop", "src-address-list": lista,
+                              "protocol": "udp", "dst-port": "784,853,8853,9953", "_arriba": "1"}, **wan)),
+                (T_RAW, {"chain": ch, "action": "return", "dst-limit": "50,100,src-address/10s"}),
+                (T_RAW, {"chain": ch, "action": "drop"}),
+                (T_RAW, dict({"chain": "prerouting", "action": "jump", "jump-target": ch, "src-address-list": lista,
+                              "protocol": "udp", "dst-port": "53", "_arriba": "1"}, **wan))]
+    if accion == "frenar-escaneo":
+        ch = "SURICATA-ESCANEO-TOPE"
+        return [(T_RAW, {"chain": ch, "action": "return", "dst-limit": "30,60,src-address/10s"}),
+                (T_RAW, {"chain": ch, "action": "drop"}),
+                (T_RAW, dict({"chain": "prerouting", "action": "jump", "jump-target": ch, "src-address-list": lista,
+                              "protocol": "tcp", "tcp-flags": "syn,!ack", "_arriba": "1"}, **wan))]
     if accion == "redirigir-dns":
         ip = (p.get("dns_ip") or "").strip()
         base = {"chain": "dstnat", "src-address-list": lista, "dst-port": "53"}
@@ -5134,7 +5165,12 @@ def reglas_de_accion(cat, accion, lista, params=None):
     return []
 
 
-_RE_KV = re.compile(r'([A-Za-z0-9._-]+)=("(?:[^"\\]|\\.)*"|\S+)')
+# un valor puede ir entre comillas, entre corchetes (expresion de consola: [find ...]) o
+# suelto. Sin el corchete, 'place-before=[find where chain=prerouting ...]' se partia en
+# espacios y el chain=prerouting de DENTRO se leia como otra propiedad de la regla.
+_RE_KV = re.compile(r'([A-Za-z0-9._-]+)=("(?:[^"\\]|\\.)*"|\[[^\]]*\]|\S+)')
+_RE_FIND_COMMENT = re.compile(r'comment="([^"]*)"')
+_RE_FIND_CHAIN = re.compile(r'chain=([A-Za-z0-9._-]+)')
 
 
 def reglas_desde_rsc(texto, lista=""):
@@ -5171,9 +5207,22 @@ def reglas_desde_rsc(texto, lista=""):
             if k == "comment":
                 continue
             if k == "place-before":
-                if v.strip() == "0":
+                v = v.strip()
+                if v == "0":
                     props["_arriba"] = "1"
+                elif v.startswith("[") and _RE_FIND_COMMENT.search(v):
+                    # delante de la regla con ese comentario (y esa cadena, si se dice)
+                    props["_antes_de"] = _RE_FIND_COMMENT.search(v).group(1)
+                    mc = _RE_FIND_CHAIN.search(v)
+                    if mc:
+                        props["_antes_cadena"] = mc.group(1)
+                else:
+                    raise ValueError("linea %d: place-before solo admite 0 o "
+                                     "[find where ... comment=\"...\"]: %s" % (ln, v[:60]))
                 continue
+            if v.startswith("[") and v.endswith("]"):
+                raise ValueError("linea %d: %s=%s es una expresion de consola; por la API "
+                                 "hay que poner el valor" % (ln, k, v[:40]))
             props[k] = v
         if not props:
             raise ValueError("linea %d: 'add' sin propiedades" % ln)
@@ -5215,9 +5264,12 @@ def _rsc_val(v):
 
 def rsc_de(tabla, props, comment=""):
     """La misma regla como linea de consola RouterOS (para la vista previa y la doc)."""
-    partes = ["%s=%s" % (k, _rsc_val(v)) for k, v in props.items() if k != "_arriba"]
+    partes = ["%s=%s" % (k, _rsc_val(v)) for k, v in props.items() if not k.startswith("_")]
     if props.get("_arriba"):
         partes.append("place-before=0")
+    elif props.get("_antes_de"):
+        partes.append('place-before=[find where %scomment="%s"]' % (
+            ("chain=%s " % props["_antes_cadena"]) if props.get("_antes_cadena") else "", props["_antes_de"]))
     if comment:
         partes.append('comment="%s"' % comment)
     return "%s add %s" % (_TABLA_RSC[tabla], " ".join(partes))
@@ -5231,14 +5283,17 @@ def _reglas_nuestras(s_, cat, deseadas=()):
     out = {}
     pref = _prefijo_regla(cat)
     for tabla, props in _PROPS_TABLA.items():
-        extra = sorted({k for t, p in deseadas if t == tabla for k in p if k != "_arriba"} - set(props))
+        extra = sorted({k for t, p in deseadas if t == tabla for k in p if not k.startswith("_")} - set(props))
         filas = _mk_print(s_, tabla + "/print", [".id", "comment"] + props + extra)
         out[tabla] = [f for f in filas if (f.get("comment") or "").startswith(pref)]
     return out
 
 
 def _params_accion(cat, m):
-    return {"dns_ip": m.get("ACCION_DNS_IP", ""), "limite": m.get("ACCION_LIMITE_" + cat.upper(), "")}
+    # la interface-list de las WAN: por defecto "WAN"; "ninguna" quita la condicion
+    wan = (m.get("ACCION_WAN_LIST", "WAN") or "").strip()
+    return {"dns_ip": m.get("ACCION_DNS_IP", ""), "limite": m.get("ACCION_LIMITE_" + cat.upper(), ""),
+            "wan": "" if wan.lower() in ("", "ninguna") else wan}
 
 
 def _plan(cat, deseadas, existentes):
@@ -5254,7 +5309,7 @@ def _plan(cat, deseadas, existentes):
             acciones.append(("add", tabla, props, com, ""))
             continue
         usados.add((tabla, act.get(".id")))
-        if all(str(act.get(k, "")) == str(v) for k, v in props.items() if k != "_arriba"):
+        if all(str(act.get(k, "")) == str(v) for k, v in props.items() if not k.startswith("_")):
             acciones.append(("igual", tabla, props, com, act.get(".id", "")))
         else:
             acciones.append(("set", tabla, props, com, act.get(".id", "")))
@@ -5286,6 +5341,17 @@ def _plan_en(s_, cat, accion=None, m=None):
         aviso = "Falta el limite (ACCION_LIMITE_%s, p.ej. 2M): sin el no se aplica nada." % cat.upper()
     existentes = _reglas_nuestras(s_, cat, deseadas)
     acciones = _plan(cat, deseadas, existentes)
+    # una regla pegada con place-before=[find ... comment="X"]: si X no existe en ESTE
+    # router, ira la primera de su cadena. Se dice antes de aplicar, no despues.
+    _refs = {(t, p["_antes_de"], p.get("_antes_cadena", "")) for op, t, p, _c, _i in acciones
+             if op == "add" and p.get("_antes_de")}
+    for t, com_ref, cad in sorted(_refs):
+        hay = any(f.get("comment") == com_ref and (not cad or f.get("chain") == cad)
+                  for f in _mk_print(s_, t + "/print", [".id", "chain", "comment"]))
+        if not hay:
+            aviso = ((aviso + " ") if aviso else "") + (
+                "En este router no hay ninguna regla '%s': las que iban delante de ella iran "
+                "las primeras de su cadena." % com_ref)
     rsc = [("# %s" % op.upper()) + " " + rsc_de(t, p, c) for op, t, p, c, _i in acciones if op != "igual"]
     return {"accion": accion, "lista": lista, "acciones": acciones, "aviso": aviso, "rsc": rsc,
             "cambios": sum(1 for a in acciones if a[0] != "igual")}
@@ -5360,20 +5426,32 @@ def aplicar_reglas(router, cat, accion=None, quien="?"):
         return (False, "no se pudo respaldar el firewall del router (%s): no se toca nada" % ex, plan)
     s_ = mk_conectar(d)
     hechos = {"add": 0, "set": 0, "remove": 0}
+    _tope = {}          # (tabla, cadena) -> .id de la que era la primera antes de insertar
     try:
         for op, tabla, props, com, rid in plan["acciones"]:
             if op == "igual":
                 continue
-            limpias = {k: v for k, v in props.items() if k != "_arriba"}
+            limpias = {k: v for k, v in props.items() if not k.startswith("_")}
             if op == "add":
                 words = [tabla + "/add"] + ["=%s=%s" % (k, v) for k, v in limpias.items()] + ["=comment=" + com]
-                arriba = props.get("_arriba") or (tabla == T_RAW and props.get("chain") == "prerouting")
-                if arriba and props.get("chain"):
-                    # como place-before=0: delante de la primera regla de SU cadena
-                    primera = next((f for f in _mk_print(s_, tabla + "/print", [".id", "chain"])
-                                    if f.get("chain") == props.get("chain")), None)
-                    if primera and primera.get(".id"):
-                        words.append("=place-before=" + primera[".id"])
+                destino = ""
+                if props.get("_antes_de"):
+                    ref = next((f for f in _mk_print(s_, tabla + "/print", [".id", "chain", "comment"])
+                                if f.get("comment") == props["_antes_de"]
+                                and (not props.get("_antes_cadena") or f.get("chain") == props["_antes_cadena"])), None)
+                    destino = (ref or {}).get(".id", "")
+                if not destino and (props.get("_arriba") or props.get("_antes_de")) and props.get("chain"):
+                    # "arriba" = delante de la que era la PRIMERA antes de empezar, no de la
+                    # primera actual: si no, varias reglas arriba quedan en orden inverso
+                    # (un accept seguido de un drop acabaria drop-accept)
+                    clave_t = (tabla, props["chain"])
+                    if clave_t not in _tope:
+                        primera = next((f for f in _mk_print(s_, tabla + "/print", [".id", "chain"])
+                                        if f.get("chain") == props["chain"]), None)
+                        _tope[clave_t] = (primera or {}).get(".id", "")
+                    destino = _tope[clave_t]
+                if destino:
+                    words.append("=place-before=" + destino)
             elif op == "set":
                 words = [tabla + "/set", "=.id=" + rid] + ["=%s=%s" % (k, v) for k, v in limpias.items()] + ["=comment=" + com]
             else:
@@ -10856,8 +10934,9 @@ def _card_listas(m):
                                                "inline-block" if acc == "limitar" else "none"))
         if cat == "dns":
             extra += ("<input type=text name=accion_dns_ip class=acclim value=\"%s\" "
-                      "placeholder='IP de tu resolutor (vacio = el propio router)' style='display:%s'>"
-                      % (esc(m.get("ACCION_DNS_IP", "")), "inline-block" if acc == "redirigir-dns" else "none"))
+                      "placeholder='IP del resolutor (vacio: Quad9 / el propio router)' style='display:%s'>"
+                      % (esc(m.get("ACCION_DNS_IP", "")),
+                         "inline-block" if acc in ("redirigir-dns", "dns-protegido") else "none"))
         propias = cargar_reglas_propias(cat)
         filas += ("<div class=field><label>%s</label>"
                   "<input type=text name=lista_%s value=\"%s\" placeholder=\"%s\">"
@@ -10888,7 +10967,7 @@ def _card_listas(m):
         "function accCambio(sel,cat){var t=document.getElementById('reglas_'+cat);"
         "if(t)t.style.display=(sel.value==='propias')?'block':'none';"
         "var l=sel.form.querySelector('[name=limite_'+cat+']');if(l)l.style.display=(sel.value==='limitar')?'inline-block':'none';"
-        "if(cat==='dns'){var d=sel.form.querySelector('[name=accion_dns_ip]');if(d)d.style.display=(sel.value==='redirigir-dns')?'inline-block':'none';}}"
+        "if(cat==='dns'){var d=sel.form.querySelector('[name=accion_dns_ip]');if(d)d.style.display=(sel.value==='redirigir-dns'||sel.value==='dns-protegido')?'inline-block':'none';}}"
         "function _accRid(){var s=document.getElementById('accrid');return s?s.value:'';}"
         "function _accBox(h){var mo=document.getElementById('mkwait'),bx=mo.querySelector('.mkbox');"
         "bx.style.maxWidth='780px';bx.style.alignItems='flex-start';bx.innerHTML=h;mo.style.display='flex';}"
@@ -10936,6 +11015,12 @@ def _card_listas(m):
         "respalda su firewall en <code>/root/backups/panel/</code>. Nunca se toca una regla "
         "que no lleve el comentario del panel.</p>"
         + sel_router +
+        "<div class=field><label>Interface-list de tus WAN</label>"
+        "<input type=text name=accion_wan_list value=\"%s\" placeholder='vacio = sin esa condicion' style='max-width:260px'>"
+        "<div class=hint>Las plantillas de DNS y escaneo actuan solo sobre lo que entra por "
+        "interfaces que <b>no</b> estan en esta lista (<code>in-interface-list=!WAN</code>). "
+        "Tiene que existir en el router, o la regla se rechaza al aplicar.</div></div>"
+        % esc("" if (m.get("ACCION_WAN_LIST", "WAN") or "").lower() == "ninguna" else m.get("ACCION_WAN_LIST", "WAN")) +
         "<div class=grid2>" + filas + "</div>"
         "<h3 style='margin:18px 0 2px;font-size:15px'>Caducidad</h3>"
         "<p class=sub2 style='margin:0 0 10px'>Cuanto dura cada entrada en el router si no "
@@ -12853,7 +12938,12 @@ MikroTik</b>, bajo cada lista, eliges la <b>accion</b> que el router aplica a es
 <tr><td><b>Solo navegacion</b></td><td>una cadena propia que deja pasar DNS (53) y 80/443 y corta lo demas,
 con un <code>jump</code> desde <code>prerouting</code>. Util con portal cautivo; ojo: una botnet que hable
 por 443 sigue hablando.</td></tr>
-<tr><td><b>Sin correo saliente</b></td><td>corta 25/465/587 (spam) y nada mas.</td></tr>
+<tr><td><b>Sin correo saliente</b></td><td>corta 25/465/587/2525 (spam) y nada mas.</td></tr>
+<tr><td><b>DNS protegido</b></td><td>la del ISP: el 53 (udp y tcp) a un resolutor que filtra (Quad9
+9.9.9.9 por defecto, o la IP que pongas), corte de DNS cifrado y puertos alternativos (853, 8853, 9953 y
+784 en udp) y tope de 50 consultas/s por cliente con rafaga de 100.</td></tr>
+<tr><td><b>Frenar escaneo</b></td><td>la del ISP: tope de 30 SYN nuevos por segundo por cliente (rafaga
+60); lo que pase de ahi se descarta. El cliente sigue navegando.</td></tr>
 <tr><td><b>Redirigir DNS</b></td><td>fuerza el 53 a tu resolutor (dst-nat a la IP que pongas; vacio =
 <code>redirect</code> al propio router, que entonces debe resolver).</td></tr>
 <tr><td><b>Limitar</b></td><td>marca de conexion + marca de paquete + cola (<code>queue tree</code>) con el
@@ -12861,7 +12951,12 @@ limite que pongas (p.ej. <code>2M</code> o <code>2M/2M</code>). Sin limite no se
 <tr><td><b>Mis reglas</b></td><td>pegas tu bloque de RouterOS tal cual (tablas <code>raw</code>, <code>nat</code>,
 <code>filter</code>, <code>mangle</code>, <code>queue tree</code>). Escribe <code>{{LISTA}}</code> donde vaya la
 address-list de la clase; el <code>comment</code> lo pone el panel y <code>place-before=0</code> significa
-"la primera de su cadena". Un bloque que no parsea no se guarda y se dice en que linea.</td></tr></table>
+"la primera de su cadena". Tambien vale <code>place-before=[find where comment="X"]</code>: va delante de
+esa regla y, si en ese router no existe, la vista previa lo avisa y va la primera. Varias reglas "arriba"
+conservan su orden; las que no dicen posicion van al final, como en la consola. Un bloque que no parsea
+no se guarda y se dice en que linea.</td></tr></table>
+<p>Las plantillas de DNS y escaneo llevan <code>in-interface-list=!WAN</code>: el nombre de esa
+interface-list se pone en Ajustes (vacio = sin esa condicion) y tiene que existir en el router.</p>
 <p><b>Como se aplica.</b> Guarda primero. <i>Ver / aplicar en el router</i> ensena las lineas exactas que se
 van a crear, corregir o quitar en ese router; solo si confirmas se toca. Antes del primer cambio se
 <b>respalda</b> el firewall (raw, nat, filter, mangle y queue tree) en <code>/root/backups/panel/</code>; si
@@ -17150,6 +17245,10 @@ class H(BaseHTTPRequestHandler):
                         guardar_reglas_propias(_cat, q.get("reglas_" + _cat, [""])[0])
                     except ValueError as ex:
                         _err_reglas.append("%s: %s" % (_nom, ex))
+            if "accion_wan_list" in q:   # un formulario viejo sin el campo no la borra
+                _wl = (q.get("accion_wan_list", [""])[0] or "").strip()[:64]
+                # vacio se guarda como "ninguna": un valor vacio no se escribe y volveria "WAN"
+                m["ACCION_WAN_LIST"] = _wl if re.match(r"^[A-Za-z0-9._ -]+$", _wl) else "ninguna"
             _dip = (q.get("accion_dns_ip", [""])[0] or "").strip()
             try:
                 m["ACCION_DNS_IP"] = str(ipaddress.ip_address(_dip)) if _dip else ""

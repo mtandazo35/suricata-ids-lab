@@ -75,8 +75,11 @@ def main():
     def sel(cat):   # el <select> de esa categoria (el JS tambien menciona 'accion_dns_ip')
         i = h.index("<select name=accion_%s " % cat); return h[i:h.index("</select>", i)]
     check("la accion guardada sale marcada", "<option value='propias' selected>" in sel("botnet"), sel("botnet"))
-    check("el defecto se marca cuando no hay nada guardado (escaneo -> cortar)",
-          "<option value='cortar' selected>" in sel("escaneo"), sel("escaneo"))
+    check("el defecto se marca cuando no hay nada guardado (escaneo -> frenar, la del ISP)",
+          "<option value='frenar-escaneo' selected>" in sel("escaneo"), sel("escaneo"))
+    check("la lista WAN se ve y se puede cambiar (defecto WAN)", 'name=accion_wan_list value="WAN"' in h, "")
+    hw = ns["_card_listas"]({"ACCION_WAN_LIST": "ninguna"})
+    check("con 'ninguna' el campo sale vacio", 'name=accion_wan_list value=""' in hw, "")
     tb = h[h.index("id=reglas_botnet"):]
     check("las reglas propias guardadas van en su textarea, visible", "style='display:block'" in tb[:200]
           and "src-address-list={LISTA}" in tb[:400], tb[:300])
@@ -100,6 +103,8 @@ def main():
     check("guarda la accion solo si es de esa clase", '_a in ACCIONES_POR_CAT.get(_cat, ())' in ruta, "")
     check("valida el limite con una expresion", 'ACCION_LIMITE_' in ruta and "re.match(" in ruta, "")
     check("valida el resolutor como IP", 'ipaddress.ip_address(_dip)' in ruta, "")
+    check("la lista WAN: solo si viene el campo; vacio se guarda como 'ninguna'",
+          'if "accion_wan_list" in q:' in ruta and '"ninguna"' in ruta, "")
     check("guarda las reglas propias y avisa si no parsean",
           "guardar_reglas_propias(_cat" in ruta and "_err_reglas.append" in ruta and "NO se guardaron porque no" in ruta, "")
 

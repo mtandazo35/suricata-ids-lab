@@ -160,7 +160,7 @@ def main():
     e6 = estados(c6)
     check("la accion aplicada sale en verde", any(k.startswith("Botnet / CnC: 'Cortar todo' aplicada") and v == "ok" for k, v in e6.items()), e6)
     check("la accion sin aplicar sale como falta, con los cambios que le faltan",
-          any(k.startswith("Spam: 'Sin correo saliente (25/465/587)' NO esta aplicada (3 cambio(s))") and v == "falta" for k, v in e6.items()), e6)
+          any(k.startswith("Spam: 'Sin correo saliente (25/465/587/2525)' NO esta aplicada (3 cambio(s))") and v == "falta" for k, v in e6.items()), e6)
     check("una clase sin accion no aparece", not any(k.startswith("Escaneo:") for k in e6), e6)
     check("y el arreglo apunta a Ajustes", any("Ver / aplicar en el router" in f for _e, _t, _d, f in c6), "")
 

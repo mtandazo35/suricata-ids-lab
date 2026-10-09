@@ -4824,7 +4824,8 @@ def guardar_mk(d):
     # lista fija: el formulario las leia, la ruta las ponia en `d`... y aqui se tiraban al
     # escribir. El usuario rellenaba sus listas, guardaba, y volvian vacias (2026-10-09).
     extra = sorted(k for k, v in d.items()
-                   if k not in orden and (k.startswith("LISTA_") or k.startswith("POL_"))
+                   if k not in orden and (k.startswith("LISTA_") or k.startswith("POL_")
+                                           or k.startswith("ACCION_"))
                    and str(v or "").strip())
     txt = ("# Conexion API al MikroTik para la cuarentena. La clave se usa para autenticar\n"
            "# (no se puede hashear). Archivo con permisos 600.\n"
@@ -5033,6 +5034,364 @@ def mk_remove(ip, lista=None, router=None):
     finally:
         try: s.close()
         except Exception: pass
+
+# =====================================================================================
+# Politicas de ACCION por categoria: las reglas que usan cada address-list, puestas en
+# el router POR LA API.
+#
+# Meter un CPE en una lista no hace nada si ninguna regla la usa. Hasta aqui esas reglas
+# se imprimian para pegarlas a mano (listas_cpe_reglas); ahora se generan desde una
+# plantilla por categoria y se reconcilian en el router: idempotente, acotado a lo
+# nuestro (comment "Suricata:<cat>:<n>") y con respaldo de las tablas antes de tocar.
+#
+# Van en `raw prerouting` a proposito: se evalua ANTES del fasttrack y de conntrack, asi
+# que corta aunque la conexion ya este establecida y sin depender del orden del filter.
+# =====================================================================================
+ACCIONES = {
+    "nada":          "Nada (solo la lista)",
+    "cortar":        "Cortar todo",
+    "solo-web":      "Solo navegacion (DNS, 80 y 443)",
+    "sin-correo":    "Sin correo saliente (25/465/587)",
+    "redirigir-dns": "Redirigir DNS a tu resolutor",
+    "limitar":       "Limitar ancho de banda",
+    "propias":       "Mis reglas (pegadas en RouterOS)",
+}
+ACCIONES_POR_CAT = {
+    "botnet":  ("cortar", "solo-web", "propias", "nada"),
+    "escaneo": ("cortar", "solo-web", "propias", "nada"),
+    "fuerza":  ("cortar", "solo-web", "propias", "nada"),
+    "spam":    ("sin-correo", "cortar", "propias", "nada"),
+    "dns":     ("redirigir-dns", "cortar", "propias", "nada"),
+    "minado":  ("limitar", "cortar", "propias", "nada"),
+    "p2p":     ("limitar", "cortar", "propias", "nada"),
+    "otros":   ("nada", "cortar", "propias"),
+}
+# P2P y minado nacen en 'nada': no son un ataque, son consumo, y 'limitar' exige un
+# limite que solo el ISP conoce.
+ACCION_DEFECTO = {"botnet": "cortar", "escaneo": "cortar", "fuerza": "cortar", "spam": "sin-correo",
+                  "dns": "redirigir-dns", "minado": "nada", "p2p": "nada", "otros": "nada"}
+T_RAW, T_NAT, T_MANGLE, T_QUEUE = "/ip/firewall/raw", "/ip/firewall/nat", "/ip/firewall/mangle", "/queue/tree"
+T_FILTER = "/ip/firewall/filter"
+_TABLA_RSC = {T_RAW: "/ip firewall raw", T_NAT: "/ip firewall nat", T_FILTER: "/ip firewall filter",
+              T_MANGLE: "/ip firewall mangle", T_QUEUE: "/queue tree"}
+_RSC_TABLA = {v: k for k, v in _TABLA_RSC.items()}
+REGLAS_DIR = "/etc/suricata-reglas"          # <cat>.rsc: las reglas propias, tal cual se pegaron
+# que propiedades se leen de cada tabla para comparar con lo deseado
+_PROPS_TABLA = {
+    T_RAW: ["chain", "action", "src-address-list", "protocol", "dst-port", "jump-target"],
+    T_FILTER: ["chain", "action", "src-address-list", "protocol", "dst-port", "jump-target",
+               "connection-state", "in-interface", "out-interface"],
+    T_NAT: ["chain", "action", "src-address-list", "protocol", "dst-port", "to-addresses", "to-ports"],
+    T_MANGLE: ["chain", "action", "src-address-list", "connection-mark", "new-connection-mark",
+               "new-packet-mark", "passthrough"],
+    T_QUEUE: ["name", "parent", "packet-mark", "max-limit"],
+}
+RESPALDOS_MK = "/root/backups/panel"
+
+
+def accion_de_clase(cat, m=None):
+    """La accion configurada para esa clase (ACCION_<CLASE>), o la de defecto."""
+    m = m if m is not None else _mk_globales()
+    v = (m.get("ACCION_" + cat.upper(), "") or "").strip()
+    return v if v in ACCIONES_POR_CAT.get(cat, ()) else ACCION_DEFECTO.get(cat, "nada")
+
+
+def reglas_de_accion(cat, accion, lista, params=None):
+    """Las reglas que esa accion necesita, en orden: [(tabla, props)]. Sin comentario: lo
+    pone quien reconcilia. 'limitar' sin limite devuelve [] (no se aplica a ciegas)."""
+    p = params or {}
+    if accion == "cortar":
+        return [(T_RAW, {"chain": "prerouting", "action": "drop", "src-address-list": lista})]
+    if accion == "solo-web":
+        ch = "SURICATA-" + cat.upper()
+        return [(T_RAW, {"chain": ch, "action": "return", "protocol": "udp", "dst-port": "53"}),
+                (T_RAW, {"chain": ch, "action": "return", "protocol": "tcp", "dst-port": "53"}),
+                (T_RAW, {"chain": ch, "action": "return", "protocol": "tcp", "dst-port": "80,443"}),
+                (T_RAW, {"chain": ch, "action": "drop"}),
+                (T_RAW, {"chain": "prerouting", "action": "jump", "jump-target": ch,
+                         "src-address-list": lista})]
+    if accion == "sin-correo":
+        return [(T_RAW, {"chain": "prerouting", "action": "drop", "src-address-list": lista,
+                         "protocol": "tcp", "dst-port": "25,465,587"})]
+    if accion == "redirigir-dns":
+        ip = (p.get("dns_ip") or "").strip()
+        base = {"chain": "dstnat", "src-address-list": lista, "dst-port": "53"}
+        if ip:
+            acc = {"action": "dst-nat", "to-addresses": ip, "to-ports": "53"}
+        else:
+            acc = {"action": "redirect", "to-ports": "53"}   # al resolutor del propio router
+        return [(T_NAT, dict(base, protocol="udp", **acc)), (T_NAT, dict(base, protocol="tcp", **acc))]
+    if accion == "limitar":
+        lim = (p.get("limite") or "").strip()
+        if not lim:
+            return []
+        mk = "suricata-" + cat
+        return [(T_MANGLE, {"chain": "prerouting", "src-address-list": lista, "action": "mark-connection",
+                            "new-connection-mark": mk, "passthrough": "yes"}),
+                (T_MANGLE, {"chain": "prerouting", "connection-mark": mk, "action": "mark-packet",
+                            "new-packet-mark": mk, "passthrough": "no"}),
+                (T_QUEUE, {"name": mk, "parent": "global", "packet-mark": mk, "max-limit": lim})]
+    return []
+
+
+_RE_KV = re.compile(r'([A-Za-z0-9._-]+)=("(?:[^"\\]|\\.)*"|\S+)')
+
+
+def reglas_desde_rsc(texto, lista=""):
+    """Parsea un bloque de consola RouterOS en [(tabla, props)].
+
+    Acepta lo que se pega de un export: lineas de tabla ('/ip firewall raw'), lineas 'add
+    k=v ...' (con valores entrecomillados) y comentarios '#'. El comment lo pone el panel
+    (se descarta el pegado), 'place-before=0' pasa a ser "la primera de su cadena" y
+    {LISTA} se sustituye por la address-list de la categoria. Una tabla que no se maneja
+    o una linea que no sea 'add' es un error, no un silencio."""
+    out = []
+    tabla = None
+    for ln, cruda in enumerate((texto or "").splitlines(), 1):
+        l = cruda.strip()
+        if not l or l.startswith("#"):
+            continue
+        if l.startswith("/"):
+            t = " ".join(l.split())
+            if t not in _RSC_TABLA:
+                raise ValueError("linea %d: tabla no soportada: %s (valen: %s)" % (
+                    ln, t, ", ".join(sorted(_RSC_TABLA))))
+            tabla = _RSC_TABLA[t]
+            continue
+        if not l.startswith("add ") and l != "add":
+            raise ValueError("linea %d: se esperaba 'add ...' o una tabla '/ip firewall ...': %s" % (ln, l[:60]))
+        if tabla is None:
+            raise ValueError("linea %d: falta la tabla antes del primer 'add' (p.ej. /ip firewall raw)" % ln)
+        props = {}
+        for k, v in _RE_KV.findall(l[3:]):
+            if v.startswith('"') and v.endswith('"'):
+                v = v[1:-1].replace('\\"', '"')
+            if lista:
+                v = v.replace("{LISTA}", lista)
+            if k == "comment":
+                continue
+            if k == "place-before":
+                if v.strip() == "0":
+                    props["_arriba"] = "1"
+                continue
+            props[k] = v
+        if not props:
+            raise ValueError("linea %d: 'add' sin propiedades" % ln)
+        out.append((tabla, props))
+    return out
+
+
+def cargar_reglas_propias(cat):
+    try:
+        return open(os.path.join(REGLAS_DIR, cat + ".rsc"), encoding="utf-8").read()
+    except OSError:
+        return ""
+
+
+def guardar_reglas_propias(cat, texto):
+    """Guarda el bloque tal cual, pero solo si parsea: un error aqui es mejor que en el router."""
+    reglas_desde_rsc(texto, "x")           # valida (lanza ValueError con la linea)
+    os.makedirs(REGLAS_DIR, mode=0o700, exist_ok=True)
+    ruta = os.path.join(REGLAS_DIR, cat + ".rsc")
+    with open(ruta + ".tmp", "w", encoding="utf-8") as f:
+        f.write((texto or "").strip() + ("\n" if (texto or "").strip() else ""))
+    os.chmod(ruta + ".tmp", 0o600)
+    os.replace(ruta + ".tmp", ruta)
+    return len(reglas_desde_rsc(texto, "x"))
+
+
+def _com_regla(cat, n):
+    return "Suricata:%s:%02d" % (cat, n)
+
+
+def _prefijo_regla(cat):
+    return "Suricata:%s:" % cat
+
+
+def _rsc_val(v):
+    v = str(v)
+    return '"%s"' % v.replace('"', '\\"') if re.search(r"[^A-Za-z0-9_.:,/-]", v) or not v else v
+
+
+def rsc_de(tabla, props, comment=""):
+    """La misma regla como linea de consola RouterOS (para la vista previa y la doc)."""
+    partes = ["%s=%s" % (k, _rsc_val(v)) for k, v in props.items() if k != "_arriba"]
+    if props.get("_arriba"):
+        partes.append("place-before=0")
+    if comment:
+        partes.append('comment="%s"' % comment)
+    return "%s add %s" % (_TABLA_RSC[tabla], " ".join(partes))
+
+
+def _reglas_nuestras(s_, cat, deseadas=()):
+    """{tabla: [fila]} de lo que ya hay en el router con nuestro comentario de esa clase.
+    Se leen las propiedades de la tabla MAS las que usen las reglas deseadas (las propias
+    pueden traer cualquier campo): si no se leyeran, compararian contra vacio y se
+    reescribirian en cada corrida."""
+    out = {}
+    pref = _prefijo_regla(cat)
+    for tabla, props in _PROPS_TABLA.items():
+        extra = sorted({k for t, p in deseadas if t == tabla for k in p if k != "_arriba"} - set(props))
+        filas = _mk_print(s_, tabla + "/print", [".id", "comment"] + props + extra)
+        out[tabla] = [f for f in filas if (f.get("comment") or "").startswith(pref)]
+    return out
+
+
+def _params_accion(cat, m):
+    return {"dns_ip": m.get("ACCION_DNS_IP", ""), "limite": m.get("ACCION_LIMITE_" + cat.upper(), "")}
+
+
+def _plan(cat, deseadas, existentes):
+    """Compara lo deseado con lo que hay: [(op, tabla, props, comment, .id)].
+    op: igual | add | set | remove. Los set/add van antes que los remove para no dejar
+    nunca la lista sin regla a medias."""
+    acciones = []
+    usados = set()
+    for i, (tabla, props) in enumerate(deseadas, 1):
+        com = _com_regla(cat, i)
+        act = next((f for f in existentes.get(tabla, []) if f.get("comment") == com), None)
+        if act is None:
+            acciones.append(("add", tabla, props, com, ""))
+            continue
+        usados.add((tabla, act.get(".id")))
+        if all(str(act.get(k, "")) == str(v) for k, v in props.items() if k != "_arriba"):
+            acciones.append(("igual", tabla, props, com, act.get(".id", "")))
+        else:
+            acciones.append(("set", tabla, props, com, act.get(".id", "")))
+    for tabla, filas in existentes.items():
+        for f in filas:
+            if (tabla, f.get(".id")) not in usados:
+                acciones.append(("remove", tabla, {k: f.get(k, "") for k in _PROPS_TABLA[tabla] if f.get(k)},
+                                 f.get("comment", ""), f.get(".id", "")))
+    return acciones
+
+
+def plan_reglas(router, cat, accion=None, m=None):
+    """Que haria 'Aplicar' en ESE router para esa clase, sin tocar nada.
+    {"accion", "lista", "acciones": [...], "aviso", "rsc": [lineas], "cambios": n}"""
+    d = cargar_mk_de(router)
+    m = m if m is not None else _mk_globales()
+    accion = accion or accion_de_clase(cat, m)
+    lista = lista_de_categoria(cat)
+    aviso = ""
+    if accion == "propias":
+        try:
+            deseadas = reglas_desde_rsc(cargar_reglas_propias(cat), lista)
+        except ValueError as ex:
+            deseadas = []; aviso = "Tus reglas no parsean: %s" % ex
+        if not deseadas and not aviso:
+            aviso = "No hay reglas propias pegadas para esta clase: no se aplica nada."
+    else:
+        deseadas = reglas_de_accion(cat, accion, lista, _params_accion(cat, m))
+    if accion == "limitar" and not deseadas:
+        aviso = "Falta el limite (ACCION_LIMITE_%s, p.ej. 2M): sin el no se aplica nada." % cat.upper()
+    s_ = mk_conectar(d)
+    try:
+        existentes = _reglas_nuestras(s_, cat, deseadas)
+    finally:
+        try: s_.close()
+        except Exception: pass
+    acciones = _plan(cat, deseadas, existentes)
+    rsc = [("# %s" % op.upper()) + " " + rsc_de(t, p, c) for op, t, p, c, _i in acciones if op != "igual"]
+    return {"accion": accion, "lista": lista, "acciones": acciones, "aviso": aviso, "rsc": rsc,
+            "cambios": sum(1 for a in acciones if a[0] != "igual")}
+
+
+def _mk_print_todo(s_, cmd):
+    """Un print SIN proplist: todas las propiedades, para el respaldo."""
+    filas = []
+    try:
+        _mk_send(s_, [cmd])
+        _ok, frases, _err = _mk_reply(s_)
+    except Exception:
+        return filas
+    for f in frases:
+        if f and f[0] == "!re":
+            filas.append({a[1:].split("=", 1)[0]: a[1:].split("=", 1)[1]
+                          for a in f if a.startswith("=") and "=" in a[1:]})
+    return filas
+
+
+def respaldar_firewall(router, s_=None):
+    """Guarda las tablas que tocamos (raw, nat, mangle, queue tree) de ese router en
+    RESPALDOS_MK antes de cambiar nada. Devuelve la ruta, o lanza: sin respaldo no se toca."""
+    d = cargar_mk_de(router)
+    propio = s_ is None
+    if propio:
+        s_ = mk_conectar(d)
+    try:
+        datos = {"router": d.get("HOST", ""), "id": (router or {}).get("id", ""), "ts": int(time.time()),
+                 "tablas": {t: _mk_print_todo(s_, t + "/print") for t in _PROPS_TABLA}}
+    finally:
+        if propio:
+            try: s_.close()
+            except Exception: pass
+    os.makedirs(RESPALDOS_MK, exist_ok=True)
+    nombre = "mikrotik-%s-%s.json" % ((router or {}).get("id") or d.get("HOST", "router"),
+                                      time.strftime("%Y%m%d-%H%M%S"))
+    ruta = os.path.join(RESPALDOS_MK, nombre)
+    with open(ruta + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(datos, f)
+    os.chmod(ruta + ".tmp", 0o600)
+    os.replace(ruta + ".tmp", ruta)
+    return ruta
+
+
+def aplicar_reglas(router, cat, accion=None, quien="?"):
+    """Reconcilia las reglas de esa clase en ese router. (ok, mensaje, plan).
+    Respaldo antes del primer cambio; si el respaldo falla, no se toca nada. Si una orden
+    falla, se para ahi y se dice cual (lo ya hecho queda, y el plan siguiente lo ve)."""
+    m = _mk_globales()
+    plan = plan_reglas(router, cat, accion, m)
+    if plan["aviso"] and not plan["acciones"]:
+        return (False, plan["aviso"], plan)
+    if not plan["cambios"]:
+        return (True, "sin cambios: el router ya tiene estas reglas", plan)
+    d = cargar_mk_de(router)
+    try:
+        respaldo = respaldar_firewall(router)
+    except Exception as ex:
+        return (False, "no se pudo respaldar el firewall del router (%s): no se toca nada" % ex, plan)
+    s_ = mk_conectar(d)
+    hechos = {"add": 0, "set": 0, "remove": 0}
+    try:
+        for op, tabla, props, com, rid in plan["acciones"]:
+            if op == "igual":
+                continue
+            limpias = {k: v for k, v in props.items() if k != "_arriba"}
+            if op == "add":
+                words = [tabla + "/add"] + ["=%s=%s" % (k, v) for k, v in limpias.items()] + ["=comment=" + com]
+                arriba = props.get("_arriba") or (tabla == T_RAW and props.get("chain") == "prerouting")
+                if arriba and props.get("chain"):
+                    # como place-before=0: delante de la primera regla de SU cadena
+                    primera = next((f for f in _mk_print(s_, tabla + "/print", [".id", "chain"])
+                                    if f.get("chain") == props.get("chain")), None)
+                    if primera and primera.get(".id"):
+                        words.append("=place-before=" + primera[".id"])
+            elif op == "set":
+                words = [tabla + "/set", "=.id=" + rid] + ["=%s=%s" % (k, v) for k, v in limpias.items()] + ["=comment=" + com]
+            else:
+                words = [tabla + "/remove", "=.id=" + rid]
+            _mk_send(s_, words)
+            ok, _fr, err = _mk_reply(s_)
+            if not ok:
+                mk_log("REGLAS-ERROR", "-", quien, "router=%s clase=%s %s %s: %s" % (
+                    (router or {}).get("id", ""), cat, op, com, err))
+                return (False, "fallo en %s %s: %s (respaldo en %s)" % (op, com, err, respaldo), plan)
+            hechos[op] += 1
+    finally:
+        try: s_.close()
+        except Exception: pass
+    mk_log("REGLAS-APLICADAS", "-", quien, "router=%s clase=%s accion=%s +%d ~%d -%d respaldo=%s" % (
+        (router or {}).get("id", ""), cat, plan["accion"], hechos["add"], hechos["set"], hechos["remove"],
+        respaldo))
+    return (True, "aplicado: %d nueva(s), %d corregida(s), %d quitada(s). Respaldo: %s" % (
+        hechos["add"], hechos["set"], hechos["remove"], respaldo), plan)
+
+
+def quitar_reglas(router, cat, quien="?"):
+    """Quita del router SOLO nuestras reglas de esa clase (las de comment Suricata:<cat>:)."""
+    return aplicar_reglas(router, cat, accion="nada", quien=quien)
 
 # Un solo cerrojo para el registro de enviados. Lo tocan a la vez los hilos de las
 # peticiones HTTP y el hilo de fondo (barrido rapido, reconciliador, politicas). Sin el,

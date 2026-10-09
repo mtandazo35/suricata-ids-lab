@@ -1184,13 +1184,25 @@ if not _MIS_NETS:
     for _t in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"):
         _MIS_NETS.append(_ipm.ip_network(_t))
 
+_MI_CPE_CACHE = {}
+_MI_CPE_CACHE_MAX = 100_000     # IPs distintas por corrida; mas alla se calcula sin guardar
+
 def es_mi_cpe(ip):
-    """True si la IP pertenece a tus redes (un abonado), False si es de internet."""
-    try:
-        a = _ipm.ip_address(ip)
-    except ValueError:
-        return False
-    return any(a.version == n.version and a in n for n in _MIS_NETS)
+    """True si la IP pertenece a tus redes (un abonado), False si es de internet.
+
+    Con memoria por IP: se llama por evento (medio millon de veces en 1,5 M de lineas) y
+    construir un objeto ipaddress cada vez era el 12%% del generador; las IPs se repiten
+    miles de veces, asi que la respuesta se guarda. Acotada para no crecer con un barrido."""
+    v = _MI_CPE_CACHE.get(ip)
+    if v is None:
+        try:
+            a = _ipm.ip_address(ip)
+            v = any(a.version == n.version and a in n for n in _MIS_NETS)
+        except ValueError:
+            v = False
+        if len(_MI_CPE_CACHE) < _MI_CPE_CACHE_MAX:
+            _MI_CPE_CACHE[ip] = v
+    return v
 
 
 # Destinos CONFIABLES (falsos positivos): p.ej. un DNS que dispara alertas en muchos CPEs.

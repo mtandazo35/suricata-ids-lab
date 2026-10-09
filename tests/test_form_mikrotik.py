@@ -29,7 +29,8 @@ _i = SRC.index("cat > /usr/local/bin/suricata-dashboard <<'DASH'")
 DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
 ARBOL = ast.parse(DASH)
 
-PIEZAS = ("CAT_CPE", "CAT_OTROS", "_card_listas")
+PIEZAS = ("CAT_CPE", "CAT_OTROS", "_card_listas",
+          "ACCIONES", "ACCIONES_POR_CAT", "ACCION_DEFECTO", "accion_de_clase")
 
 fallos = 0
 
@@ -42,7 +43,9 @@ def check(d, c, e=""):
 
 
 def pieza():
-    ns = {"html": __import__("html")}
+    # la tarjeta ya trae la accion por categoria: dobles de lo que consulta
+    ns = {"html": __import__("html"), "cargar_routers": lambda: [],
+          "cargar_reglas_propias": lambda c: "", "_mk_globales": lambda: {}}
     for n in ARBOL.body:
         nom = getattr(n, "name", None) or (
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")

@@ -119,6 +119,7 @@ correr "listas por categoria: desplegable con las IPs de cada una" "$PY" tests/t
 correr "rendimiento del generador: indice de flujos y memorias, mismos resultados" "$PY" tests/test_perf_generador.py
 correr "seleccionar texto dentro de un modal no lo cierra" "$PY" tests/test_overlay_seleccion.py
 correr "acciones por categoria en el router: plantillas, reglas propias, respaldo, idempotente" "$PY" tests/test_acciones_router.py
+correr "acciones por categoria: tarjeta de Ajustes y rutas plan/aplicar/quitar" "$PY" tests/test_acciones_ui.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

@@ -10810,20 +10810,101 @@ def _card_listas(m):
     (redirigir al resolutor), y por eso son listas distintas."""
     esc = html.escape
     filas = ""
+    routers = [r for r in cargar_routers() if (r.get("HOST") or "").strip()]
     for cat, nom, _cats, por_defecto in CAT_CPE + [CAT_OTROS]:
         # el nombre por defecto va CARGADO en el campo (editable), no solo como pista: el
         # usuario queria ver y poder cambiar el nombre real, no un gris que no se guarda
         actual = (m.get("LISTA_" + cat.upper(), "") or "").strip() or por_defecto
+        acc = accion_de_clase(cat, m)
+        ops = "".join("<option value='%s'%s>%s</option>" % (v, " selected" if v == acc else "", esc(ACCIONES[v]))
+                      for v in ACCIONES_POR_CAT[cat])
+        extra = ""
+        if cat in ("minado", "p2p"):
+            extra += ("<input type=text name=limite_%s class=acclim value=\"%s\" placeholder='limite: 2M o 2M/2M' "
+                      "style='display:%s'>" % (cat, esc(m.get("ACCION_LIMITE_" + cat.upper(), "")),
+                                               "inline-block" if acc == "limitar" else "none"))
+        if cat == "dns":
+            extra += ("<input type=text name=accion_dns_ip class=acclim value=\"%s\" "
+                      "placeholder='IP de tu resolutor (vacio = el propio router)' style='display:%s'>"
+                      % (esc(m.get("ACCION_DNS_IP", "")), "inline-block" if acc == "redirigir-dns" else "none"))
+        propias = cargar_reglas_propias(cat)
         filas += ("<div class=field><label>%s</label>"
                   "<input type=text name=lista_%s value=\"%s\" placeholder=\"%s\">"
-                  "</div>" % (esc(nom), esc(cat), esc(actual), esc(por_defecto)))
+                  "<div class=accrow><select name=accion_%s onchange=\"accCambio(this,'%s')\">%s</select>%s"
+                  "<button type=button class=cancelbtn onclick=\"reglasPlan('%s')\">Ver / aplicar en el router</button>"
+                  "<button type=button class=cancelbtn onclick=\"if(ask(this,'Quitar del router las reglas de %s',"
+                  "'Se quitan SOLO las reglas que puso el panel para esta clase (comment Suricata:%s:*). "
+                  "La address-list y las IPs que tenga se quedan.','Quitar',''))reglasQuitar('%s')\">Quitar del router</button></div>"
+                  "<textarea name=reglas_%s id=reglas_%s class=rsc rows=6 style='display:%s' "
+                  "placeholder='/ip firewall raw&#10;add chain=prerouting action=drop src-address-list={LISTA} place-before=0'>%s</textarea>"
+                  "</div>" % (esc(nom), esc(cat), esc(actual), esc(por_defecto),
+                              cat, cat, ops, extra, cat, esc(nom), cat, cat,
+                              cat, cat, "block" if acc == "propias" else "none", esc(propias)))
+    # con varios routers, a cual se le miran/aplican las reglas
+    sel_router = ""
+    if len(routers) > 1:
+        sel_router = ("<div class=field><label>Router al que aplicar las reglas</label><select id=accrid>"
+                      + "".join("<option value='%s'>%s</option>" % (esc(r.get("id", "")), esc(r.get("nombre") or r.get("HOST", "")))
+                                for r in routers) + "</select></div>")
+    js_acc = (
+        "<style>.accrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px}"
+        ".accrow select{padding:7px 10px;border:1px solid #d7d6d2;border-radius:8px;font:13px system-ui}"
+        ".accrow .cancelbtn{padding:6px 10px;font-size:12.5px}"
+        ".acclim{width:220px;padding:7px 10px;border:1px solid #d7d6d2;border-radius:8px;font:13px system-ui}"
+        ".rsc{width:100%;box-sizing:border-box;margin-top:6px;font:12px ui-monospace,Consolas,monospace;"
+        "padding:8px;border:1px solid #d7d6d2;border-radius:8px}</style>"
+        "<script>"
+        "function accCambio(sel,cat){var t=document.getElementById('reglas_'+cat);"
+        "if(t)t.style.display=(sel.value==='propias')?'block':'none';"
+        "var l=sel.form.querySelector('[name=limite_'+cat+']');if(l)l.style.display=(sel.value==='limitar')?'inline-block':'none';"
+        "if(cat==='dns'){var d=sel.form.querySelector('[name=accion_dns_ip]');if(d)d.style.display=(sel.value==='redirigir-dns')?'inline-block':'none';}}"
+        "function _accRid(){var s=document.getElementById('accrid');return s?s.value:'';}"
+        "function _accBox(h){var mo=document.getElementById('mkwait'),bx=mo.querySelector('.mkbox');"
+        "bx.style.maxWidth='780px';bx.style.alignItems='flex-start';bx.innerHTML=h;mo.style.display='flex';}"
+        "function _accCerrar(){document.getElementById('mkwait').style.display='none';}"
+        "function _accEsc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;');}"
+        "function _accPost(ruta,cat,fn){var d=new URLSearchParams();d.set('cat',cat);d.set('rid',_accRid());"
+        "fetch(ruta,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:d.toString()})"
+        ".then(function(r){return r.text();}).then(fn)"
+        ".catch(function(e){_accBox(\"<div><b>Error</b><br><span style='font-size:13px'>\"+_accEsc(String(e))+\"</span></div>\");});}"
+        "function reglasPlan(cat){_accBox(\"<div class='mkspin'></div><div><b>Leyendo el router&hellip;</b><br>"
+        "<span style='font-size:13px;color:#52514e'>Se compara lo que hay con lo que toca. No se cambia nada todavia.</span></div>\");"
+        "_accPost('/mikrotik/reglas/plan',cat,function(t){var ok=t.indexOf('OK')===0;"
+        "var c=t.replace(/^OK ?/,'').replace(/^ERR: /,'');"
+        "if(!ok){_accBox(\"<div style='font-size:30px'>&#9940;</div><div><b>No se pudo leer el plan</b><br><span style='font-size:13px'>\"+_accEsc(c)+\"</span>"
+        "<div class=actions style='margin-top:10px'><button type=button class=cancelbtn onclick='_accCerrar()'>Cerrar</button></div></div>\");return;}"
+        "var L=c.split(String.fromCharCode(10));var cab=L.shift();"
+        "var pre=L.length?\"<pre style='background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;padding:10px;max-height:50vh;overflow:auto;"
+        "font-size:12px;white-space:pre-wrap;margin:0'>\"+_accEsc(L.join(String.fromCharCode(10)))+\"</pre>\""
+        ":\"<p style='margin:0'>El router ya tiene exactamente estas reglas.</p>\";"
+        "_accBox(\"<div style='width:100%'><b>Vista previa &middot; \"+_accEsc(cat)+\"</b>"
+        "<div style='font-size:13px;color:#52514e;margin:4px 0 8px'>\"+_accEsc(cab)+\"</div>\"+pre+"
+        "\"<div class=actions style='margin-top:12px'>\"+(L.length?\"<button type=button class=primary onclick=\\\"reglasAplicar('\"+cat+\"')\\\">Aplicar en el router</button>\":'')+"
+        "\"<button type=button class=cancelbtn onclick='_accCerrar()'>Cerrar</button></div></div>\");});}"
+        "function _accResultado(ruta,cat,titulo){_accPost(ruta,cat,function(t){var ok=t.indexOf('OK')===0;"
+        "var c=t.replace(/^OK ?/,'').replace(/^ERR: /,'');"
+        "_accBox(\"<div style='font-size:30px'>\"+(ok?'&#9989;':'&#9940;')+\"</div><div><b>\"+(ok?titulo:'No se hizo')+\"</b><br>"
+        "<span style='font-size:13px'>\"+_accEsc(c)+\"</span><div class=actions style='margin-top:10px'>"
+        "<button type=button class=cancelbtn onclick='_accCerrar()'>Cerrar</button></div></div>\");});}"
+        "function reglasAplicar(cat){_accBox(\"<div class='mkspin'></div><div><b>Aplicando&hellip;</b><br>"
+        "<span style='font-size:13px;color:#52514e'>Primero se respalda el firewall del router.</span></div>\");"
+        "_accResultado('/mikrotik/reglas/aplicar',cat,'Aplicado');}"
+        "function reglasQuitar(cat){_accBox(\"<div class='mkspin'></div><div><b>Quitando&hellip;</b></div>\");"
+        "_accResultado('/mikrotik/reglas/quitar',cat,'Quitadas');}"
+        "</script>")
     return (
-        "<h3 style='margin:18px 0 2px;font-size:15px'>Listas por tipo de abuso</h3>"
+        js_acc +
+        "<h3 style='margin:18px 0 2px;font-size:15px'>Listas por tipo de abuso y que hace el router con cada una</h3>"
         "<p class=sub2 style='margin:0 0 10px'>Cada CPE va a la address-list de <b>su</b> "
-        "categoria, porque no todas se tratan igual: una botnet se corta, el P2P se encola "
-        "y el DNS de malware se redirige a tu resolutor. Vienen cargados los nombres por "
-        "defecto: cambia el que quieras (vacio = volver al defecto). Las reglas que "
-        "necesita cada una estan en la pestana <b>Cuarentena</b>.</p>"
+        "categoria, y debajo eliges <b>la accion</b> que el router aplica a esa lista: una "
+        "plantilla (cortar, solo navegacion, sin correo, redirigir DNS, limitar) o <b>tus "
+        "propias reglas</b> pegadas tal cual de RouterOS (usa <code>{LISTA}</code> donde "
+        "vaya la lista; el comentario lo pone el panel). <b>Guarda</b> primero; despues "
+        "<i>Ver / aplicar en el router</i> ensena las lineas exactas que se van a crear, "
+        "corregir o quitar, y solo se toca el router si confirmas. Antes de cada cambio se "
+        "respalda su firewall en <code>/root/backups/panel/</code>. Nunca se toca una regla "
+        "que no lleve el comentario del panel.</p>"
+        + sel_router +
         "<div class=grid2>" + filas + "</div>"
         "<h3 style='margin:18px 0 2px;font-size:15px'>Caducidad</h3>"
         "<p class=sub2 style='margin:0 0 10px'>Cuanto dura cada entrada en el router si no "
@@ -16978,6 +17059,7 @@ class H(BaseHTTPRequestHandler):
             m["TTL_DNS"] = (q.get("ttl_dns", [""])[0]).strip()[:16]
             # Las listas por categoria. Vacio = se borra la clave y vuelve el nombre por
             # defecto; asi se puede deshacer un cambio sin tener que recordar cual era.
+            _err_reglas = []
             for _cat, _nom, _cs, _def in CAT_CPE + [CAT_OTROS]:
                 _k = "LISTA_" + _cat.upper()
                 _v = (q.get("lista_" + _cat, [""])[0]).strip()[:64]
@@ -16985,6 +17067,26 @@ class H(BaseHTTPRequestHandler):
                     m[_k] = _v
                 else:
                     m.pop(_k, None)
+                # la accion de la clase, sus parametros y sus reglas propias
+                _a = (q.get("accion_" + _cat, [""])[0] or "").strip()
+                if _a in ACCIONES_POR_CAT.get(_cat, ()):
+                    m["ACCION_" + _cat.upper()] = _a
+                if _cat in ("minado", "p2p"):
+                    _lim = (q.get("limite_" + _cat, [""])[0] or "").strip()[:24]
+                    if re.match(r"^\d+[kKmMgG]?(/\d+[kKmMgG]?)?$", _lim):
+                        m["ACCION_LIMITE_" + _cat.upper()] = _lim
+                    else:
+                        m.pop("ACCION_LIMITE_" + _cat.upper(), None)
+                if ("reglas_" + _cat) in q:
+                    try:
+                        guardar_reglas_propias(_cat, q.get("reglas_" + _cat, [""])[0])
+                    except ValueError as ex:
+                        _err_reglas.append("%s: %s" % (_nom, ex))
+            _dip = (q.get("accion_dns_ip", [""])[0] or "").strip()
+            try:
+                m["ACCION_DNS_IP"] = str(ipaddress.ip_address(_dip)) if _dip else ""
+            except ValueError:
+                m.pop("ACCION_DNS_IP", None)
             m["AUTO_MANTENER"] = "1" if q.get("auto") else "0"
             # politica por clase; un valor que no es de la lista se ignora (queda la anterior)
             for _cat, _nom, _cs, _def in CAT_CPE + [CAT_OTROS]:
@@ -17010,6 +17112,10 @@ class H(BaseHTTPRequestHandler):
             guardar_nunca(q.get("nunca", [""])[0])                         # allowlist 'nunca bloquear'
             bitacora("CONFIG-MIKROTIK", f"host={m.get('HOST','')} enviar={'si' if m.get('ENABLED')=='1' else 'no'} "
                                         f"doble_senal={'si' if q.get('doble') else 'no'}")
+            if _err_reglas:
+                return self._html(perfil_page(
+                    "Conexion y listas guardadas, pero estas reglas propias NO se guardaron porque no "
+                    "parsean: " + " | ".join(_err_reglas), ok=False))
             return self._html(perfil_page("Conexion al MikroTik guardada.", ok=True))
         if ruta == "/routers/guardar":
             # Alta o edicion de un nodo. El primero se edita desde la tarjeta de MikroTik;
@@ -17073,6 +17179,41 @@ class H(BaseHTTPRequestHandler):
             return self._html(perfil_page(
                 "Nodo quitado del panel. Si tenia CPEs en cuarentena, siguen bloqueados en "
                 "ese MikroTik: quitalos desde el propio router.", ok=True))
+        if ruta in ("/mikrotik/reglas/plan", "/mikrotik/reglas/aplicar", "/mikrotik/reglas/quitar"):
+            # Las reglas de una clase en UN router: vista previa (sin tocar), aplicar o quitar.
+            # Responde texto plano para el modal: "OK <cabecera>\n<rsc...>" o "ERR: motivo".
+            if not self._admin():
+                return self._deny()
+            def _txt(okr, texto):
+                b = (("OK " if okr else "ERR: ") + texto).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers(); self.wfile.write(b)
+            cat = (q.get("cat", [""])[0]).strip()
+            rid = (q.get("rid", [""])[0]).strip()
+            if cat not in ACCIONES_POR_CAT:
+                return _txt(False, "clase desconocida")
+            r = next((x for x in cargar_routers() if x.get("id") == rid), None) if rid else router_defecto()
+            if not r or not (r.get("HOST") and r.get("USER") and r.get("PASS")):
+                return _txt(False, "ese router no tiene la conexion configurada: guarda primero host, usuario y clave")
+            quien = getattr(CTX, "user", "?")
+            try:
+                if ruta.endswith("/plan"):
+                    p = plan_reglas(r, cat)
+                    cab = "%d cambio(s) en %s &middot; accion: %s &middot; lista: %s" % (
+                        p["cambios"], r.get("nombre") or r.get("HOST", ""), ACCIONES.get(p["accion"], p["accion"]), p["lista"])
+                    if p["aviso"]:
+                        cab += " &middot; " + p["aviso"]
+                    return _txt(True, cab + (("\n" + "\n".join(p["rsc"])) if p["rsc"] else ""))
+                if ruta.endswith("/aplicar"):
+                    okr, msg, _p = aplicar_reglas(r, cat, quien=quien)
+                else:
+                    okr, msg, _p = quitar_reglas(r, cat, quien=quien)
+                bitacora("REGLAS-ROUTER", "%s %s router=%s: %s" % (ruta.rsplit("/", 1)[1], cat, r.get("id", ""), msg[:160]))
+                return _txt(okr, msg)
+            except Exception as ex:
+                return _txt(False, "no se pudo hablar con el router: %s" % ex)
         if ruta == "/mikrotik/test":
             if not self._admin():
                 return self._deny()

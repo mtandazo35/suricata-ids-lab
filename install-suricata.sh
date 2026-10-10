@@ -10799,16 +10799,31 @@ font-size:15px;font-weight:500;transition:background .15s,color .15s}
 .nav .out{margin-left:14px;color:#f3b0b0;text-decoration:none;font-weight:600;padding:9px 17px;border-radius:8px;font-size:15px;
 border:1px solid rgba(243,176,176,.35);transition:background .15s,color .15s,border-color .15s}
 .nav .out:hover{background:#e34948;color:#fff;border-color:#e34948}
-/* quien esta dentro: foto o iniciales + nombre y rol, a la derecha de Salir; lleva a Ajustes (perfil) */
-.nav .yo{flex:0 0 auto;display:flex;align-items:center;gap:9px;margin-left:12px;padding:4px 10px 4px 4px;border-radius:999px;
-color:#e8edf3;text-decoration:none;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);transition:background .15s}
-.nav .yo:hover{background:rgba(255,255,255,.12)}
-.nav .yo .av{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:none;
-color:#fff;font:700 13px system-ui;object-fit:cover;box-shadow:0 0 0 2px rgba(255,255,255,.18)}
-.nav .yo .yot{display:flex;flex-direction:column;line-height:1.15;max-width:170px}
-.nav .yo .yon{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.nav .yo .yor{font-size:11.5px;color:#9fb0c3;white-space:nowrap}
-@media(max-width:1440px){.nav .yo{padding:3px}.nav .yo .yot{display:none}}  /* sin sitio: solo la foto, que Salir no se salga */
+/* menu del usuario (sustituye al boton Salir): foto + nombre + flecha; abre Mi cuenta, Cambiar
+   contrasena, Cerrar sesion y el tiempo que le queda a la sesion */
+.nav .ubtn{flex:0 0 auto;display:flex;align-items:center;gap:8px;margin-left:14px;padding:4px 8px 4px 4px;border-radius:999px;
+cursor:pointer;color:#e8edf3;background:transparent;border:1px solid transparent;font:600 14px system-ui;transition:background .15s}
+.nav .ubtn:hover,.nav .ubtn[aria-expanded=true]{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.14)}
+.nav .ubtn .av,.umenu .av{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:none;
+color:#fff;font:700 13px system-ui;object-fit:cover}
+.nav .ubtn .av{box-shadow:0 0 0 2px rgba(255,255,255,.18)}
+.nav .ubtn .un{text-transform:uppercase;letter-spacing:.3px;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis}
+.nav .ubtn .uc{font-size:11px;opacity:.8}
+.umenu{position:fixed;z-index:60;min-width:230px;background:#fff;color:#33322f;border:1px solid #e2e1dd;border-radius:10px;
+box-shadow:0 10px 32px rgba(0,0,0,.22);padding:6px 0;font:14px system-ui,-apple-system,Segoe UI,sans-serif}
+.umenu[hidden]{display:none}
+.umenu .uhd{display:flex;align-items:center;gap:10px;padding:8px 14px 10px;border-bottom:1px solid #efeeea;margin-bottom:4px}
+.umenu .uhn{font-weight:700;color:#0b0b0b;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.umenu .uhr{font-size:12px;color:#6b6a66}
+.umenu a{display:flex;align-items:center;gap:10px;padding:9px 16px;color:#2a5fa0;text-decoration:none}
+.umenu a:hover,.umenu a:focus{background:#f2f6fc;outline:none}
+.umenu a svg{flex:none;color:#52514e}
+.umenu a.usal{color:#33322f;font-weight:700}
+.umenu a.usal:hover{background:#fdecec;color:#b52a2a}
+.umenu a.usal:hover svg{color:#b52a2a}
+.umenu .ufin{border-top:1px solid #efeeea;margin-top:4px;padding:8px 16px 4px;font-size:12px;color:#6b6a66}
+.umenu .ufin b{font-variant-numeric:tabular-nums;color:#33322f}
+@media(max-width:1440px){.nav .ubtn .un{display:none}}  /* sin sitio: solo la foto y la flecha */
 .nav .updbtn{display:inline-flex;align-items:center;gap:7px;margin-left:14px;cursor:pointer;background:#e67e22;color:#fff;
 border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0 2px 8px rgba(230,126,34,.4)}
 .nav .updbtn:hover{background:#d3691a}
@@ -10849,8 +10864,7 @@ border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0
        font-weight:600;white-space:nowrap}
 @media(prefers-color-scheme:dark){.wpend{background:#2e2712;border-color:#5c4d1c;color:#f0d78c}}
  .nav .out{margin-left:8px;padding:7px 12px;font-size:14px}
- .nav .yo{margin-left:8px;padding:3px}
- .nav .yo .yot{display:none}                /* en movil solo la foto: el nombre no cabe */
+ .nav .ubtn{margin-left:8px}
  .nav .updbtn{margin-left:8px;padding:7px 11px;font-size:13px}
  .updov,.updask,.askov{padding:14px}
  .empbar .empwrap{padding:6px 14px}
@@ -11013,9 +11027,10 @@ def nav(active=""):
             "document.getElementById('updaskok').addEventListener('click',function(){"
             "var m=document.getElementById('updask');var f=document.getElementById(m.dataset.f||'');if(f)f.submit();});"
             "document.addEventListener('keydown',function(e){if(e.key==='Escape')updaskHide();});</script>")
+    _ubtn, _upanel = _menu_usuario()
     navbar = ('<div class="nav"><div class="navwrap">' + brand + '<span class="push"></span>'
               + "".join(parts) + '<span class="push"></span>' + upd_btn
-              + '<a href="/logout" class="out">Salir</a>' + _ficha_yo() + '</div></div>' + upd_modal + updask
+              + _ubtn + '</div></div>' + _upanel + upd_modal + updask
               # el modal de confirmacion/aviso: sustituye a confirm() y alert() del navegador
               + _ASK)
     # marca de la empresa (logo + nombre) en una franja debajo, alineada a la derecha (bajo Salir)
@@ -11030,16 +11045,44 @@ def nav(active=""):
 
 _ROL_TXT = {"admin": "Administrador", "operador": "Operador", "lectura": "Solo lectura"}
 
-def _ficha_yo():
-    """Quien esta dentro, junto a Salir: foto (o iniciales), nombre y rol. Lleva a Ajustes.
+def _mu_ic(d):   # icono de 16px de las opciones del menu del usuario
+    return f'<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="{d}"/></svg>'
+_MU_CUENTA = _mu_ic("M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z")
+_MU_CLAVE = _mu_ic("M12.65 10A6 6 0 1 0 7 18a6 6 0 0 0 5.65-4H17v4h4v-4h2v-4H12.65zM7 14a2 2 0 1 1 0-4 2 2 0 0 1 0 4z")
+_MU_SALIR = _mu_ic("M13 3h-2v10h2V3zm4.83 2.17-1.42 1.42A6.92 6.92 0 0 1 19 12a7 7 0 1 1-11.42-5.42L6.17 5.17A8.93 8.93 0 0 0 3 12a9 9 0 0 0 18 0c0-2.74-1.23-5.18-3.17-6.83z")
+
+_MU_JS = ("<script>(function(){var m=document.getElementById('umenu'),b=document.getElementById('ubtn');if(!m||!b)return;"
+          "function cierra(){if(!m.hidden){m.hidden=true;b.setAttribute('aria-expanded','false');}}"
+          # position:fixed y calculado al abrir: la barra recorta lo que sobresale (overflow-x)
+          "b.addEventListener('click',function(e){e.stopPropagation();if(!m.hidden){cierra();return;}"
+          "var r=b.getBoundingClientRect();m.style.top=(r.bottom+6)+'px';"
+          "m.style.right=Math.max(8,document.documentElement.clientWidth-r.right)+'px';"
+          "m.hidden=false;b.setAttribute('aria-expanded','true');var a=m.querySelector('a');if(a)a.focus();});"
+          "document.addEventListener('click',function(e){if(!m.contains(e.target))cierra();});"
+          "document.addEventListener('keydown',function(e){if(e.key==='Escape')cierra();});"
+          "window.addEventListener('resize',cierra);"
+          "var o=document.getElementById('ureloj');if(!o)return;"
+          "var r0=+o.getAttribute('data-resta')||0,t0=Date.now();function p(n){return(n<10?'0':'')+n;}"
+          "(function tic(){var s=Math.max(0,r0-Math.floor((Date.now()-t0)/1000));"
+          "o.textContent=p(Math.floor(s/3600))+':'+p(Math.floor(s%3600/60))+':'+p(s%60);"
+          "if(s<=0){location.href='/login';return;}setTimeout(tic,1000);})();})();</script>")
+
+def _menu_usuario():
+    """(boton, panel) del menu del usuario, a la derecha de la barra; sustituye al boton Salir.
+
+    El boton es la foto (o las iniciales) + el nombre + una flecha; el panel trae Mi cuenta,
+    Cambiar contrasena, Cerrar sesion y cuanto le queda a la sesion (12 h fijas desde el
+    login: al llegar a cero se va al login, que es lo que pasaria en el siguiente clic).
 
     La foto NO va incrustada: puede pesar hasta 300 KB y la barra sale en cada pagina (que
     ademas se recarga sola cada 5 min). Va por /mi-foto, con ?v= de su huella para que el
-    navegador la guarde y la cambie solo cuando cambia. Sin sesion (panel sin usuarios, o
-    la barra que se arma al cargar el modulo) no sale nada."""
+    navegador la guarde y la cambie solo cuando cambia.
+
+    Sin sesion (panel sin usuarios, o la barra que se arma al cargar el modulo) queda el
+    Salir de siempre."""
     yo = getattr(CTX, "user", None)
     if not yo:
-        return ""
+        return '<a href="/logout" class="out">Salir</a>', ""
     try:
         r = buscar_usuario(yo) or {}
     except Exception:
@@ -11054,9 +11097,19 @@ def _ficha_yo():
         av = _avatar(nombre, yo)
     disp = html.escape(nombre or yo)
     tit = html.escape((nombre + " (" + yo + ")") if nombre else yo)
-    return (f'<a href="/ajustes" class="yo" title="{tit} - mi perfil">{av}'
-            f'<span class="yot"><span class="yon">{disp}</span>'
-            + (f'<span class="yor">{rol}</span>' if rol else "") + '</span></a>')
+    resta = int((getattr(CTX, "exp", 0) or 0) - time.time())
+    boton = (f'<button type="button" class="ubtn" id="ubtn" aria-haspopup="menu" aria-expanded="false" '
+             f'aria-controls="umenu" title="{tit}">{av}<span class="un">{disp}</span>'
+             '<span class="uc">&#9662;</span></button>')
+    panel = (f'<div class="umenu" id="umenu" role="menu" hidden>'
+             f'<div class="uhd">{av}<div><div class="uhn">{disp}</div>'
+             + (f'<div class="uhr">{rol}</div>' if rol else "") + '</div></div>'
+             f'<a role="menuitem" href="/ajustes#cuenta">{_MU_CUENTA}Mi cuenta</a>'
+             f'<a role="menuitem" href="/ajustes#clave">{_MU_CLAVE}Cambiar contrase&ntilde;a</a>'
+             f'<a role="menuitem" class="usal" href="/logout">{_MU_SALIR}Cerrar sesi&oacute;n</a>'
+             + (f'<div class="ufin">Desconectar en <b id="ureloj" data-resta="{resta}"></b></div>' if resta > 0 else "")
+             + '</div>' + _MU_JS)
+    return boton, panel
 
 def foto_de(user):
     """(tipo, bytes) de la foto de perfil guardada como data:image/...;base64, o None."""
@@ -12107,6 +12160,20 @@ def perfil_page(msg="", ok=False, edit_user=None):
              "function closem(){var a=document.querySelectorAll('.aptmodal');for(var i=0;i<a.length;i++)a[i].style.display='none';"
              "document.body.style.overflow='';try{sessionStorage.removeItem('apt');}catch(e){}}"
              "document.addEventListener('keydown',function(e){if(e.key==='Escape')closem();});"
+             # desde el menu del usuario: #cuenta / #clave. Lectura y operador tienen la tarjeta
+             # Perfil; el admin no (cambia lo suyo desde SU fila de Usuarios), asi que a el se le
+             # abre su fila. Despues se quita el # para que recargar no lo vuelva a abrir.
+             "var _YO=" + json.dumps(yo or "").replace("<", "\\u003c") + ";"
+             "function _cuenta(h){if(h!=='cuenta'&&h!=='clave')return;"
+             "if(document.getElementById('m-perfil')){openm('perfil');"
+             "if(h==='clave'){var i=document.querySelector('#m-perfil input[name=actual]');if(i)i.focus();}}"
+             "else if(document.getElementById('m-usuarios')){openm('usuarios');"
+             "var bs=document.querySelectorAll('#ubody button[data-user]');"
+             "for(var k=0;k<bs.length;k++){if(bs[k].getAttribute('data-user')===_YO){abrirEdit(bs[k]);"
+             "if(h==='clave'){var q=document.querySelector('#ovlEdit input[name=npass]');if(q)q.focus();}break;}}}"
+             "try{history.replaceState(null,'',location.pathname+location.search);}catch(e){}}"
+             "_cuenta(location.hash.slice(1));"
+             "window.addEventListener('hashchange',function(){_cuenta(location.hash.slice(1));});"
              "(function(){var n=document.getElementById('notif');if(!n)return;"
              "var la=null;try{la=sessionStorage.getItem('apt');}catch(e){}if(la)openm(la);"
              "setTimeout(function(){n.classList.add('show');},60);"
@@ -12451,10 +12518,10 @@ tu monitoreo SNMP, un falso positivo puntual). Permite exclusiones <b>temporales
 (conexion y politicas de cuarentena), <b>Reputacion/feeds</b> (Auth-Key de abuse.ch), <b>Bitacora</b>,
 <b>Documentacion</b> y <b>Actualizaciones</b> del panel.</td></tr>
 <tr><td><b>Documentacion</b></td><td>Esta pagina.</td></tr>
-<tr><td><b>Salir</b></td><td>Cierra la sesion.</td></tr>
-<tr><td><b>Tu usuario</b> (a la derecha de Salir)</td><td>Tu foto (o tus iniciales), tu nombre y tu rol: asi se ve
-siempre con que cuenta estas dentro. Un clic lleva a <b>Ajustes</b>, donde cambias la foto, el nombre o la clave.
-Si la pantalla es estrecha (o en el movil) sale solo la foto; el nombre aparece al pasar el raton.</td></tr>
+<tr><td><b>Tu usuario</b> (arriba a la derecha)</td><td>Tu foto (o tus iniciales) y tu nombre; al tocarlo se
+abre un menu con tu rol y: <b>Mi cuenta</b> (nombre, correo, foto), <b>Cambiar contrase&ntilde;a</b>,
+<b>Cerrar sesi&oacute;n</b> y <b>Desconectar en</b>, el tiempo que le queda a tu sesion (dura 12 horas desde
+que entras; al llegar a cero vuelve a pedir la clave). Si la pantalla es estrecha sale solo la foto.</td></tr>
 </table>
 
 <h2>Cada cuanto se actualiza</h2>
@@ -17009,6 +17076,7 @@ class H(BaseHTTPRequestHandler):
     def _set_ctx(self):
         s = self._sesion()
         CTX.user = s.get("user"); CTX.role = s.get("role"); CTX.ip = self._client_ip()
+        CTX.exp = s.get("exp")   # el menu del usuario dice cuanto le queda a la sesion
     def _auth_ok(self):
         if not cargar_usuarios():
             return True  # sin usuarios (PASS vacia en .conf): sin auth, solo tras VPN/proxy

@@ -121,7 +121,7 @@ correr "seleccionar texto dentro de un modal no lo cierra" "$PY" tests/test_over
 correr "acciones por categoria en el router: plantillas, reglas propias, respaldo, idempotente" "$PY" tests/test_acciones_router.py
 correr "acciones por categoria: tarjeta de Ajustes y rutas plan/aplicar/quitar" "$PY" tests/test_acciones_ui.py
 correr "verificador de reglas: errores que bloquean, avisos que no, y releer tras aplicar" "$PY" tests/test_verificador_reglas.py
-correr "barra: ficha del usuario junto a Salir y su foto por /mi-foto" "$PY" tests/test_nav_usuario.py
+correr "barra: menu del usuario (Mi cuenta, clave, cerrar sesion, reloj) y su foto por /mi-foto" "$PY" tests/test_nav_usuario.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

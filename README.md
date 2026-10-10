@@ -101,10 +101,22 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/in
 | `-m` | la IP del MikroTik **dentro del tunel** (en el ejemplo, `100.64.0.2`). Solo se acepta espejo de esa IP |
 | `-n` | las **redes de tus abonados** que el router espeja (las que el panel puede mandar a cuarentena) |
 
-**Antes de lanzarlo** la VPN tiene que estar arriba: el sensor como servidor (p.ej.
-OpenVPN, `tun0` = `100.64.0.1`) y el MikroTik conectado como cliente (`100.64.0.2`). El
-instalador **no monta la VPN**: la usa. Para OpenVPN con MikroTik, nada de `tls-crypt`
-ni `tls-auth` (RouterOS no los soporta).
+**Antes de lanzarlo** la VPN tiene que estar arriba: el sensor como servidor (OpenVPN,
+`tun0` = `100.64.0.1`) y el MikroTik conectado como cliente (`100.64.0.2`). El instalador
+deja para eso **`/root/openvpn.sh`** (instalador y administrador de OpenVPN compatible con
+RouterOS v6/v7: TCP, AES-256-CBC, SHA1, sin `tls-crypt`):
+
+```bash
+sudo bash /root/openvpn.sh
+#  1) Instalar y configurar OpenVPN Server   -> crea tambien el primer usuario
+#  2) Agregar usuario VPN (uno por cada MikroTik)
+#  3) Agregar redes IP de clientes
+```
+
+Orden en una caja nueva: one-liner (deja `/root/openvpn.sh`) -> opcion 1 -> pegar en el
+MikroTik el `/interface ovpn-client` que imprime -> opcion 3 con las redes de los abonados
+-> re-ejecutar el one-liner con `-t -m <IP del MikroTik en el tunel>`. Si el tunel aun no
+esta arriba, el resumen del instalador lo dice.
 
 El modo VPN es el **por defecto** con `-t` (no hace falta `-e vpn`): recorta cada flujo a
 10.000 bytes en el receptor para no saturar el tunel, y las reglas que imprime para el

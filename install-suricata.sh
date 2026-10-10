@@ -20496,6 +20496,559 @@ if [ "$TZSP" -eq 1 ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null
   fi
 fi
 
+# ------------------------------------------- instalador de OpenVPN para el tunel del MikroTik
+# El espejo llega por VPN y el sensor es el servidor: se deja en /root el instalador y
+# administrador de OpenVPN (menu: 1 instala el servidor y crea el primer usuario, 2 un
+# usuario por cada MikroTik con su comando /interface ovpn-client para v6 y v7, 3 las
+# redes de los clientes). Compatible con RouterOS: TCP, AES-256-CBC, SHA1, sin tls-crypt.
+# Tal cual, sin tocar (huella abajo). Si en /root ya hay uno DISTINTO, se respalda antes.
+OVPN_SH=/root/openvpn.sh
+OVPN_SHA="70028a17d8ccacbb47fd2d96344ffaf1d9222cf8c7b9a1d0f1c7d3c03c0163ae"
+_ovpn_tmp="$(mktemp /root/.openvpn.sh.XXXXXX)"
+cat > "$_ovpn_tmp" <<'OVPNSH'
+#!/usr/bin/env bash
+# Instalador y administrador OpenVPN para túneles MikroTik/ISP
+# Compatible con RouterOS v6 y v7. La interfaz del MikroTik se llama open-vpn.
+# Versión auditada: valida entradas, evita duplicados, mejora permisos y endurece configuración básica.
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
+
+###################### CONFIGURACIÓN ######################
+IP_VPN="100.64.0.0"
+MASCARA_VPN="255.255.255.0"
+PROTOCOL="tcp"
+PORT="1194"
+VPN_NAME="open-vpn"
+MIKROTIK_INTERFACE_NAME="open-vpn"
+# Modo compatibilidad RouterOS v6/v7. SHA1 es menos fuerte que SHA256,
+# pero evita incompatibilidades con muchos equipos RouterOS v6 antiguos.
+# Si todos sus MikroTik son RouterOS v7 modernos, puede cambiar a SHA256.
+OPENVPN_AUTH_DIGEST="SHA1"
+MIKROTIK_AUTH_DIGEST="sha1"
+CCD_DIR="/etc/openvpn/${VPN_NAME}"
+SERVER_DIR="/etc/openvpn/server"
+TMP_DIR="/etc/openvpn/tmp"
+ROUTES_FILE="${CCD_DIR}/rutas.sh"
+EASYRSA_VERSION="3.1.2"
+###########################################################
+
+trap 'echo "ERROR: Falló el script en la línea $LINENO. Revise el mensaje anterior." >&2' ERR
+
+log() { echo -e "\033[1;32m[OK]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[AVISO]\033[0m $*"; }
+die() { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
+
+need_root() {
+  [[ "${EUID}" -eq 0 ]] || die "Este script debe ejecutarse como root. Use: sudo bash $0"
+}
+
+valid_ipv4() {
+  local ip="${1:-}" o
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r -a o <<< "$ip"
+  for n in "${o[@]}"; do
+    [[ "$n" =~ ^[0-9]+$ && "$n" -ge 0 && "$n" -le 255 ]] || return 1
+  done
+}
+
+valid_cidr() {
+  local cidr="${1:-}" ip mask
+  [[ "$cidr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || return 1
+  ip="${cidr%/*}"
+  mask="${cidr#*/}"
+  valid_ipv4 "$ip" || return 1
+  [[ "$mask" -ge 1 && "$mask" -le 32 ]] || return 1
+}
+
+valid_vpn_user() {
+  [[ "${1:-}" =~ ^[a-z0-9][a-z0-9_-]{2,31}$ ]]
+}
+
+cidr_to_mask() {
+  local cidr="$1" value
+  [[ "$cidr" -ge 0 && "$cidr" -le 32 ]] || return 1
+  if [[ "$cidr" -eq 0 ]]; then
+    echo "0.0.0.0"
+    return 0
+  fi
+  value=$(( 0xffffffff ^ ((1 << (32 - cidr)) - 1) ))
+  echo "$(( (value >> 24) & 255 )).$(( (value >> 16) & 255 )).$(( (value >> 8) & 255 )).$(( value & 255 ))"
+}
+
+base_vpn_prefix() {
+  echo "${IP_VPN%.*}"
+}
+
+random_hex() {
+  openssl rand -hex "$1"
+}
+
+nologin_shell() {
+  if [[ -x /usr/sbin/nologin ]]; then
+    echo "/usr/sbin/nologin"
+  elif [[ -x /sbin/nologin ]]; then
+    echo "/sbin/nologin"
+  else
+    echo "/bin/false"
+  fi
+}
+
+create_system_vpn_user() {
+  local user="$1" shell
+  shell="$(nologin_shell)"
+
+  if id "$user" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v useradd >/dev/null 2>&1; then
+    useradd -M -s "$shell" -c "OpenVPN user" "$user"
+  else
+    adduser "$user" --gecos "$user,RoomNumber,WorkPhone,HomePhone" --disabled-password --force-badname --no-create-home
+    chsh -s "$shell" "$user" 2>/dev/null || true
+  fi
+}
+
+setup_pam_service() {
+  detect_os
+  if [[ "$OS_ID" =~ ^(debian|ubuntu)$ ]]; then
+    cat > /etc/pam.d/openvpn <<'EOF_PAM_DEBIAN'
+auth    include common-auth
+account include common-account
+EOF_PAM_DEBIAN
+  else
+    cat > /etc/pam.d/openvpn <<'EOF_PAM_RHEL'
+auth    include system-auth
+account include system-auth
+EOF_PAM_RHEL
+  fi
+  chmod 0644 /etc/pam.d/openvpn
+}
+
+public_ip() {
+  local ip=""
+  ip="$(curl -4fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
+  if ! valid_ipv4 "$ip"; then
+    ip="$(curl -4fsS --max-time 8 https://ifconfig.me/ip 2>/dev/null || true)"
+  fi
+  if ! valid_ipv4 "$ip"; then
+    ip="$(wget -T 8 -t 1 -4qO- https://api.ipify.org 2>/dev/null || true)"
+  fi
+  valid_ipv4 "$ip" && echo "$ip" || echo ""
+}
+
+detect_os() {
+  # shellcheck disable=SC1091
+  source /etc/os-release 2>/dev/null || die "No se pudo leer /etc/os-release"
+  OS_ID="${ID:-}"
+  OS_VERSION_ID="${VERSION_ID:-0}"
+  OS_CODENAME="${VERSION_CODENAME:-}"
+
+  case "$OS_ID" in
+    ubuntu) GROUP_NAME="nogroup" ;;
+    debian) GROUP_NAME="nogroup" ;;
+    centos|rhel|rocky|almalinux|fedora) GROUP_NAME="nobody" ;;
+    *) die "Distribución no soportada: ${OS_ID}. Use Debian, Ubuntu, CentOS/RHEL/Rocky/AlmaLinux o Fedora." ;;
+  esac
+}
+
+pkg_install() {
+  detect_os
+  if [[ "$OS_ID" =~ ^(debian|ubuntu)$ ]]; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y openvpn openssl ca-certificates curl wget tar dialog iproute2 perl
+  elif [[ "$OS_ID" =~ ^(centos|rhel|rocky|almalinux)$ ]]; then
+    yum install -y epel-release || true
+    yum install -y openvpn openssl ca-certificates curl wget tar dialog iproute
+  else
+    dnf install -y openvpn openssl ca-certificates curl wget tar dialog iproute
+  fi
+}
+
+ensure_dialog() {
+  if ! command -v dialog >/dev/null 2>&1; then
+    pkg_install
+  fi
+}
+
+find_auth_pam_plugin() {
+  local candidates=(
+    "/usr/lib/x86_64-linux-gnu/openvpn/plugins/openvpn-plugin-auth-pam.so"
+    "/usr/lib/openvpn/plugins/openvpn-plugin-auth-pam.so"
+    "/usr/lib/openvpn/openvpn-plugin-auth-pam.so"
+    "/usr/lib64/openvpn/plugins/openvpn-plugin-auth-pam.so"
+    "/usr/share/openvpn/plugin/lib/openvpn-auth-pam.so"
+  )
+
+  for p in "${candidates[@]}"; do
+    [[ -s "$p" ]] && { echo "$p"; return 0; }
+  done
+
+  local found
+  found="$(find /usr -type f \( -name 'openvpn-plugin-auth-pam.so' -o -name 'openvpn-auth-pam.so' \) -size +0c 2>/dev/null | head -n 1 || true)"
+  [[ -n "$found" ]] && echo "$found" || return 1
+}
+
+ensure_plugins() {
+  local plugin
+  plugin="$(find_auth_pam_plugin || true)"
+  if [[ -z "$plugin" ]]; then
+    warn "No encontré el plugin PAM de OpenVPN. Reinstalando OpenVPN..."
+    pkg_install
+    plugin="$(find_auth_pam_plugin || true)"
+  fi
+  [[ -n "$plugin" ]] || die "No se encontró openvpn-plugin-auth-pam.so. Instale/reinstale el paquete openvpn."
+  echo "$plugin"
+}
+
+check_requirements() {
+  [[ -x "$(command -v bash)" ]] || die "Bash no está disponible."
+  [[ -x "$(command -v ip)" ]] || die "Falta el comando ip. Instale iproute2/iproute."
+  [[ -x "$(command -v openssl)" ]] || die "Falta openssl."
+  [[ -e /dev/net/tun ]] || die "TUN no está disponible. Habilite /dev/net/tun en el VPS/contenedor."
+  (exec 7<>/dev/net/tun) 2>/dev/null || die "TUN existe pero no se puede abrir. Revise permisos del VPS/contenedor."
+}
+
+prepare_dirs() {
+  install -d -m 0755 "$SERVER_DIR"
+  install -d -m 0755 "$CCD_DIR"
+  install -d -m 0700 "$TMP_DIR"
+  if [[ ! -f "$ROUTES_FILE" ]]; then
+    cat > "$ROUTES_FILE" <<'EOS'
+#!/usr/bin/env sh
+set -e
+# Rutas estáticas creadas por el administrador OpenVPN.
+EOS
+  fi
+  chmod 0755 "$ROUTES_FILE"
+}
+
+next_vpn_ip() {
+  local prefix used host file ip
+  prefix="$(base_vpn_prefix)"
+
+  declare -A used=()
+  shopt -s nullglob
+  for file in "$CCD_DIR"/*; do
+    [[ "$(basename "$file")" == "rutas.sh" ]] && continue
+    ip="$(awk '$1 == "ifconfig-push" {print $2; exit}' "$file" 2>/dev/null || true)"
+    [[ -n "$ip" ]] && used["$ip"]=1
+  done
+  shopt -u nullglob
+
+  # En topología subnet normalmente .1 queda reservado para el servidor.
+  for host in $(seq 2 254); do
+    ip="${prefix}.${host}"
+    if [[ -z "${used[$ip]:-}" ]]; then
+      echo "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
+create_vpn_user() {
+  prepare_dirs
+
+  local ipvpn uservpn passvpn pubip
+  ipvpn="$(next_vpn_ip)" || die "No hay IPs libres en ${IP_VPN}/${MASCARA_VPN}."
+  uservpn="vpn$(random_hex 6)"
+  passvpn="$(random_hex 16)"
+
+  if id "$uservpn" >/dev/null 2>&1; then
+    die "El usuario generado ya existe. Ejecute nuevamente."
+  fi
+
+  create_system_vpn_user "$uservpn"
+  echo "${uservpn}:${passvpn}" | chpasswd
+
+  cat > "${CCD_DIR}/${uservpn}" <<EOF_USER
+ifconfig-push ${ipvpn} ${MASCARA_VPN}
+EOF_USER
+  chmod 0600 "${CCD_DIR}/${uservpn}"
+
+  pubip="$(public_ip)"
+  [[ -n "$pubip" ]] || pubip="CAMBIE_POR_IP_PUBLICA_DEL_CLOUD"
+
+  clear || true
+  echo "###########################################################"
+  echo -e "                \033[0;31mDATOS USER VPN\033[0m (Guardar datos)             "
+  echo "###########################################################"
+  echo ""
+  echo -e "\033[0;31mIP VPN USER : \e[38;5;198m${ipvpn}\033[0m"
+  echo -e "\033[0;31m     USUARIO: \e[38;5;198m${uservpn}\033[0m"
+  echo -e "\033[0;31m  CONTRASEÑA: \e[38;5;198m${passvpn}\033[0m"
+  echo ""
+  echo "###########################################################"
+  echo -e "  \033[0;31mCONFIGURACIÓN MIKROTIK ROUTEROS v7\033[0m"
+  echo "###########################################################"
+  echo "Copiar y pegar si el MikroTik usa RouterOS v7:"
+  echo ""
+  cat <<EOF_MT_V7
+/interface ovpn-client
+add connect-to=${pubip} cipher=aes256-cbc auth=${MIKROTIK_AUTH_DIGEST} disabled=no name=${MIKROTIK_INTERFACE_NAME} password=${passvpn} user=${uservpn} port=${PORT} protocol=${PROTOCOL} mode=ip add-default-route=no use-peer-dns=no
+EOF_MT_V7
+  echo ""
+  echo "###########################################################"
+  echo -e "  \033[0;31mCONFIGURACIÓN MIKROTIK ROUTEROS v6\033[0m"
+  echo "###########################################################"
+  echo "Copiar y pegar si el MikroTik usa RouterOS v6:"
+  echo ""
+  cat <<EOF_MT_V6
+/interface ovpn-client
+add connect-to=${pubip} cipher=aes256 auth=${MIKROTIK_AUTH_DIGEST} disabled=no name=${MIKROTIK_INTERFACE_NAME} password=${passvpn} user=${uservpn} port=${PORT} mode=ip add-default-route=no
+EOF_MT_V6
+  echo ""
+  exit 0
+}
+
+add_client_routes() {
+  [[ -x "$(command -v openvpn)" ]] || die "OpenVPN no está instalado. Ejecute primero la opción 1."
+  [[ -d "$CCD_DIR" ]] || die "No existe ${CCD_DIR}. Ejecute primero la opción 1."
+
+  local values rc
+  exec 3>&1
+  set +e
+  trap '' ERR
+  values=$(dialog --separate-widget $'\n' --ok-label "Agregar rangos" \
+    --backtitle "OpenVPN Cloud" \
+    --title "Agregar rangos clientes" \
+    --cancel-label "Salir" \
+    --form "Agregar nuevo rango cliente. Ejemplo: 192.168.1.0/24" \
+    20 60 0 \
+    "USUARIO VPN:" 1 1 "" 1 18 32 0 \
+    "Red 1:"  3 1 "" 3 18 32 0 \
+    "Red 2:"  4 1 "" 4 18 32 0 \
+    "Red 3:"  5 1 "" 5 18 32 0 \
+    "Red 4:"  6 1 "" 6 18 32 0 \
+    "Red 5:"  7 1 "" 7 18 32 0 \
+    "Red 6:"  8 1 "" 8 18 32 0 \
+    "Red 7:"  9 1 "" 9 18 32 0 \
+    "Red 8:" 10 1 "" 10 18 32 0 \
+    "Red 9:" 11 1 "" 11 18 32 0 \
+    "Red 10:" 12 1 "" 12 18 32 0 \
+    2>&1 1>&3)
+  rc=$?
+  trap 'echo "ERROR: Fallo el script en la linea $LINENO. Revise el mensaje anterior." >&2' ERR
+  set -e
+  exec 3>&-
+  if [[ $rc -ne 0 ]]; then return 0; fi
+
+  mapfile -t RANG <<< "$values"
+  local vpn_user="${RANG[0]:-}"
+  valid_vpn_user "$vpn_user" || die "Usuario VPN inválido. Use solo letras minúsculas, números, guion o guion bajo."
+  [[ -f "${CCD_DIR}/${vpn_user}" ]] || die "El usuario VPN no existe: ${vpn_user}"
+
+  local gateway cidr red mask added=0 route_line
+  gateway="$(awk '$1 == "ifconfig-push" {print $2; exit}' "${CCD_DIR}/${vpn_user}")"
+  valid_ipv4 "$gateway" || die "No pude obtener gateway/IP VPN del usuario ${vpn_user}."
+
+  for ((i=1; i<${#RANG[@]}; i++)); do
+    cidr="${RANG[$i]//[[:space:]]/}"
+    [[ -z "$cidr" ]] && continue
+    valid_cidr "$cidr" || { warn "Rango inválido omitido: ${cidr}"; continue; }
+
+    if grep -Fq " ${cidr} " "$ROUTES_FILE" 2>/dev/null; then
+      warn "El rango ${cidr} ya existe y no fue agregado."
+      continue
+    fi
+
+    red="${cidr%/*}"
+    mask="$(cidr_to_mask "${cidr#*/}")"
+    route_line="/sbin/ip route replace ${cidr} via ${gateway} # ${vpn_user} ${cidr}"
+    echo "$route_line" >> "$ROUTES_FILE"
+    echo "iroute ${red} ${mask}" >> "${CCD_DIR}/${vpn_user}"
+    added=1
+    log "Agregado ${cidr} para ${vpn_user} vía ${gateway}."
+  done
+
+  chmod 0755 "$ROUTES_FILE"
+  chmod 0600 "${CCD_DIR}/${vpn_user}"
+
+  if [[ "$added" -eq 1 ]]; then
+    systemctl restart openvpn-server@server
+    dialog --title "ÉXITO" --msgbox "Los rangos fueron agregados correctamente." 10 50 || true
+  else
+    dialog --title "SIN CAMBIOS" --msgbox "No se agregó ningún rango nuevo." 10 50 || true
+  fi
+}
+
+install_openvpn_server() {
+  need_root
+  detect_os
+  pkg_install
+  check_requirements
+  prepare_dirs
+
+  local auth_plugin ip number_of_ip ip_number easy_tgz server_cn server_name
+  auth_plugin="$(ensure_plugins)"
+  setup_pam_service
+
+  if [[ "$(ip -4 addr show scope global | awk '/inet / {print $2}' | wc -l)" -eq 1 ]]; then
+    ip="$(ip -4 addr show scope global | awk '/inet / {print $2}' | cut -d/ -f1)"
+  else
+    number_of_ip="$(ip -4 addr show scope global | awk '/inet / {print $2}' | wc -l)"
+    echo "Seleccionar IPv4 del servidor Cloud (pública o privada):"
+    ip -4 addr show scope global | awk '/inet / {print $2}' | cut -d/ -f1 | nl -s ') '
+    read -r -p "IPv4 address [1]: " ip_number
+    until [[ -z "$ip_number" || ( "$ip_number" =~ ^[0-9]+$ && "$ip_number" -ge 1 && "$ip_number" -le "$number_of_ip" ) ]]; do
+      echo "Selección inválida: $ip_number"
+      read -r -p "IPv4 address [1]: " ip_number
+    done
+    [[ -z "$ip_number" ]] && ip_number="1"
+    ip="$(ip -4 addr show scope global | awk '/inet / {print $2}' | cut -d/ -f1 | sed -n "${ip_number}p")"
+  fi
+  valid_ipv4 "$ip" || die "IP local inválida: ${ip}"
+
+  if systemd-detect-virt -cq 2>/dev/null; then
+    install -d -m 0755 /etc/systemd/system/openvpn-server@server.service.d/
+    cat > /etc/systemd/system/openvpn-server@server.service.d/disable-limitnproc.conf <<'EOF_SYSTEMD'
+[Service]
+LimitNPROC=infinity
+EOF_SYSTEMD
+  fi
+
+  easy_tgz="/tmp/easy-rsa-${EASYRSA_VERSION}.tgz"
+  curl -fL --retry 3 -o "$easy_tgz" "https://github.com/OpenVPN/easy-rsa/releases/download/v${EASYRSA_VERSION}/EasyRSA-${EASYRSA_VERSION}.tgz" \
+    || wget -O "$easy_tgz" "https://github.com/OpenVPN/easy-rsa/releases/download/v${EASYRSA_VERSION}/EasyRSA-${EASYRSA_VERSION}.tgz"
+
+  rm -rf /etc/openvpn/easy-rsa
+  install -d -m 0700 /etc/openvpn/easy-rsa
+  tar xzf "$easy_tgz" --strip-components=1 --no-same-owner --directory /etc/openvpn/easy-rsa
+  rm -f "$easy_tgz"
+
+  cd /etc/openvpn/easy-rsa
+  echo "set_var EASYRSA_KEY_SIZE 2048" > vars
+
+  server_cn="cn_$(random_hex 8)"
+  server_name="server"
+  echo "$server_cn" > SERVER_CN_GENERATED
+  echo "$server_name" > SERVER_NAME_GENERATED
+
+  ./easyrsa init-pki
+  EASYRSA_CA_EXPIRE=3650 ./easyrsa --batch --req-cn="$server_cn" build-ca nopass
+  EASYRSA_CERT_EXPIRE=3650 ./easyrsa --batch build-server-full "$server_name" nopass
+  EASYRSA_CRL_DAYS=3650 ./easyrsa gen-crl
+  openssl dhparam -out dh.pem 2048
+
+  install -m 0644 pki/ca.crt "$SERVER_DIR/ca.crt"
+  install -m 0600 pki/private/ca.key "$SERVER_DIR/ca.key"
+  install -m 0644 "pki/issued/${server_name}.crt" "$SERVER_DIR/server.crt"
+  install -m 0600 "pki/private/${server_name}.key" "$SERVER_DIR/server.key"
+  install -m 0644 pki/crl.pem "$SERVER_DIR/crl.pem"
+  install -m 0644 dh.pem "$SERVER_DIR/dh.pem"
+  chmod o+x "$SERVER_DIR"
+
+  openvpn --genkey secret "$SERVER_DIR/tc.key" 2>/dev/null || openvpn --genkey --secret "$SERVER_DIR/tc.key"
+  chmod 0600 "$SERVER_DIR/tc.key"
+
+  cat > "$SERVER_DIR/server.conf" <<EOF_CONF
+local ${ip}
+port ${PORT}
+proto ${PROTOCOL}
+dev tun
+ca ca.crt
+cert server.crt
+key server.key
+dh dh.pem
+auth ${OPENVPN_AUTH_DIGEST}
+verify-client-cert none
+username-as-common-name
+tmp-dir ${TMP_DIR}
+plugin ${auth_plugin} openvpn
+script-security 2
+up ${ROUTES_FILE}
+explicit-exit-notify 0
+client-config-dir ${CCD_DIR}
+topology subnet
+server ${IP_VPN} ${MASCARA_VPN}
+keepalive 10 120
+tls-version-min 1.2
+data-ciphers AES-256-CBC
+data-ciphers-fallback AES-256-CBC
+cipher AES-256-CBC
+persist-key
+persist-tun
+status openvpn-status.log
+verb 3
+crl-verify crl.pem
+EOF_CONF
+  chmod 0600 "$SERVER_DIR/server.conf"
+
+  echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/30-openvpn-forward.conf
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+  if command -v sestatus >/dev/null 2>&1 && sestatus 2>/dev/null | grep -q "Current mode:.*enforcing" && [[ "$PORT" != "1194" ]]; then
+    if ! command -v semanage >/dev/null 2>&1; then
+      if [[ "$OS_ID" =~ ^(centos|rhel|rocky|almalinux)$ ]]; then
+        yum install -y policycoreutils-python-utils || yum install -y policycoreutils-python
+      else
+        dnf install -y policycoreutils-python-utils
+      fi
+    fi
+    semanage port -a -t openvpn_port_t -p "$PROTOCOL" "$PORT" 2>/dev/null || semanage port -m -t openvpn_port_t -p "$PROTOCOL" "$PORT"
+  fi
+
+  systemctl daemon-reload
+  systemctl enable --now openvpn-server@server.service
+  systemctl restart openvpn-server@server.service
+
+  log "OpenVPN instalado y configurado en modo compatibilidad RouterOS v6/v7."
+  create_vpn_user
+}
+
+main_menu() {
+  need_root
+  ensure_dialog
+
+  local choice rc
+  while true; do
+    set +e
+    choice=$(dialog --clear \
+      --backtitle "OpenVPN Cloud" \
+      --title "Configurar Túnel VPN" \
+      --cancel-label "Salir" \
+      --ok-label "Aceptar" \
+      --menu "Seleccione una opción" \
+      15 70 4 \
+      1 "Instalar y configurar OpenVPN Server" \
+      2 "Agregar usuario VPN (uno por cada MikroTik)" \
+      3 "Agregar redes IP de clientes" \
+      2>&1 >/dev/tty)
+    rc=$?
+    set -e
+    clear || true
+    [[ "$rc" -eq 0 ]] || exit 0
+
+    case "$choice" in
+      1) install_openvpn_server ;;
+      2)
+        [[ -x "$(command -v openvpn)" ]] || die "No está instalado OpenVPN. Ejecute la opción 1."
+        create_vpn_user
+        ;;
+      3) add_client_routes ;;
+      *) exit 0 ;;
+    esac
+  done
+}
+
+main_menu
+OVPNSH
+if [ "$(sha256sum "$_ovpn_tmp" | awk '{print $1}')" != "$OVPN_SHA" ]; then
+  rm -f "$_ovpn_tmp"
+  warn "El instalador de OpenVPN no coincide con su huella: no se deja en ${OVPN_SH}."
+else
+  if [ -f "$OVPN_SH" ] && ! cmp -s "$_ovpn_tmp" "$OVPN_SH"; then
+    cp -p "$OVPN_SH" "${OVPN_SH}.bak-${STAMP}"
+    warn "Habia un ${OVPN_SH} distinto: respaldado en ${OVPN_SH}.bak-${STAMP}."
+  fi
+  install -m 0750 "$_ovpn_tmp" "$OVPN_SH"
+  rm -f "$_ovpn_tmp"
+  ok "Instalador de OpenVPN para el tunel del MikroTik: ${OVPN_SH}"
+fi
+
 # ------------------------------------------- estoy leyendo trafico? (un solo comando)
 cat > /usr/local/bin/suricata-espejo <<'ESPEJO'
 #!/usr/bin/env python3
@@ -21164,8 +21717,15 @@ cat <<EOF
 EOF
 fi
 FW_TXT=""
-if [ "$TZSP" -eq 1 ] && [ "$ESPEJO_DONDE" = "vpn" ]; then
+if [ "$TZSP" -eq 1 ] && [ "$ESPEJO_DONDE" = "vpn" ] && [ -z "$ESPEJO_IP" ]; then
   FW_TXT="
+    ${c_r}Falta la VPN${c_0} : el MikroTik (${_m1:-?}) aun no llega por un tunel. Montala con
+                 bash /root/openvpn.sh   -> 1) instala el servidor y crea el usuario del
+                 MikroTik (pega en el router el /interface ovpn-client que imprime);
+                 3) agrega las redes de tus abonados. Despues re-ejecuta este instalador."
+fi
+if [ "$TZSP" -eq 1 ] && [ "$ESPEJO_DONDE" = "vpn" ]; then
+  FW_TXT="${FW_TXT}
     Solo VPN   : desde internet (${_rwan:-la WAN}) no entran ni el espejo ni el panel/EveBox;
                  se entra por la VPN: http://${ESPEJO_IP_TXT}:${DASH_PORT:-5637}
                  (-a <red> abre la web a esa red; -e local quita este firewall)"

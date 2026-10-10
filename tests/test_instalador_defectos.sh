@@ -35,8 +35,13 @@ trap 'rm -rf "$TMPD"' EXIT
 
 # --- el trozo REAL que crea la configuracion, con la ruta redirigida al temporal ---
 CONF_DEST="$TMPD/dash.conf"
-TROZO="$(awk '/^if \[ ! -f \/etc\/suricata-dashboard.conf \]; then$/,/^fi$/' install-suricata.sh \
-         | sed "s#/etc/suricata-dashboard.conf#$CONF_DEST#g")"
+# desde "claves de acceso": la clave comun (panel + EveBox) se genera justo antes del
+# bloque. Todas las rutas /etc/suricata-dashboard* van al temporal (tambien la marca de
+# "pendiente de entregar"): la prueba no puede escribir en el /etc de la maquina.
+TROZO="$(awk '/^# --- claves de acceso ---/{f=1} f{print} f&&/^fi$/{exit}' install-suricata.sh \
+         | sed -e "s#/etc/suricata-dashboard.conf#$CONF_DEST#g" \
+               -e "s#/etc/suricata-dashboard#$TMPD/suricata-dashboard#g")"
+printf '%s' "$TROZO" | grep -q '^if \[ ! -f ' || { echo "no se encontro el bloque de configuracion inicial"; exit 1; }
 [ -n "$TROZO" ] || { echo "no se encontro el bloque de configuracion inicial"; exit 1; }
 
 crear() { # $1=HOME_NET  $2=HOME_NET_GIVEN

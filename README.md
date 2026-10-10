@@ -153,7 +153,7 @@ Opciones (se pasan tras `bash -s --`):
 | `-i IFACE` | interfaz a escuchar | la de la ruta default |
 | `-n CIDR[,CIDR]` | `HOME_NET` (admite varias redes separadas por coma; con `-t` pasa aqui las redes de tus clientes) | red de la interfaz |
 | `-p PUERTO` | puerto de la web | `5636` |
-| `-P CLAVE` | clave del usuario web `admin` | aleatoria (se muestra al final) |
+| `-P CLAVE` | clave de `admin` en EveBox **y** en el panel. Al reinstalar la cambia en los dos: es como se recupera el acceso | una aleatoria, **la misma para las dos webs**, que se muestra al final |
 | `-t` | **receptor TZSP** (UDP 37008) para espejo MikroTik. Requiere `-m` | apagado |
 | `-e vpn\|local` | con `-t`: donde esta el sensor respecto al router. `vpn` recorta a 10.000 bytes por flujo y las reglas del router llevan `connection-bytes`; `local` espeja entero | `vpn` |
 | `-a CIDR[,CIDR]` | redes desde las que se puede entrar a la web (UFW). Sin esto los puertos web no se abren | - |

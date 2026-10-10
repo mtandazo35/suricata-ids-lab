@@ -18,7 +18,8 @@
 #     -i IFACE     interfaz a escuchar (default: auto-deteccion por ruta default)
 #     -n HOME_NET  red(es) "casa" en CIDR, separadas por coma (default: la de la interfaz)
 #     -p PUERTO    puerto de la web EveBox (default: 5636)
-#     -P CLAVE     clave del usuario web 'admin' (default: aleatoria, se muestra al final)
+#     -P CLAVE     clave de 'admin' en la web (EveBox) Y en el panel (default: una aleatoria,
+#                  la misma para los dos, que se muestra al final). Al reinstalar, la cambia.
 #     -t           receptor TZSP (UDP 37008) para espejo desde MikroTik (/tool sniffer o
 #                  mangle action=sniff-tzsp). Desencapsula y entrega a Suricata por un veth.
 #     -W           sin web (solo Suricata + logs locales)
@@ -45,7 +46,9 @@ Uso: sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] 
   -i IFACE     interfaz a escuchar (default: auto-deteccion por ruta default)
   -n HOME_NET  red(es) "casa" en CIDR, separadas por coma (default: la de la interfaz)
   -p PUERTO    puerto de la web EveBox (default: 5636)
-  -P CLAVE     clave del usuario web 'admin' (default: aleatoria, se muestra al final)
+  -P CLAVE     clave de 'admin' en la web (EveBox) Y en el panel (default: una aleatoria,
+               la misma para los dos, que se muestra al final). Al reinstalar, la cambia
+               en los dos: es la forma de recuperar el acceso.
   -a REDES     red(es) desde las que se permite entrar a la web, en CIDR y separadas
                por coma (p.ej. 203.0.113.0/24). Sin esto los puertos web NO se abren
                en el firewall: publicarlos en internet expone el trafico de tus
@@ -19414,8 +19417,63 @@ fi
 UPDSH
 chmod 755 /usr/local/bin/suricata-panel-update
 
+# --- claves de acceso -------------------------------------------------------------
+# Una sola clave para las dos webs (panel y EveBox) cuando las crea el instalador: con
+# dos distintas el operador probaba la de una en la otra y "no entraba". Se genera aqui y
+# no al principio porque hace falta python3, que en un Debian minimo llega con apt.
+# (sin 'tr | head': bajo pipefail tr muere por SIGPIPE y abortaba el script)
+GEN_PASS=""
+_gen_pass() {
+  [ -n "$GEN_PASS" ] || GEN_PASS="$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(16)))')"
+}
+# La clave del panel se guarda HASHEADA en cuanto arranca (users.json): el instalador no
+# la puede volver a leer. Si una instalacion la crea y muere antes del resumen final, se
+# perdia para siempre ("<ya configurada>"). Esta marca (sin ningun secreto dentro) dice
+# que la clave aun no se entrego en un resumen: la siguiente ejecucion pone una nueva y
+# la entrega. Se borra al imprimir el resumen.
+DASH_PEND=/etc/suricata-dashboard.pendiente
+_panel_clave() { # $1 = clave nueva del admin del panel (hash PBKDF2 igual que el panel)
+  python3 - "$1" <<'PYPW'
+import hashlib, json, os, secrets, sys
+pw = sys.argv[1]
+conf, users = "/etc/suricata-dashboard.conf", "/etc/suricata-dashboard-users.json"
+try:
+    lineas = open(conf, encoding="utf-8").read().splitlines()
+except OSError:
+    sys.exit(1)
+user = next((l.strip()[5:] for l in lineas if l.strip().startswith("USER=") and l.strip()[5:]), "admin")
+def escribir(ruta, texto):
+    tmp = ruta + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(texto)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, ruta)
+try:
+    lst = json.load(open(users, encoding="utf-8"))
+    if not (isinstance(lst, list) and lst):
+        lst = None
+except (OSError, ValueError):
+    lst = None
+if lst is None:
+    # el panel aun no la paso a users.json: va al .conf y la hashea el panel al arrancar
+    escribir(conf, "\n".join(("PASS=" + pw) if l.strip().startswith("PASS=") else l for l in lineas) + "\n")
+    sys.exit(0)
+r = next((x for x in lst if x.get("user") == user), None)
+if r is None:
+    r = {"user": user}
+    lst.append(r)
+salt = secrets.token_hex(16)
+r["salt"] = salt
+r["hash"] = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), bytes.fromhex(salt), 200000).hex()
+r["role"] = "admin"
+r["activo"] = True
+escribir(users, json.dumps(lst, ensure_ascii=False, indent=2))
+PYPW
+}
+_gen_pass
 if [ ! -f /etc/suricata-dashboard.conf ]; then
-  DASH_PASS="$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(16)))')"
+  DASH_PASS="${WEB_PASS:-$GEN_PASS}"
+  : > "$DASH_PEND"; chmod 600 "$DASH_PEND"
   # MIS_REDES son las redes de TUS abonados: lo que decide que IP puede entrar a la
   # cuarentena de CPEs. Por defecto el panel asume las privadas RFC1918, que es falso
   # en cuanto das IP publica a tus clientes o espejas despues del NAT. Si se declaro
@@ -19479,6 +19537,18 @@ if [ "$ESPEJO_DONDE" = "vpn" ] && [ -n "$MIRROR_SRC" ]; then
 fi
 DASH_PORT="$(awk -F= '/^PORT=/{print $2}' /etc/suricata-dashboard.conf 2>/dev/null)"; DASH_PORT="${DASH_PORT:-5637}"
 DASH_PASS_SHOWN="$(awk -F= '/^PASS=/{print $2}' /etc/suricata-dashboard.conf 2>/dev/null)"
+# -P al reinstalar cambia la clave del panel; y si una ejecucion anterior la creo y murio
+# antes de entregarla, se pone una nueva para poder entregarla en el resumen
+if { [ -n "$WEB_PASS" ] && [ "$DASH_PASS_SHOWN" != "$WEB_PASS" ]; } \
+   || { [ -z "$DASH_PASS_SHOWN" ] && [ -f "$DASH_PEND" ]; }; then
+  _np="${WEB_PASS:-$GEN_PASS}"
+  if _panel_clave "$_np"; then
+    DASH_PASS_SHOWN="$_np"
+    ok "Clave del panel: puesta de nuevo (para poder entregarla al final)."
+  else
+    warn "No pude poner la clave del panel; cambiala en Ajustes o re-ejecuta con -P 'Clave'."
+  fi
+fi
 cat > /etc/systemd/system/suricata-dashboard.service <<UNIT
 [Unit]
 Description=Panel de estadisticas de Suricata (apartado web)
@@ -20260,9 +20330,11 @@ PYP
     fi
   else
     # (sin 'tr | head': bajo pipefail tr muere por SIGPIPE y abortaba el script)
-    [ -n "$WEB_PASS" ] || WEB_PASS="$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(16)))')"
-    if $EVB config users add --username "$WEB_USER" --password "$WEB_PASS" >/dev/null 2>&1; then
-      WEB_PASS_SHOWN="$WEB_PASS"
+    # la misma que el panel si la creo esta ejecucion (una clave para las dos webs)
+    _gen_pass
+    _evb_pass="${WEB_PASS:-$GEN_PASS}"
+    if $EVB config users add --username "$WEB_USER" --password "$_evb_pass" >/dev/null 2>&1; then
+      WEB_PASS_SHOWN="$_evb_pass"
     else
       warn "No pude crear el usuario web por CLI; EveBox generara 'admin' con clave aleatoria (ver journalctl -u evebox)."
     fi
@@ -20930,13 +21002,21 @@ cat <<EOF
     Si hay firewall externo (nube/Proxmox), abre ${WEB_PORT}/tcp.
 EOF
 fi
+DASH_IGUAL=""; DASH_PISTA=""
+if [ -n "$DASH_PASS_SHOWN" ] && [ "$DASH_PASS_SHOWN" = "${WEB_PASS_SHOWN:-}" ]; then
+  DASH_IGUAL="   (la misma que EveBox)"
+elif [ -z "$DASH_PASS_SHOWN" ]; then
+  DASH_PISTA="
+                 Si no la tienes: re-ejecuta el instalador con -P 'NuevaClave'
+                 (la pone en el panel y en EveBox) o cambiala en Ajustes."
+fi
 if systemctl is-active --quiet suricata-dashboard 2>/dev/null; then
 cat <<EOF
 
   ${c_g}Panel de estadisticas (dashboard propio)${c_0}
     URL        : http://${DASH_IP:-<IP>}:${DASH_PORT}
     Usuario    : admin
-    Clave      : ${DASH_PASS_SHOWN:-<ya configurada; cambiala en Ajustes>}
+    Clave      : ${DASH_PASS_SHOWN:-<la que se entrego en la primera instalacion>}${DASH_IGUAL}${DASH_PISTA}
     Servicio   : suricata-dashboard   (systemctl status suricata-dashboard)
     Nota       : HTTP plano; publicalo detras de tu proxy (NPM) o por VPN. La clave
                  ya no queda en texto plano en el .conf (esta hasheada). Guardala.
@@ -21002,6 +21082,8 @@ cat <<EOF
     grep -E 'kernel_drops|memcap' /var/log/suricata/stats.log
 ${c_g}==================================================================${c_0}
 EOF
+# la clave del panel ya se entrego en este resumen: la proxima ejecucion no la toca
+rm -f "$DASH_PEND"
 
 
 

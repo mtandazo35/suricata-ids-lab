@@ -124,6 +124,7 @@ correr "verificador de reglas: errores que bloquean, avisos que no, y releer tra
 correr "barra: menu del usuario (Mi cuenta, clave, cerrar sesion, reloj) y su foto por /mi-foto" "$PY" tests/test_nav_usuario.py
 correr "api-ssl del MikroTik: recuerda el cifrado, dice cada fallo, aplicar con una conexion" "$PY" tests/test_mk_tls.py
 correr "listas del router: sync contra SU lista, falta en el router, y recargar solo lo que falta" "$PY" tests/test_recargar_listas.py
+correr "instalador: las claves se entregan siempre (una para las dos webs, -P las recupera)" "$PY" tests/test_instalador_claves.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

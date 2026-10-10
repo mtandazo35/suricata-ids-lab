@@ -14626,6 +14626,8 @@ def _media(serie, clave="sal"):
     vals = [int((d or {}).get(clave, 0)) for _f, d in serie]
     return (sum(vals) / len(vals)) if vals else 0.0
 
+_DIAS_SEM = ("lun", "mar", "mie", "jue", "vie", "sab", "dom")
+
 def _grafico(serie, esc):
     """Barras en SVG puro (sin librerias): una por dia, con el dato en el tooltip."""
     vals = [int((d or {}).get("sal", 0)) for _f, d in serie]
@@ -14651,14 +14653,32 @@ def _grafico(serie, esc):
             f"<g><title>{esc(t)}</title>"
             f"<rect x='{x:.1f}' y='{y:.1f}' width='{max(1.0, bw - 1.5):.1f}' height='{max(0.0, h):.1f}' "
             f"fill='{col}' rx='1.5'/></g>")
-    # etiquetas: primera, mitad y ultima, para no amontonar
+    # el eje: con 7 dias, CADA barra con su dia de la semana y su fecha (dd/mm); con mas,
+    # una fecha cada pocos dias para que no se monten. Antes solo primera, mitad y
+    # ultima en "10-04" (mes-dia), que no se leia como fecha.
     etiq = []
-    for i in (0, n // 2, n - 1):
-        if 0 <= i < n:
-            x = PAD + i * bw + bw / 2
-            anc = "start" if i == 0 else ("end" if i == n - 1 else "middle")
-            etiq.append(f"<text x='{x:.1f}' y='{H - 6:.1f}' text-anchor='{anc}' "
-                        f"font-size='11' fill='#8a8a86'>{esc(serie[i][0][5:])}</text>")
+    paso = 1 if n <= 7 else -(-n // 10)
+    marcas = set(range(0, n, paso)) | ({n - 1} if n else set())
+    if n > 7 and (n - 1) % paso and (n - 1) - max(i for i in range(0, n, paso)) < paso / 2:
+        marcas.discard(max(i for i in range(0, n, paso)))     # que la ultima no pise a la anterior
+    for i in sorted(marcas):
+        x = PAD + i * bw + bw / 2
+        f = serie[i][0]
+        ddmm = f[8:10] + "/" + f[5:7] if len(f) >= 10 else f
+        if n <= 7:
+            try:
+                dsem = _DIAS_SEM[time.strptime(f, "%Y-%m-%d").tm_wday]
+            except ValueError:
+                dsem = ""
+            etiq.append(f"<text x='{x:.1f}' y='{H - 14:.1f}' text-anchor='middle' font-size='11' "
+                        f"fill='#52514e' font-weight='600'>{esc(dsem)}</text>"
+                        f"<text x='{x:.1f}' y='{H - 2:.1f}' text-anchor='middle' "
+                        f"font-size='11' fill='#8a8a86'>{esc(ddmm)}</text>")
+        else:
+            # la ultima pegada al borde derecho: centrada se salia del grafico y se cortaba
+            anc, xx = ("end", W - 10) if i == n - 1 else ("middle", x)
+            etiq.append(f"<text x='{xx:.1f}' y='{H - 6:.1f}' text-anchor='{anc}' "
+                        f"font-size='11' fill='#8a8a86'>{esc(ddmm)}</text>")
     return (f"<svg viewBox='0 0 {W:.0f} {H:.0f}' preserveAspectRatio='none' "
             f"style='width:100%;height:200px;display:block'>"
             f"<line x1='{PAD}' y1='{H - PAD}' x2='{W}' y2='{H - PAD}' stroke='#e7e6e2'/>"
@@ -15884,7 +15904,7 @@ def conducta_page(q="", msg="", pag=1, por=None):
     return _cd_doc("<div class=inf id=informe>" + cab + barras + ruidosas_html(filas, esc)
                    + "".join(secciones) + pgr + "</div>")
 
-def historico_page(dias_n=30):
+def historico_page(dias_n=7):
     esc = html.escape
     dias = cargar_metricas()
     acc = cargar_acciones()
@@ -17458,11 +17478,11 @@ class H(BaseHTTPRequestHandler):
         if path == "/historico":
             _qh = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             try:
-                _dn = int(_qh.get("d", ["30"])[0])
+                _dn = int(_qh.get("d", ["7"])[0])      # por defecto la ultima semana
             except (ValueError, TypeError):
-                _dn = 30
+                _dn = 7
             if _dn not in (7, 30, 90, 365):
-                _dn = 30
+                _dn = 7
             return self._html(historico_page(_dn))
         if path == "/cuarentena":
             _qs = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}

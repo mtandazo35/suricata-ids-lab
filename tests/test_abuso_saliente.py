@@ -102,7 +102,7 @@ def main():
     tmp = tempfile.mkdtemp()
     d = piezas(DASH, ("ACCIONES_FILE", "ACCIONES_DIAS", "_ACC_LOCK", "cargar_acciones",
                       "contar_accion", "METRICAS_FILE", "cargar_metricas", "_serie",
-                      "_media", "tendencia_txt", "_grafico", "historico_page",
+                      "_media", "tendencia_txt", "_DIAS_SEM", "_grafico", "historico_page",
                       "GRUPOS_SALIDA", "_CPES_CACHE", "_cpes_de_reporte", "analisis_salida",
                       "DIAG_FILE", "diagnostico_de",
                       "regla_salida", "reglas_salida_texto",
@@ -143,6 +143,7 @@ def main():
                  "cats": {"Escaneo SSH": 100}}
     json.dump({"dias": dias}, open(d["METRICAS_FILE"], "w", encoding="utf-8"))
 
+    check("por defecto, la ultima semana (7 dias)", "ataques salientes en 7 dias" in d["historico_page"](), "")
     pag = d["historico_page"](30)
     check("ya no sale 'hoy' en el cuadro del periodo (eran las ultimas horas)", "hoy (parcial)" not in pag, "")
     check("el cuadro grande es el total del periodo elegido, y dice que dias abarca",
@@ -180,6 +181,16 @@ def main():
     check("se dice por que atacan", "Spam" in pag and "Escaneo SSH" in pag)
     check("y por que puerto salen", "25/tcp" in pag and "22/tcp" in pag)
     check("hay grafico sin librerias externas", "<svg" in pag and "cdn" not in pag.lower())
+    # el eje: con 7 dias cada barra lleva dia de la semana y dd/mm; con 30, una fecha cada pocos
+    import re as _re
+    sem = ("lun", "mar", "mie", "jue", "vie", "sab", "dom")
+    f7 = [time.strftime("%d/%m", time.localtime(time.time() - k * 86400)) for k in range(6, -1, -1)]
+    d7 = [sem[time.localtime(time.time() - k * 86400).tm_wday] for k in range(6, -1, -1)]
+    check("eje de 7 dias: las 7 fechas en dd/mm y su dia de la semana",
+          all(">%s<" % x in pag7 for x in f7) and all(">%s<" % x in pag7 for x in d7), (f7, d7))
+    rot30 = _re.findall(r">(\d\d/\d\d)</text>", pag)
+    check("eje de 30 dias: fechas dd/mm repartidas (ni 3 ni 30), y la de hoy al final",
+          8 <= len(rot30) <= 12 and rot30[-1] == f7[-1], rot30)
     check("los reportes guardados siguen listandose", "Reportes guardados" in pag)
 
     vacia = d["historico_page"](30)

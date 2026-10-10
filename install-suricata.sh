@@ -11324,7 +11324,9 @@ def _menu_usuario():
              '<span class="uc">&#9662;</span></button>')
     panel = (f'<div class="umenu" id="umenu" role="menu" hidden>'
              f'<div class="uhd">{av}<div><div class="uhn">{disp}</div>'
-             + (f'<div class="uhr">{rol}</div>' if rol else "") + '</div></div>'
+             # el nombre de arriba es el que se muestra; para entrar vale el usuario
+             + f'<div class="uhr">Usuario: {html.escape(yo)}' + (f' &middot; {rol}' if rol else "")
+             + '</div></div></div>'
              f'<a role="menuitem" href="/ajustes#cuenta">{_MU_CUENTA}Mi cuenta</a>'
              f'<a role="menuitem" href="/ajustes#clave">{_MU_CLAVE}Cambiar contrase&ntilde;a</a>'
              f'<a role="menuitem" class="usal" href="/logout">{_MU_SALIR}Cerrar sesi&oacute;n</a>'
@@ -12612,14 +12614,15 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<button class=mx type=button onclick=\"cerrar('ovlNew')\" aria-label=Cerrar>&times;</button></div>"
             "<form method=post action='/perfil'><input type=hidden name=accion value=add_user>"
             "<div class=mbody>"
-            "<div class=grid2><div class=field><label>Nombre</label><input type=text name=nnombre autocomplete=off></div>"
-            "<div class=field><label>Usuario</label><input type=text name=nuser autocomplete=off required></div></div>"
+            "<div class=grid2><div class=field><label>Nombre a mostrar</label><input type=text name=nnombre autocomplete=off></div>"
+            "<div class=field><label>Usuario para entrar</label><input type=text name=nuser autocomplete=off required></div></div>"
             "<div class=grid2><div class=field><label>Correo</label><input type=email name=ncorreo autocomplete=off></div>"
             "<div class=field><label>Rol</label><select name=nrole>"
             "<option value=lectura>Solo lectura</option><option value=operador>Operador (cuarentenas/incidentes)</option>"
             "<option value=admin>Administrador</option></select></div></div>"
             "<div class=field><label>Clave</label><input type=password name=npass autocomplete=new-password required>"
-            "<div class=hint>Minimo 6 caracteres. Nombre y correo son opcionales.</div></div>"
+            "<div class=hint>Minimo 6 caracteres. El <b>usuario</b> es con el que se entra y no se "
+            "puede cambiar despues; nombre y correo son opcionales y se cambian cuando quieras.</div></div>"
             "<div class=field><label>Foto (opcional)</label><div class=avup>"
             "<img id=npreview class=avprev alt='' style=display:none>"
             "<input id=nfile type=file accept=image/* onchange=\"foto(this,'n')\">"
@@ -12635,7 +12638,12 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<form method=post action='/perfil'><input type=hidden name=accion value=edit_user>"
             "<input type=hidden name=user id=eu>"
             "<div class=mbody>"
-            "<div class=grid2><div class=field><label>Nombre</label><input type=text name=nombre id=en></div>"
+            # el usuario no se cambia nunca (solo su clave, o se elimina): se ensena aparte,
+            # sin nombre de campo, para que "Nombre" no se confunda con el usuario de entrar
+            "<div class=field><label>Usuario para entrar</label><input type=text id=eusr readonly disabled>"
+            "<div class=hint>El usuario no se cambia nunca. Si hace falta otro, crea uno nuevo y "
+            "elimina este.</div></div>"
+            "<div class=grid2><div class=field><label>Nombre a mostrar</label><input type=text name=nombre id=en></div>"
             "<div class=field><label>Correo</label><input type=email name=correo id=ec></div></div>"
             "<div class=field><label>Rol</label><select name=role id=er>"
             "<option value=admin>Administrador</option><option value=operador>Operador (cuarentenas/incidentes)</option>"
@@ -12799,6 +12807,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
               # la cuenta que crea el instalador no trae nombre ni correo: en la tabla y en el
               # menu se ve el usuario en su lugar, y la ventana vacia parecia un fallo
               "var _u=b.getAttribute('data-user')||'';document.getElementById('etit').textContent='Editar usuario: '+_u;"
+              "document.getElementById('eusr').value=_u;"
               "document.getElementById('en').placeholder='Sin nombre guardado';"
               "document.getElementById('ec').placeholder='Sin correo guardado';"
               "document.getElementById('er').value=b.getAttribute('data-role')||'lectura';"
@@ -13377,7 +13386,13 @@ exclusiones de deteccion ni actualizaciones. Cada accion suya queda en la <b>bit
 ni edita nada.</li>
 </ul>
 <p>Todo se maneja en el apartado <b>Perfil</b>: cualquiera cambia su clave; un administrador
-ademas crea/borra usuarios y cambia roles. Las claves se guardan <b>hasheadas</b> (PBKDF2 con sal)
+ademas crea/borra usuarios y cambia roles.</p>
+<p><b>El usuario no se cambia nunca</b>, tampoco el <code>admin</code> que deja el instalador:
+de una cuenta se cambia la clave, el <b>nombre a mostrar</b>, el correo, el rol y la foto, o se
+elimina. El nombre a mostrar es el que sale arriba a la derecha y en la tabla, pero para entrar
+vale el <b>usuario</b> (el menu de arriba lo ensena debajo del nombre). Si hace falta otro
+usuario, crea uno nuevo y elimina el viejo (sin quedarte sin ningun administrador).</p>
+<p> Las claves se guardan <b>hasheadas</b> (PBKDF2 con sal)
 en <code>/etc/suricata-dashboard-users.json</code>; nunca en texto plano. El primer admin sale del
 <code>USER</code>/<code>PASS</code> de <code>/etc/suricata-dashboard.conf</code> la primera vez.</p>
 
@@ -19571,6 +19586,15 @@ class H(BaseHTTPRequestHandler):
             return self._html(perfil_page(f"'{objetivo}' ahora es {nrole}.", ok=True))
         if accion == "edit_user":
             objetivo = q.get("user", [""])[0]
+            # El usuario de entrar no se cambia nunca: solo su clave, su nombre a mostrar, su
+            # correo, su rol y su foto (o se elimina). Un formulario que intente renombrarlo
+            # se rechaza entero, para que no quede la clave cambiada a medias.
+            _otro = next((q.get(k, [""])[0].strip() for k in ("nuser", "usuario", "new_user")
+                          if q.get(k, [""])[0].strip()), "")
+            if _otro and _otro != objetivo:
+                return self._html(perfil_page(
+                    "El usuario no se puede cambiar (solo su clave, nombre, correo, rol y foto). "
+                    "Si hace falta otro usuario, crealo y elimina este.", ok=False))
             nombre = (q.get("nombre", [""])[0]).strip()[:60]
             correo = (q.get("correo", [""])[0]).strip()[:80]
             nrole = q.get("role", ["lectura"])[0]
@@ -19600,7 +19624,11 @@ class H(BaseHTTPRequestHandler):
                 guardar_usuarios(us)
             except OSError as ex:
                 return self._html(perfil_page(f"No se pudo guardar: {ex}", ok=False))
-            bitacora("USUARIO-EDITADO", f"{objetivo} rol={nrole}")
+            bitacora("USUARIO-EDITADO", f"{objetivo} rol={nrole}" + (" clave=cambiada" if npw else ""))
+            if npw:
+                return self._html(perfil_page(
+                    f"Usuario '{objetivo}' actualizado. La clave nueva ya vale: se entra con el "
+                    f"usuario '{objetivo}' (el nombre a mostrar no sirve para entrar).", ok=True))
             return self._html(perfil_page(f"Usuario '{objetivo}' actualizado.", ok=True))
         if accion == "toggle_user":
             objetivo = q.get("user", [""])[0]

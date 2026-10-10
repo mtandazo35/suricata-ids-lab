@@ -81,7 +81,7 @@ correr "plan de bloqueo: la IA ordena lo medido y no inventa puertos" "$PY" test
 correr "historial de listas negras: cuando entro y cuanto estuvo" "$PY" tests/test_dnsbl_historial.py
 correr "de me listaron a mira a estos abonados" "$PY" tests/test_culpables_listado.py
 correr "ver que hace se despliega en la tabla" "$PY" tests/test_ficha_desplegable.py
-correr "detectar publicas: solo lo tuyo, no el DNS de otros" "$PY" tests/test_detectar_publicas.py
+correr "detectar publicas: solo interfaces WAN y pools de srcnat, ni LAN ni el DNS de otros" "$PY" tests/test_detectar_publicas.py
 correr "publicas: limpiar todas de una vez" "$PY" tests/test_publicas_limpiar.py
 correr "fecha y hora de la ultima actualizacion" "$PY" tests/test_fecha_actualizacion.py
 correr "la ficha dice que CPE privado esta detras" "$PY" tests/test_culpables_ficha.py
@@ -130,6 +130,7 @@ correr "modo VPN: solo se recibe por el tunel (firewall propio, sniff-target = I
 correr "instalador de OpenVPN en /root: tal cual, con huella y respaldo si habia otro" "$PY" tests/test_openvpn_sh.py
 correr "openvpn.sh sin menu: usuario, redes, quitar y borrar (nunca una cuenta real)" "$PY" tests/test_openvpn_cli.py
 correr "Ajustes > VPN: estado, redes validadas, respaldo, clave fuera de la bitacora" "$PY" tests/test_vpn_panel.py
+correr "espejo por la VPN desde la web: -a del operador, sin -P, respaldo, FIN rc, credenciales borradas" "$PY" tests/test_espejo_vpn.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

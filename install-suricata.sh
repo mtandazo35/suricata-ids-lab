@@ -5944,11 +5944,78 @@ def _a_cidr(txt):
         return []
     return salida
 
-def mk_publicas_detectadas(router=None):
-    """Las IPs publicas de salida segun el propio MikroTik.
+def _ifaces_de_ruta(fila):
+    """Interfaz(es) por la(s) que sale una ruta, leidas de lo que conteste el router.
 
-    Dos fuentes: las direcciones configuradas en sus interfaces (de ahi sale el
-    masquerade) y el to-addresses de las reglas de SRC-NAT (de ahi salen los pools).
+    Cada version lo cuenta a su manera y hay que entender las dos:
+      - v7: immediate-gw = "198.51.100.1%ether1" (o solo "pppoe-out1");
+      - v6: gateway-status = "198.51.100.1 reachable via  ether1" (con DOS espacios, y
+        varias separadas por coma si hay ECMP);
+      - y en las dos, gateway puede ser directamente una interfaz (un PPPoE: gateway=
+        pppoe-out1), o "IP%interfaz".
+    Una IP pelada en gateway no dice la interfaz: para eso estan los otros dos campos."""
+    out = []
+
+    def _poner(nom):
+        nom = (nom or "").strip()
+        if nom and nom not in out:
+            out.append(nom)
+
+    for trozo in (fila.get("immediate-gw") or "").split(","):
+        trozo = trozo.strip()
+        if "%" in trozo:
+            _poner(trozo.rsplit("%", 1)[1])
+        elif trozo:
+            try:
+                ipaddress.ip_address(trozo)
+            except ValueError:
+                _poner(trozo)
+    for nom in re.findall(r"reachable via\s+([^\s,]+)", fila.get("gateway-status") or ""):
+        _poner(nom)
+    for trozo in (fila.get("gateway") or "").split(","):
+        trozo = trozo.strip()
+        if "%" in trozo:
+            _poner(trozo.rsplit("%", 1)[1])
+        elif trozo:
+            try:
+                ipaddress.ip_address(trozo)
+            except ValueError:
+                _poner(trozo)
+    return out
+
+def _redes_de(txt):
+    """Las redes que cubre un src-address de RouterOS ("a.b.c.d/n", "a.b.c.d", "a-b").
+    Un "!" delante es "todo MENOS esto": no dice que red es la LAN, se ignora."""
+    txt = (txt or "").strip()
+    if not txt or txt.startswith("!"):
+        return []
+    try:
+        if "-" in txt:
+            a, b = txt.split("-", 1)
+            return list(ipaddress.summarize_address_range(
+                ipaddress.ip_address(a.strip()), ipaddress.ip_address(b.strip())))
+        return [ipaddress.ip_network(txt, strict=False)]
+    except (ValueError, TypeError):
+        return []
+
+def mk_publicas_detectadas(router=None):
+    """Las IPs publicas de salida segun el propio MikroTik. Devuelve (lista, aviso).
+
+    Dos fuentes: las direcciones de las interfaces WAN (de ahi sale el masquerade) y el
+    to-addresses de las reglas de SRC-NAT (de ahi salen los pools).
+
+    Solo las interfaces WAN, y esto importa: un ISP numera las LAN de sus abonados con
+    rangos que PARECEN privados y no lo son (172.168.x, 182.168.x, mal copiados de
+    172.16 y 192.168). is_global los da por publicos, asi que tomando TODAS las
+    direcciones del router el boton declaraba como tuyas las redes de otro, y el panel
+    se ponia a vigilar en las listas negras direcciones que nunca salen a internet.
+    Cuales son WAN lo dice el propio router: la interface-list WAN (la misma que usan las
+    reglas de accion, ACCION_WAN_LIST) mas la interfaz de la ruta por defecto activa.
+    Si no hay ninguna de las dos NO se cae a "todas", que es justo el fallo: se devuelven
+    solo los pools de src-nat y un aviso para que el usuario lo arregle en el router.
+
+    Ademas, nada que caiga dentro del src-address de una regla srcnat: eso es la red que
+    se NATea, o sea LAN, aunque alguien la haya metido en la lista WAN.
 
     Solo srcnat, y esto importa: en dstnat el to-addresses es a donde REDIRIGES, o sea
     el servidor de otro. Los ISP suelen forzar el DNS de sus clientes con un dstnat, asi
@@ -5956,6 +6023,7 @@ def mk_publicas_detectadas(router=None):
     fueran IPs publicas del cliente. Declararlas seria pedirle al panel que vigile la
     reputacion de Cloudflare."""
     d = cargar_mk_de(router) if router else cargar_mk()
+    lista_wan = _params_accion("wan", d)["wan"]      # "" si el usuario puso "ninguna"
     s_ = mk_conectar(d)
     encontradas = []
 
@@ -5982,17 +6050,63 @@ def mk_publicas_detectadas(router=None):
             out.append(fila)
         return out
 
+    def _si(fila, k):
+        return (fila.get(k) or "").lower() == "true"
+
+    wan = set()
+    lan = []
     try:
-        for fila in _filas("/ip/address/print", ["address"]):
-            _sumar(fila.get("address", ""))
-        for fila in _filas("/ip/firewall/nat/print", ["chain", "to-addresses"]):
+        if lista_wan:
+            for fila in _filas("/interface/list/member/print", ["list", "interface", "disabled"]):
+                if _si(fila, "disabled"):
+                    continue
+                if (fila.get("list") or "").strip().lower() == lista_wan.lower():
+                    if (fila.get("interface") or "").strip():
+                        wan.add(fila["interface"].strip())
+        for fila in _filas("/ip/route/print", ["dst-address", "gateway", "gateway-status",
+                                               "immediate-gw", "active", "disabled"]):
+            if (fila.get("dst-address") or "").strip() != "0.0.0.0/0":
+                continue
+            # una ruta de respaldo que no esta activa no es por donde sales AHORA; si se
+            # cuenta tambien, que sea porque su interfaz esta en la lista WAN
+            if _si(fila, "disabled") or (fila.get("active") or "true").lower() == "false":
+                continue
+            wan.update(_ifaces_de_ruta(fila))
+        nat = _filas("/ip/firewall/nat/print", ["chain", "src-address", "to-addresses", "disabled"])
+        for fila in nat:
+            if (fila.get("chain") or "").lower() != "srcnat" or _si(fila, "disabled"):
+                continue
+            for red in _redes_de(fila.get("src-address", "")):
+                # un srcnat sin filtro real (0.0.0.0/0) no dice que es LAN: lo tacharia todo
+                if red.prefixlen > 0:
+                    lan.append(red)
+        if wan:
+            for fila in _filas("/ip/address/print", ["address", "interface", "disabled"]):
+                if _si(fila, "disabled"):
+                    continue
+                if (fila.get("interface") or "").strip() in wan:
+                    _sumar(fila.get("address", ""))
+        for fila in nat:
             if (fila.get("chain") or "").lower() != "srcnat":
                 continue
             _sumar(fila.get("to-addresses", ""))
     finally:
         try: s_.close()
         except OSError: pass
-    return sorted(encontradas)
+
+    def _es_lan(c):
+        try:
+            red = ipaddress.ip_network(c, strict=False)
+        except ValueError:
+            return False
+        return any(red.version == l.version and red.subnet_of(l) for l in lan)
+
+    aviso = "" if wan else (
+        "No se encontraron interfaces WAN en el MikroTik: crea la interface-list %s con "
+        "las interfaces que salen a internet (o revisa la ruta por defecto 0.0.0.0/0). "
+        "Mientras tanto solo se tomaron los pools de src-nat."
+        % (lista_wan or "WAN"))
+    return sorted(c for c in encontradas if not _es_lan(c)), aviso
 
 # ---------------------------------------------------------------------------------
 # Bloqueo en el BORDE: los que nos atacan desde internet
@@ -11748,6 +11862,616 @@ def ovpn_log():
     return {"corriendo": rc is None and ovpn_instalando(), "rc": rc,
             "log": _RE_ANSI.sub("", txt[-6000:])}
 
+# =====================================================================================
+# El espejo por la VPN, desde la web. Dos cosas que hasta ahora pedian consola:
+#   1) montar el espejo en un MikroTik (lista ids-vigilados, mangle de ida/vuelta/DNS con
+#      recorte, fasttrack) hacia la IP del sensor DENTRO del tunel. Lo hace
+#      suricata-mikrotik-init, la misma herramienta que usa el instalador con -k: una sola
+#      logica probada, con vista previa (--plan) antes de tocar nada;
+#   2) pasar el sensor a "recibir el espejo por la VPN": re-ejecutar el instalador con
+#      -t -e vpn -m <IPs de los MikroTik en el tunel>. Va en una unidad propia de systemd
+#      porque el instalador reinicia el panel a mitad (la web se corta unos segundos).
+MK_INIT_BIN = "/usr/local/bin/suricata-mikrotik-init"
+MK_INIT_MARCA = "--sin-registrar"    # la version que sabe hacer vista previa sin tocar el panel
+CRED_DIR = "/root"                   # credenciales temporales: en /root, nunca en /tmp
+SURI_YAML = "/etc/suricata/suricata.yaml"
+IDS_FW_BIN = "/usr/local/sbin/suricata-ids-fw"
+EVEBOX_YAML = "/etc/evebox/evebox.yaml"
+INSTALADOR_LOCAL = "/root/install-suricata.sh"   # los instaladores van en /root
+ESPEJO_LOG = "/var/log/suricata-espejo-vpn.log"
+ESPEJO_UNIDAD = "suricata-espejo-vpn-"
+TZSP_PORT_DEF = 37008
+# lo que el instalador reescribe al cambiar de modo (el ya respalda suricata.yaml; esto
+# deja ademas el receptor, el firewall de solo-tunel y los routers del panel)
+ESPEJO_RESPALDAR = ("/etc/suricata/suricata.yaml", "/etc/systemd/system/tzsp-decap.service",
+                    "/usr/local/sbin/suricata-ids-fw", "/etc/systemd/system/suricata-ids-fw.service",
+                    "/etc/suricata-routers.json")
+
+def mkinit_asegurar():
+    """(ok, mensaje). Si suricata-mikrotik-init es el viejo (sin vista previa ni
+    --sin-registrar), se baja del instalador publicado y se instala; el anterior se
+    respalda. Hace falta porque la PRIMERA actualizacion por boton la ejecuta el
+    actualizador viejo, que no renovaba esta herramienta."""
+    try:
+        if MK_INIT_MARCA in open(MK_INIT_BIN, encoding="utf-8", errors="replace").read():
+            return True, ""
+    except OSError:
+        pass
+    try:
+        txt = urllib.request.urlopen(_REPO_RAW2 + "/install-suricata.sh", timeout=30).read().decode("utf-8")
+    except Exception as ex:
+        return False, "no se pudo bajar el instalador para renovar %s: %s" % (MK_INIT_BIN, ex)
+    ini = txt.find("<<'MKINIT'\n")
+    fin = txt.find("\nMKINIT\n", ini)
+    if ini < 0 or fin < 0:
+        return False, "el instalador publicado no trae suricata-mikrotik-init"
+    cuerpo = txt[ini + len("<<'MKINIT'\n"):fin + 1]
+    if MK_INIT_MARCA not in cuerpo:
+        return False, "el suricata-mikrotik-init publicado no sabe hacer la vista previa"
+    try:
+        compile(cuerpo, MK_INIT_BIN, "exec")
+    except SyntaxError as ex:
+        return False, "el suricata-mikrotik-init publicado no es Python valido (%s): no se instala" % ex
+    try:
+        if os.path.isfile(MK_INIT_BIN):
+            viejo = open(MK_INIT_BIN, "rb").read()
+            with open(MK_INIT_BIN + ".bak-" + time.strftime("%Y%m%d-%H%M%S"), "wb") as f:
+                f.write(viejo)
+        with open(MK_INIT_BIN + ".tmp", "w", encoding="utf-8", newline="\n") as f:
+            f.write(cuerpo)
+        os.chmod(MK_INIT_BIN + ".tmp", 0o755)
+        os.replace(MK_INIT_BIN + ".tmp", MK_INIT_BIN)
+    except OSError as ex:
+        return False, "no se pudo instalar %s: %s" % (MK_INIT_BIN, ex)
+    bitacora("MKINIT-RENOVADO", "renovado %s desde el instalador publicado" % MK_INIT_BIN, quien="panel")
+    return True, "renovado"
+
+def mkinit_correr(router, args, timeout=150):
+    """(rc, salida) de suricata-mikrotik-init contra ESE router.
+
+    Las credenciales van en un archivo temporal 600 en /root que se borra al terminar,
+    aunque falle: la clave NUNCA va en la linea de comandos (quedaria a la vista en `ps`)
+    ni se queda en disco fuera del registro de routers, que ya es 600."""
+    import tempfile
+    d = cargar_mk_de(router)
+    lineas = []
+    for k in ("HOST", "PORT", "TLS", "USER", "PASS", "CERT_FP"):
+        v = str(d.get(k) or "")
+        if any(c in v for c in "\r\n\0"):
+            # un salto de linea en un valor meteria otra clave en el archivo
+            return 1, "el valor de %s de ese router no es valido (lleva un salto de linea)" % k
+        lineas.append("%s=%s\n" % (k, v))
+    fd, cred = tempfile.mkstemp(prefix=".suricata-mk-", suffix=".cred", dir=CRED_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("".join(lineas))
+        os.chmod(cred, 0o600)
+        r = subprocess.run([MK_INIT_BIN, "-k", cred] + list(args), capture_output=True, timeout=timeout)
+        out = _RE_ANSI.sub("", (r.stdout + r.stderr).decode("utf-8", "replace")).strip()
+        return r.returncode, out
+    except (OSError, subprocess.SubprocessError) as ex:
+        return 1, "no se pudo ejecutar %s: %s" % (MK_INIT_BIN, ex)
+    finally:
+        try:
+            os.unlink(cred)
+        except OSError:
+            pass
+
+def _systemctl_env(unidad):
+    """{clave: valor} del Environment de una unidad de systemd ({} si no existe)."""
+    try:
+        out = subprocess.run(["systemctl", "show", unidad, "-p", "Environment"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    env = {}
+    for tok in (out or "").replace("Environment=", " ").split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            env[k] = v
+    return env
+
+def _lista_csv(txt):
+    return [x for x in re.split(r"[\s,]+", txt or "") if x]
+
+def sensor_modo():
+    """Como recibe hoy el espejo este sensor: de que origenes (TZSP_ALLOW), con que recorte
+    (TZSP_BYTES), su HOME_NET, si el firewall de solo-tunel esta puesto y a quien deja
+    entrar a la web (-a). Todo leido de lo que dejo el instalador: es lo que esta en uso."""
+    env = _systemctl_env("tzsp-decap")
+    m = {"tzsp": bool(env.get("TZSP_ALLOW")), "allow": _lista_csv(env.get("TZSP_ALLOW")),
+         "bytes": 0, "puerto": TZSP_PORT_DEF, "home_net": [], "fw": False, "gestion": [],
+         "web": os.path.isfile(EVEBOX_YAML), "evebox_puerto": ""}
+    try:
+        m["bytes"] = int(env.get("TZSP_BYTES") or 0)
+    except ValueError:
+        pass
+    try:
+        m["puerto"] = int(env.get("TZSP_PORT") or TZSP_PORT_DEF)
+    except ValueError:
+        pass
+    try:
+        for l in open(SURI_YAML, encoding="utf-8", errors="replace"):
+            mm = re.match(r'^\s*HOME_NET:\s*"?\[?([^\]"]*)', l)
+            if mm:
+                m["home_net"] = _lista_csv(mm.group(1))
+                break
+    except OSError:
+        pass
+    try:
+        m["fw"] = subprocess.call(["systemctl", "is-active", "--quiet", "suricata-ids-fw"]) == 0
+    except OSError:
+        pass
+    try:
+        mm = re.search(r"ip saddr \{([^}]*)\}", open(IDS_FW_BIN, encoding="utf-8", errors="replace").read())
+        if mm:
+            m["gestion"] = _lista_csv(mm.group(1))
+    except OSError:
+        pass
+    if m["web"]:
+        try:
+            for l in open(EVEBOX_YAML, encoding="utf-8", errors="replace"):
+                mm = re.match(r"^\s+port:\s*(\d+)\s*$", l)
+                if mm:
+                    m["evebox_puerto"] = mm.group(1)
+                    break
+        except OSError:
+            pass
+    m["modo"] = ("vpn" if m["fw"] else "local") if m["tzsp"] else "sin espejo"
+    return m
+
+def _slot_iface(iface):
+    """ids-mon -> 1, ids-mon3 -> 3: la posicion de -m que crea esa interfaz (None si no)."""
+    mm = re.match(r"^%s(\d*)$" % re.escape(IFACE_BASE), iface or "")
+    if not mm:
+        return None
+    return int(mm.group(1)) if mm.group(1) else 1
+
+def espejo_vpn_origenes(est, routers):
+    """Las IPs en el tunel de los MikroTik, en el orden en que van en -m.
+
+    El orden NO es estetico: el instalador da al 1o de -m la interfaz ids-mon, al 2o
+    ids-mon2..., y el panel sabe de que router vino cada alerta por esa interfaz (el campo
+    iface de cada router). Un MikroTik ya dado de alta va en la posicion de SU interfaz;
+    los demas rellenan los huecos. [{ip, iface, usuario, router, conectado}]"""
+    vpn = [u for u in (est.get("usuarios") or []) if u.get("ip")]
+    de_ip = {u["ip"]: u for u in vpn}
+    fijos, nombre = {}, {}
+    for r in routers or []:
+        h = (r.get("HOST") or "").strip()
+        if h in de_ip:
+            nombre[h] = r.get("nombre") or h
+            p = _slot_iface(r.get("iface"))
+            if p and p not in fijos and h not in fijos.values():
+                fijos[p] = h
+    libres = [u["ip"] for u in vpn if u["ip"] not in fijos.values()]
+    orden, pos = [], 1
+    while fijos or libres:
+        if pos in fijos:
+            orden.append(fijos.pop(pos))
+        elif libres:
+            orden.append(libres.pop(0))
+        else:
+            # hueco que ningun MikroTik de la VPN ocupa: lo que queda va detras aunque cambie
+            # de interfaz (la vista previa lo avisa)
+            orden.extend(fijos.pop(k) for k in sorted(fijos))
+        pos += 1
+    return [{"ip": ip, "iface": IFACE_BASE if i == 1 else "%s%d" % (IFACE_BASE, i),
+             "usuario": de_ip[ip]["usuario"], "router": nombre.get(ip, ""),
+             "conectado": bool(de_ip[ip].get("conexion"))} for i, ip in enumerate(orden, 1)]
+
+def espejo_vpn_red_operador(ip, est):
+    """La red que hay que dejar entrar por -a para que quien esta usando la web no se quede
+    fuera, o "" si no hace falta (entra por la VPN o desde la propia maquina). `ip` es la
+    que LLEGA al sensor: detras de un proxy, la del proxy, que es la que ve el firewall."""
+    try:
+        a = ipaddress.IPv4Address((ip or "").strip())
+    except ValueError:
+        return ""
+    if a.is_loopback:
+        return ""
+    try:
+        if est.get("red") and a in ipaddress.IPv4Network(est["red"], strict=False):
+            return ""
+    except ValueError:
+        pass
+    return "%s/32" % a
+
+def espejo_vpn_a_defecto(modo, est, ip):
+    """-a prerrellenado: las que ya tenia el firewall + la de quien esta entrando ahora."""
+    redes = list(modo.get("gestion") or [])
+    mia = espejo_vpn_red_operador(ip, est)
+    if mia:
+        dentro = False
+        for r in redes:
+            try:
+                dentro = dentro or ipaddress.IPv4Address(mia[:-3]) in ipaddress.IPv4Network(r, strict=False)
+            except ValueError:
+                pass
+        if not dentro:
+            redes.append(mia)
+    return redes
+
+def espejo_vpn_n_defecto(est, modo):
+    """-n prerrellenado: la union de las redes de los MikroTik; sin ninguna, el HOME_NET actual."""
+    redes = []
+    for u in est.get("usuarios") or []:
+        for r in u.get("redes") or []:
+            if r not in redes:
+                redes.append(r)
+    return redes or list(modo.get("home_net") or [])
+
+def _redes_validas(txt, campo, minimo=8):
+    """(redes normalizadas, errores). Nada de /0 a /7: en -n seria medio internet como
+    'casa' y en -a abriria la web a casi todo internet, que es justo lo que se cierra."""
+    redes, errores = [], []
+    for tok in re.split(r"[\s,;]+", txt or ""):
+        if not tok:
+            continue
+        try:
+            n = ipaddress.IPv4Network(tok if "/" in tok else tok + "/32", strict=False)
+        except ValueError:
+            errores.append("%s: '%s' no es una red IPv4 (ejemplo: 203.0.113.0/24)" % (campo, tok[:60]))
+            continue
+        if n.prefixlen < minimo:
+            errores.append("%s: %s es demasiado grande (como mucho /%d)" % (campo, n, minimo))
+            continue
+        if str(n) not in redes:
+            redes.append(str(n))
+    return redes, errores
+
+def espejo_vpn_args(origenes, n_txt, a_txt, modo):
+    """(argumentos del instalador, errores, avisos). Todo validado antes: se ejecuta sin
+    shell, como lista, y NUNCA con -P (las claves de la web se conservan)."""
+    errores, avisos = [], []
+    m = []
+    for o in origenes:
+        try:
+            m.append(str(ipaddress.IPv4Address(o["ip"])))
+        except ValueError:
+            errores.append("IP del tunel no valida: %s" % o["ip"])
+    if not m and not errores:
+        errores.append("No hay ningun MikroTik en la VPN: agrega uno primero (+ Agregar un MikroTik).")
+    n, en = _redes_validas(n_txt, "-n (redes de abonados)")
+    errores += en
+    if not n and not en:
+        errores.append("-n no puede ir vacio: son las redes de tus abonados (HOME_NET)")
+    a, ea = _redes_validas(a_txt, "-a (acceso a la web)")
+    errores += ea
+    if errores:
+        return [], errores, avisos
+    args = ["-t", "-e", "vpn", "-m", ",".join(m), "-n", ",".join(n)]
+    if a:
+        args += ["-a", ",".join(a)]
+    b = int(modo.get("bytes") or 0)
+    if b and b != 10000:
+        args += ["-b", str(b)]              # el recorte que se habia elegido a mano se conserva
+    elif not b and modo.get("modo") == "vpn":
+        args += ["-b", "0"]                 # ya era vpn y sin recorte: se deja igual
+    if not modo.get("web"):
+        args.append("-W")                   # esta caja no tiene EveBox: no se instala ahora
+    elif (modo.get("evebox_puerto") or "5636") != "5636":
+        args += ["-p", str(int(modo["evebox_puerto"]))]
+    return args, errores, avisos
+
+def espejo_vpn_comando(args):
+    import shlex
+    return "bash %s %s" % (INSTALADOR_LOCAL, " ".join(shlex.quote(x) for x in args))
+
+def _url_vpn(est):
+    return "http://%s:%s" % (est.get("servidor") or "100.64.0.1", CFG.get("PORT", "5637") or "5637")
+
+def espejo_vpn_plan(n_txt, a_txt, ip, est=None, modo=None, routers=None):
+    """Lo que se va a ejecutar para recibir el espejo por la VPN, con sus avisos, SIN
+    ejecutar nada. La misma funcion sirve a la vista previa y al lanzamiento: lo que se
+    ensena es exactamente lo que se ejecuta."""
+    est = est if est is not None else ovpn_estado()
+    modo = modo if modo is not None else sensor_modo()
+    routers = routers if routers is not None else cargar_routers()
+    if not est.get("instalado"):
+        return {"ok": False, "msg": "OpenVPN no esta instalado: instalalo primero (arriba)."}
+    origenes = espejo_vpn_origenes(est, routers)
+    args, errores, avisos = espejo_vpn_args(origenes, n_txt, a_txt, modo)
+    if errores:
+        return {"ok": False, "msg": "\n".join(errores), "avisos": avisos}
+    url = _url_vpn(est)
+    a_redes = args[args.index("-a") + 1].split(",") if "-a" in args else []
+    mia = espejo_vpn_red_operador(ip, est)
+    if mia:
+        dentro = any(ipaddress.IPv4Address(mia[:-3]) in ipaddress.IPv4Network(r) for r in a_redes)
+        if not dentro:
+            avisos.insert(0, "Tu conexion de ahora (%s) NO esta en -a: al terminar perderas la web desde "
+                             "internet y tendras que entrar por la VPN (%s). SSH no se toca." % (mia[:-3], url))
+    por_host = {(r.get("HOST") or "").strip(): r for r in routers}
+    for o in origenes:
+        r = por_host.get(o["ip"])
+        if r and r.get("iface") and r.get("iface") != o["iface"]:
+            avisos.append("El router '%s' (%s) esta dado de alta con la interfaz %s, pero su espejo "
+                          "entrara por %s: sus alertas se atribuirian a otro nodo. Revisa los nodos en "
+                          "Ajustes > MikroTik." % (r.get("nombre") or o["ip"], o["ip"], r.get("iface"), o["iface"]))
+        if not o["conectado"]:
+            avisos.append("%s (%s) no esta conectado ahora: se le acepta igual y su espejo contara cuando "
+                          "conecte." % (o["usuario"], o["ip"]))
+    m_nuevo = args[args.index("-m") + 1].split(",")
+    for viejo in modo.get("allow") or []:
+        if viejo not in m_nuevo:
+            avisos.append("Deja de aceptarse el espejo de %s (no es un MikroTik de la VPN)." % viejo)
+    n_nuevo = args[args.index("-n") + 1].split(",")
+    if modo.get("home_net") and sorted(modo["home_net"]) != sorted(n_nuevo):
+        avisos.append("HOME_NET pasa de %s a %s." % (",".join(modo["home_net"]), ",".join(n_nuevo)))
+    confirmar = ("Se baja el instalador a %s y se ejecuta con estas opciones (sin -P: las claves no "
+                 "cambian). Tarda unos minutos y REINICIA el panel: la web se corta unos segundos. Al "
+                 "terminar, desde internet solo podran entrar a la web %s; el resto, por la VPN (%s). "
+                 "SSH no se toca." % (INSTALADOR_LOCAL, ("las redes de -a (%s)" % ", ".join(a_redes))
+                                       if a_redes else "NADIE (no hay -a)", url))
+    return {"ok": True, "msg": "", "args": args, "cmd": espejo_vpn_comando(args), "avisos": avisos,
+            "mapa": origenes, "confirmar": confirmar, "url_vpn": url}
+
+def espejo_vpn_corriendo():
+    """El cambio de modo corre como unidad propia de systemd (sigue aunque el panel reinicie)."""
+    try:
+        r = subprocess.run(["systemctl", "list-units", "--type=service", "--state=active",
+                            "--no-legend", ESPEJO_UNIDAD + "*"],
+                           capture_output=True, text=True, timeout=10)
+        return bool(r.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+def espejo_vpn_respaldo():
+    """tar.gz en /root/backups de lo que el cambio de modo va a reescribir."""
+    import tarfile
+    os.makedirs(OVPN_BACKUPS, exist_ok=True)
+    ruta = os.path.join(OVPN_BACKUPS, "espejo-vpn-%s.tar.gz" % time.strftime("%Y%m%d-%H%M%S"))
+    with tarfile.open(ruta + ".tmp", "w:gz") as t:
+        for f in ESPEJO_RESPALDAR:
+            if os.path.exists(f):
+                t.add(f, arcname=f.lstrip("/"))
+    os.chmod(ruta + ".tmp", 0o600)
+    os.replace(ruta + ".tmp", ruta)
+    return ruta
+
+def espejo_vpn_bajar_instalador():
+    """(ok, sha256 o motivo). Baja el instalador publicado a /root (nunca a /tmp)."""
+    try:
+        txt = urllib.request.urlopen(_REPO_RAW2 + "/install-suricata.sh", timeout=60).read()
+    except Exception as ex:
+        return False, "no se pudo bajar el instalador: %s" % ex
+    if not txt.startswith(b"#!/usr/bin/env bash") or b"<<'DASH'" not in txt:
+        return False, "lo bajado no parece el instalador: no se ejecuta"
+    try:
+        with open(INSTALADOR_LOCAL + ".tmp", "wb") as f:
+            f.write(txt)
+        os.chmod(INSTALADOR_LOCAL + ".tmp", 0o700)
+        os.replace(INSTALADOR_LOCAL + ".tmp", INSTALADOR_LOCAL)
+    except OSError as ex:
+        return False, "no se pudo guardar %s: %s" % (INSTALADOR_LOCAL, ex)
+    return True, hashlib.sha256(txt).hexdigest()
+
+def espejo_vpn_lanzar(args, quien="?"):
+    """Lanza el instalador con esas opciones en una unidad propia de systemd. (ok, mensaje)"""
+    args = [str(x) for x in args]
+    if "-P" in args:
+        return False, "no se cambian las claves desde aqui (-P)"
+    if espejo_vpn_corriendo():
+        return False, "Ya hay un cambio de modo en marcha."
+    try:
+        resp = espejo_vpn_respaldo()
+    except Exception as ex:
+        return False, "no se pudo respaldar la configuracion (%s): no se toca nada" % ex
+    okb, sha = espejo_vpn_bajar_instalador()
+    if not okb:
+        return False, sha
+    cmd_txt = espejo_vpn_comando(args)
+    try:
+        # 600: el resumen final del instalador puede llevar una clave nueva de EveBox
+        fd = os.open(ESPEJO_LOG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("Recibir el espejo por la VPN (%s)\n$ %s\n\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), cmd_txt))
+    except OSError:
+        pass
+    unidad = ESPEJO_UNIDAD + str(int(time.time()))
+    cmd = ["systemd-run", "--unit", unidad,
+           "--property", "StandardOutput=append:" + ESPEJO_LOG,
+           "--property", "StandardError=append:" + ESPEJO_LOG,
+           "--setenv", "DEBIAN_FRONTEND=noninteractive",
+           "/bin/bash", "-c", 'bash "$0" "$@" </dev/null; echo "FIN rc=$?"', INSTALADOR_LOCAL] + args
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as ex:
+        return False, "no se pudo lanzar el instalador: %s" % ex
+    if r.returncode != 0:
+        return False, "no se pudo lanzar el instalador: %s" % (r.stderr or r.stdout)[-300:]
+    bitacora("ESPEJO-VPN", "lanzado (%s): %s | instalador sha256=%s respaldo=%s"
+             % (unidad, cmd_txt, sha[:16], resp), quien=quien)
+    return True, "en marcha"
+
+def espejo_vpn_avance():
+    """{corriendo, rc, log} del cambio de modo. rc sale de la marca FIN del final."""
+    try:
+        txt = open(ESPEJO_LOG, encoding="utf-8", errors="replace").read()
+    except OSError:
+        txt = ""
+    m = re.search(r"FIN rc=(\d+)\s*$", txt)
+    rc = int(m.group(1)) if m else None
+    return {"corriendo": rc is None and espejo_vpn_corriendo(), "rc": rc,
+            "log": _RE_ANSI.sub("", txt[-8000:])}
+
+def _router_libre(rs):
+    """Un router nuevo con el primer id e interfaz que no esten en uso (si se quito un nodo
+    del medio, len()+1 repetiria el id o la interfaz de otro)."""
+    usados = {r.get("id") for r in rs} | {r.get("iface") for r in rs}
+    i = 1
+    while True:
+        r = _router_vacio(i)
+        if r["id"] not in usados and r["iface"] not in usados:
+            return r
+        i += 1
+
+def router_de_ip(ip, routers=None):
+    if not ip:
+        return None
+    for r in (routers if routers is not None else cargar_routers()):
+        if (r.get("HOST") or "").strip() == ip:
+            return r
+    return None
+
+def vpn_mk_alta(usuario, nombre, user, clave, puerto, tls, quien="?"):
+    """(ok, mensaje). Da de alta como router del panel al MikroTik de la VPN, con HOST = su
+    IP en el tunel. Es el mismo registro que Ajustes > MikroTik (guardar_routers: archivo
+    600, la clave nunca vuelve al navegador). El envio a cuarentena queda APAGADO: que el
+    sistema empiece a cortar abonados lo decide una persona."""
+    est = ovpn_estado()
+    u = next((x for x in est["usuarios"] if x["usuario"] == usuario), None)
+    if not u or not u.get("ip"):
+        return False, "ese MikroTik no esta en la VPN"
+    user = (user or "").strip()
+    puerto = (puerto or "").strip() or ("8729" if tls else "8728")
+    if not re.match(r"^\S{1,64}$", user):
+        return False, "falta el usuario de la API (sin espacios)"
+    if not clave or len(clave) > 128 or any(c in clave for c in "\r\n\0"):
+        return False, "falta la clave de la API (o no es valida)"
+    if not puerto.isdigit() or not 1 <= int(puerto) <= 65535:
+        return False, "puerto de la API no valido"
+    nombre = re.sub(r"[\r\n<>\"']", "", (nombre or "").strip())[:40] or usuario
+    rs = cargar_routers()
+    if router_de_ip(u["ip"], rs):
+        return False, "%s ya esta dado de alta como router (%s)" % (usuario, u["ip"])
+    if len(rs) == 1 and not (rs[0].get("HOST") or "").strip():
+        r = rs[0]                 # sensor recien instalado: el unico nodo esta vacio, se usa ese
+    else:
+        if len(rs) >= 8:
+            return False, "Maximo 8 nodos por sensor."
+        r = _router_libre(rs)
+        rs.append(r)
+    r.update({"nombre": nombre, "HOST": u["ip"], "PORT": puerto, "TLS": "1" if tls else "0",
+              "USER": user, "PASS": clave, "ENABLED": r.get("ENABLED") or "0"})
+    guardar_routers(rs)
+    bitacora("CONFIG-NODO", "nodo=%s host=%s (MikroTik de la VPN %s) enviar=no" % (nombre, u["ip"], usuario),
+             quien=quien)
+    # se prueba ya: mejor saber ahora que la clave esta mal que al montar el espejo
+    try:
+        s_ = mk_conectar(cargar_mk_de(r))
+        try:
+            s_.close()
+        except Exception:
+            pass
+        prueba = "La API responde."
+    except Exception as ex:
+        prueba = "OJO: guardado, pero la API no respondio (%s). Revisa usuario, clave, puerto y que " \
+                 "el servicio api este habilitado en el router." % ex
+    return True, "%s dado de alta como router '%s' (%s), con el envio a cuarentena apagado. %s" % (
+        usuario, nombre, u["ip"], prueba)
+
+def vpn_mk_espejo(usuario, aplicar=False, quien="?"):
+    """(ok, mensaje). Monta el espejo en ese MikroTik hacia la IP del sensor DENTRO del
+    tunel (no la publica: por la publica el espejo viajaria en claro y el firewall de
+    solo-tunel lo tira). Sin aplicar es la vista previa: no se toca nada."""
+    est = ovpn_estado()
+    u = next((x for x in est["usuarios"] if x["usuario"] == usuario), None)
+    if not u:
+        return False, "ese MikroTik no esta en la VPN"
+    if not u.get("conexion"):
+        return False, ("%s no esta conectado a la VPN ahora. El sensor le habla por el tunel: "
+                       "conectalo primero (pega en el router el comando /interface ovpn-client)." % usuario)
+    if not est.get("servidor"):
+        return False, "no se sabe la IP del sensor en el tunel (revisa server.conf)"
+    r = router_de_ip(u.get("ip"))
+    if not r or not (r.get("USER") and r.get("PASS")):
+        return False, "%s no esta dado de alta como router: pulsa 'Dar de alta su API'." % usuario
+    okv, msgv = mkinit_asegurar()
+    if not okv:
+        return False, msgv
+    modo = sensor_modo()
+    args = ["-s", est["servidor"], "-e", "vpn", "-p", str(modo["puerto"]), "--sin-registrar"]
+    if u.get("redes"):
+        args += ["-r", ",".join(u["redes"])]
+    aviso = ""
+    if u["ip"] not in (modo.get("allow") or []):
+        aviso = ("OJO: el sensor todavia no acepta el espejo de %s. Cuando lo montes, pulsa "
+                 "'Recibir el espejo por la VPN' (abajo) para que lo reciba." % u["ip"])
+    if not aplicar:
+        rc, out = mkinit_correr(r, args + ["--plan"])
+        return rc == 0, out + (("\n\n" + aviso) if aviso else "")
+    try:
+        resp = respaldar_firewall(r)
+    except Exception as ex:
+        return False, "no se pudo respaldar el firewall del router (%s): no se toca nada" % ex
+    rc, out = mkinit_correr(r, args)
+    bitacora("ESPEJO-MIKROTIK", "%s (%s) sensor=%s redes=%s rc=%d respaldo=%s"
+             % (usuario, u["ip"], est["servidor"], ",".join(u.get("redes") or []) or "-", rc, resp), quien=quien)
+    return rc == 0, out + (("\n\n" + aviso) if aviso else "")
+
+def _vpn_celda_espejo(u, rmap, modo):
+    """Lo que se puede hacer con el espejo de ESE MikroTik, o por que todavia no."""
+    esc = html.escape
+    un = esc(u["usuario"])
+    if not u.get("conexion"):
+        return ("<div class=vpnesp><button type=button class=cancelbtn disabled>Montar el espejo</button>"
+                "<div class=vpnsub>Conectalo primero a la VPN: el sensor le habla por el tunel.</div></div>")
+    r = rmap.get(u.get("ip") or "")
+    if not r or not (r.get("USER") and r.get("PASS")):
+        return ("<div class=vpnesp><button type=button class=cancelbtn onclick=\"vpnAlta('%s')\">"
+                "Dar de alta su API</button><div class=vpnsub>Para montarle el espejo hace falta su "
+                "API (usuario y clave).</div></div>" % un)
+    falta = "" if u.get("ip") in (modo.get("allow") or []) else (
+        "<div class=vpnsub style='color:#a15c12'>El sensor aun no recibe su espejo: abajo, "
+        "<b>Recibir el espejo por la VPN</b>.</div>")
+    return ("<div class=vpnesp><button type=button class=primary onclick=\"vpnEspejoPlan('%s')\">"
+            "Montar el espejo</button><div class=vpnsub>API: router %s</div>%s</div>"
+            % (un, esc(r.get("nombre") or r.get("HOST", "")), falta))
+
+def _vpn_bloque_sensor(e, modo, rs):
+    """Como recibe el espejo este sensor y el formulario para pasarlo a 'por la VPN'."""
+    esc = html.escape
+    tit = "<div class=vpnsens><h3>Este sensor: recibir el espejo por la VPN</h3>"
+    url = _url_vpn(e)
+    js_url = "<script>var _vpnUrl=%s;</script>" % json.dumps(url).replace("</", "<\\/")
+    if espejo_vpn_corriendo():
+        return (tit + "<p><b>Cambio de modo en marcha.</b> El instalador tarda unos minutos y reinicia "
+                "el panel.</p><button type=button class=primary onclick='vpnSensorLog()'>Ver el avance"
+                "</button>" + js_url + "</div>")
+    if not e.get("usuarios"):
+        return tit + "<p class=hint>Agrega primero un MikroTik a la VPN.</p></div>"
+    origenes = espejo_vpn_origenes(e, rs)
+    ip_ve = getattr(CTX, "peer", "") or getattr(CTX, "ip", "") or ""
+    ip_real = getattr(CTX, "ip", "") or ip_ve
+    a = espejo_vpn_a_defecto(modo, e, ip_ve)
+    n = espejo_vpn_n_defecto(e, modo)
+    modo_txt = {"vpn": "<b style='color:#1a7f37'>por la VPN</b> (firewall de solo-tunel activo)",
+                "local": "<b>local</b> (sin el firewall de solo-tunel)",
+                "sin espejo": "<b>sin espejo</b> (no recibe TZSP)"}.get(modo.get("modo"), "?")
+    quien = "Entras desde <code>%s</code>" % esc(ip_real or "?")
+    if ip_ve and ip_ve != ip_real:
+        quien += (" a traves del proxy <code>%s</code>: el firewall ve al proxy, por eso va el proxy"
+                  % esc(ip_ve))
+    if not espejo_vpn_red_operador(ip_ve, e):
+        quien += ". Entras por la VPN o desde la propia maquina: no necesitas <code>-a</code>."
+    else:
+        quien += ". Esa IP va puesta en <code>-a</code>: si la quitas, al terminar perderas la web desde internet."
+    mapa = "".join("<li><code>%s</code> &rarr; <code>%s</code> &middot; %s%s%s</li>"
+                   % (esc(o["ip"]), esc(o["iface"]), esc(o["usuario"]),
+                      (" (router %s)" % esc(o["router"])) if o["router"] else "",
+                      "" if o["conectado"] else " &middot; <i>sin conectar</i>") for o in origenes)
+    return (tit +
+            "<p class=vpnsub>Ahora: %s &middot; acepta espejo de <code>%s</code> &middot; HOME_NET "
+            "<code>%s</code>%s</p>"
+            % (modo_txt, esc(", ".join(modo.get("allow") or []) or "nadie"),
+               esc(", ".join(modo.get("home_net") or []) or "?"),
+               (" &middot; recorte %d B/flujo" % modo["bytes"]) if modo.get("bytes") else "")
+            + "<p class=hint style='margin:6px 0'>Re-ejecuta el instalador por ti (lo mismo que el "
+              "one-liner con <code>-t -e vpn</code>): el sensor acepta el espejo de cada MikroTik por su IP "
+              "en el tunel y, desde internet, cierra el espejo y la web salvo a las redes de <code>-a</code>. "
+              "Tarda unos minutos y reinicia el panel.</p>"
+            + "<div class=vpnsub>-m (cada MikroTik por su interfaz):</div><ul class=vpnmap>" + mapa + "</ul>"
+            + "<div class=vpnform>"
+              "<label>-n &middot; redes de tus abonados (HOME_NET)<input id=vpn_n value=\"%s\"></label>"
+              "<label>-a &middot; quien entra a la web desde internet<input id=vpn_a value=\"%s\" "
+              "placeholder='203.0.113.0/24'></label></div>" % (esc(",".join(n)), esc(",".join(a)))
+            + "<div class=vpnsub>" + quien + "</div>"
+            + "<div class=actions style='margin-top:8px'><button type=button class=primary "
+              "onclick='vpnSensorPlan()'>Recibir el espejo por la VPN&hellip;</button></div>"
+            + js_url + "</div>")
+
 def _mb(n):
     n = float(n or 0)
     return ("%.1f GB" % (n / 1e9)) if n >= 1e9 else (("%.1f MB" % (n / 1e6)) if n >= 1e6 else ("%d KB" % (n / 1e3)))
@@ -11778,6 +12502,9 @@ def _card_vpn():
         est_txt = ("<b style='color:#1a7f37'>&#9679; activo</b>" if e["activo"]
                    else "<b style='color:#b52a2a'>&#9679; parado</b>")
         filas = ""
+        rs = cargar_routers()
+        rmap = {(r.get("HOST") or "").strip(): r for r in rs}
+        modo = sensor_modo()
         for u in e["usuarios"]:
             un = u["usuario"]
             c = u["conexion"]
@@ -11788,6 +12515,7 @@ def _card_vpn():
                          _mb(c["rx"]), _mb(c["tx"])))
             else:
                 cx = "<span style='color:#8a8a86'>&#9675; sin conectar</span>"
+            cx += _vpn_celda_espejo(u, rmap, modo)
             chips = "".join(
                 "<span class=vpnchip>%s<button type=button title='Quitar' onclick=\"if(ask(this,'Quitar %s',"
                 "'Se quita la ruta de %s hacia %s. Se reinicia OpenVPN: los tuneles se cortan unos segundos.',"
@@ -11804,7 +12532,7 @@ def _card_vpn():
                       "'Eliminar %s de la VPN','Se borran su usuario, sus redes y sus rutas. Ese MikroTik "
                       "ya no podra conectarse.','Eliminar','danger'))vpnBorrar('%s')\">Eliminar</button></td></tr>"
                       % (esc(un), esc(u["ip"] or "?"), cx, chips, esc(un), esc(un), esc(un), esc(un), esc(un)))
-        tabla = ("<table><thead><tr><th>MikroTik (usuario)</th><th>IP en el tunel</th><th>Estado</th>"
+        tabla = ("<table><thead><tr><th>MikroTik (usuario)</th><th>IP en el tunel</th><th>Estado y espejo</th>"
                  "<th>Redes de sus abonados</th><th></th></tr></thead><tbody>%s</tbody></table>"
                  % filas) if filas else "<p class=hint>Todavia no hay ningun MikroTik dado de alta.</p>"
         cuerpo = ("<p>Servidor %s &middot; %s %s en %s &middot; red <code>%s</code> &middot; "
@@ -11815,7 +12543,8 @@ def _card_vpn():
                   + "<div class=actions style='margin-top:10px'><button type=button class=primary "
                     "onclick=\"if(ask(this,'Agregar un MikroTik','Se crea su usuario de VPN y te da el "
                     "comando para pegar en el router. La clave solo se muestra una vez.','Agregar',''))"
-                    "vpnUsuario()\">+ Agregar un MikroTik</button></div>")
+                    "vpnUsuario()\">+ Agregar un MikroTik</button></div>"
+                  + _vpn_bloque_sensor(e, modo, rs))
     return cab + cuerpo + _VPN_UI + "</section>"
 
 _VPN_UI = (
@@ -11838,7 +12567,15 @@ _VPN_UI = (
     ".vpnadd input{flex:1;min-width:170px;padding:6px 9px;border:1px solid #d7d6d2;border-radius:8px;"
     "font:12.5px ui-monospace,Consolas,monospace}"
     ".vpnav{margin:6px 0;padding-left:18px;font-size:13px;color:#a15c12}"
-    ".vpncmd{margin-top:8px}.vpncmd .cancelbtn{padding:3px 9px;font-size:12px;margin-left:6px}</style>"
+    ".vpncmd{margin-top:8px}.vpncmd .cancelbtn{padding:3px 9px;font-size:12px;margin-left:6px}"
+    ".vpnesp{margin-top:6px}.vpnesp button{padding:4px 10px;font-size:12.5px}.vpnesp button[disabled]{opacity:.55;cursor:not-allowed}"
+    ".vpnsens{margin-top:18px;border-top:1px solid #eaecf0;padding-top:12px}.vpnsens h3{margin:0 0 6px;font-size:15px}"
+    ".vpnform{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;margin:10px 0}"
+    ".vpnform label{display:flex;flex-direction:column;gap:3px;font-size:12.5px;color:#52514e}"
+    ".vpnform input{padding:6px 9px;border:1px solid #d7d6d2;border-radius:8px;font:12.5px ui-monospace,Consolas,monospace}"
+    ".vpnform label.chk{flex-direction:row;align-items:center;gap:6px}"
+    ".vpnmap{margin:4px 0 8px;padding-left:18px;font-size:12.5px}"
+    "@media(max-width:640px){.vpnform{grid-template-columns:1fr}}</style>"
     "<script>"
     "function _vpnEsc(t){return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}"
     "function _vpnBox(h){var m=document.getElementById('vpnov');m.querySelector('.vpnbox').innerHTML=h;m.style.display='flex';}"
@@ -11889,6 +12626,75 @@ _VPN_UI = (
     "var s=document.getElementById('vpnsp');if(s){s.className='vpnico';s.innerHTML=(j.rc===0?'&#9989;':'&#9940;');}"
     "document.getElementById('vpnlt').textContent=(j.rc===0?'OpenVPN instalado':'La instalacion fallo: mira el registro');})"
     ".catch(function(){setTimeout(tic,4000);});})();}"
+    # --- el espejo desde la web: alta de la API, montar el espejo en el router y pasar el
+    # sensor a "recibir por la VPN". Las confirmaciones, con el modal propio (ask).
+    "var _vpnU='',_vpnA='',_vpnN='',_vpnConf='';"
+    "function _vpnVal(id){var i=document.getElementById(id);return i?i.value:'';}"
+    "function vpnAlta(u){_vpnU=u;_vpnBox(\"<div style='flex:1;min-width:0'><b>Dar de alta la API de \"+_vpnEsc(u)+\"</b>\"+"
+    "\"<div class=vpnsub>Queda como un router del panel con su IP en el tunel. La clave se guarda en el servidor \"+"
+    "\"(archivo 600) y no se vuelve a mostrar. El envio a cuarentena queda <b>apagado</b>: se activa en Ajustes &gt; MikroTik.</div>\"+"
+    "\"<div class=vpnform><label>Nombre del nodo<input id=vpn_nom maxlength=40 placeholder='Nodo Centro'></label>\"+"
+    "\"<label>Usuario de la API<input id=vpn_us autocomplete=off></label>\"+"
+    "\"<label>Clave de la API<input id=vpn_pw type=password autocomplete=new-password></label>\"+"
+    "\"<label>Puerto de la API<input id=vpn_pt value=8728></label>\"+"
+    "\"<label class=chk><input id=vpn_tls type=checkbox> API-SSL (TLS)</label></div>\"+"
+    "\"<div class=actions><button type=button class=cancelbtn onclick='_vpnCerrar(0)'>Cancelar</button> \"+"
+    "\"<button type=button class=primary onclick='vpnAltaGuardar()'>Guardar y probar</button></div></div>\");}"
+    "function vpnAltaGuardar(){var t=document.getElementById('vpn_tls');"
+    "var d={usuario:_vpnU,nombre:_vpnVal('vpn_nom'),user:_vpnVal('vpn_us'),pass:_vpnVal('vpn_pw'),"
+    "port:_vpnVal('vpn_pt'),tls:(t&&t.checked?'1':'')};"
+    "_vpnSpin('Guardando y probando la API\\u2026');"
+    "_vpnPost('/vpn/mk-alta',d,function(j){_vpnRes(j,'API dada de alta');});}"
+    "function vpnEspejoPlan(u){_vpnU=u;_vpnSpin('Leyendo el router\\u2026','Vista previa: todavia no se toca nada.');"
+    "_vpnPost('/vpn/mk-espejo-plan',{usuario:u},function(j){if(!j.ok){_vpnRes(j,'');return;}"
+    "_vpnBox(\"<div style='flex:1;min-width:0'><b>Montar el espejo en \"+_vpnEsc(u)+\"</b>\"+"
+    "\"<div class=vpnsub>Esto es lo que se haria (vista previa: todavia no se ha tocado nada).</div>\"+"
+    "\"<pre class=vpnpre>\"+_vpnEsc(j.msg)+\"</pre>\"+"
+    "\"<div class=actions><button type=button class=cancelbtn onclick='_vpnCerrar(0)'>Cancelar</button> \"+"
+    "\"<button type=button class=primary onclick=\\\"if(ask(this,'Montar el espejo','Se respalda antes el firewall \"+"
+    "\"del router y se aplican estos cambios. Repetirlo no duplica nada.','Aplicar',''))vpnEspejoAplicar()\\\">\"+"
+    "\"Aplicar en el router</button></div></div>\");});}"
+    "function vpnEspejoAplicar(){_vpnSpin('Montando el espejo\\u2026','Respaldo del firewall y cambios en el router.');"
+    "_vpnPost('/vpn/mk-espejo-aplicar',{usuario:_vpnU},function(j){_vpnRes(j,'Espejo montado en el router');});}"
+    "function vpnSensorPlan(){_vpnA=_vpnVal('vpn_a');_vpnN=_vpnVal('vpn_n');_vpnSpin('Preparando el comando\\u2026');"
+    "_vpnPost('/vpn/sensor-plan',{a:_vpnA,n:_vpnN},function(j){if(!j.ok){_vpnRes(j,'');return;}_vpnConf=j.confirmar||'';"
+    "var av=(j.avisos||[]).map(function(a){return '<li>'+_vpnEsc(a)+'</li>';}).join('');"
+    "var mp=(j.mapa||[]).map(function(o){return '<li><code>'+_vpnEsc(o.ip)+'</code> &rarr; <code>'+_vpnEsc(o.iface)+"
+    "'</code> '+_vpnEsc(o.usuario)+(o.router?' (router '+_vpnEsc(o.router)+')':'')+'</li>';}).join('');"
+    "_vpnBox(\"<div style='flex:1;min-width:0'><b>Recibir el espejo por la VPN</b>\"+"
+    "\"<div class=vpnsub>Se ejecutara en el servidor:</div><pre class=vpnpre id=vpncmd>\"+_vpnEsc(j.cmd)+\"</pre>\"+"
+    "(mp?\"<div class=vpnsub>Cada MikroTik entra por su interfaz:</div><ul class=vpnmap>\"+mp+\"</ul>\":\"\")+"
+    "(av?\"<ul class=vpnav>\"+av+\"</ul>\":\"\")+\"<p class=vpnwarn>\"+_vpnEsc(_vpnConf)+\"</p>\"+"
+    "\"<div class=actions><button type=button class=cancelbtn onclick='_vpnCerrar(0)'>Cancelar</button> \"+"
+    "\"<button type=button class=primary onclick=\\\"if(ask(this,'Recibir el espejo por la VPN',_vpnConf,'Lanzar',\"+"
+    "\"'danger'))vpnSensorLanzar()\\\">Lanzar</button></div></div>\");});}"
+    "function vpnSensorLanzar(){_vpnSpin('Lanzando el instalador\\u2026');"
+    "_vpnPost('/vpn/sensor-aplicar',{a:_vpnA,n:_vpnN},function(j){if(!j.ok){_vpnRes(j,'');return;}vpnSensorLog();});}"
+    "function _vpnSt(t){var e=document.getElementById('vpnst');if(e)e.textContent=t;}"
+    # El instalador REINICIA el panel: durante unos segundos la web no contesta (o contesta
+    # el login si no hay sesion). Eso no es un fallo: se reintenta y se dice que pasa. Si
+    # no vuelve en 3 minutos, lo mas probable es que -a no incluyera al operador.
+    "function vpnSensorLog(){_vpnBox(\"<div class=vpnspin id=vpnsp></div><div style='flex:1;min-width:0'>\"+"
+    "\"<b id=vpnlt>Pasando el sensor a recibir el espejo por la VPN\\u2026</b>\"+"
+    "\"<div class=vpnsub>Tarda unos minutos y reinicia el panel: la web se corta unos segundos. Sigue en el \"+"
+    "\"servidor aunque cierres esta ventana.</div><div class=vpnsub id=vpnst></div><pre id=vpnlog class=vpnpre></pre>\"+"
+    "\"<div class=actions><button type=button class=cancelbtn onclick='_vpnCerrar(1)'>Cerrar</button></div></div>\");"
+    "var t0=0,muerto=0;"
+    "(function tic(){fetch('/vpn/sensor-log',{cache:'no-store',credentials:'same-origin'})"
+    ".then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();}).then(function(j){"
+    "t0=0;var p=document.getElementById('vpnlog');if(!p)return;p.textContent=j.log||'';p.scrollTop=p.scrollHeight;_vpnSt('');"
+    "if(j.rc===null||j.rc===undefined){muerto=j.corriendo?0:muerto+1;"
+    "if(muerto>5){_vpnSt('El instalador ya no corre y no dejo marca de fin: mira el registro.');}"
+    "setTimeout(tic,2500);return;}"
+    "var s=document.getElementById('vpnsp');if(s){s.className='vpnico';s.innerHTML=(j.rc===0?'&#9989;':'&#9940;');}"
+    "document.getElementById('vpnlt').textContent=(j.rc===0?'Listo: el sensor recibe el espejo por la VPN':"
+    "'El instalador fallo: mira el registro');})"
+    ".catch(function(){if(!document.getElementById('vpnlog'))return;if(!t0)t0=Date.now();"
+    "var s=Math.round((Date.now()-t0)/1000);"
+    "_vpnSt(s<180?'El panel se esta reiniciando (lo hace el instalador): reintentando\\u2026 ('+s+' s)':"
+    "'La web no responde desde hace '+s+' s. Si tu IP no estaba en -a, entra por la VPN: '+"
+    "(window._vpnUrl||'la IP del sensor en el tunel')+' (SSH sigue abierto).');"
+    "setTimeout(tic,3000);});})();}"
     "</script>")
 
 def _card_listas(m):
@@ -12160,7 +12966,8 @@ def _card_nodos():
         "<p class=sub2 style='margin-top:10px'><b>Importante:</b> dar de alta el nodo aqui solo "
         "configura la conexion para bloquear. Para que su trafico se <b>capture</b> hay que "
         "re-ejecutar el instalador incluyendo su IP en <code>-m</code> "
-        "(ej. <code>-m 10.0.0.1,10.9.9.1</code>), que es lo que crea su interfaz.</p>"
+        "(ej. <code>-m 10.0.0.1,10.9.9.1</code>), que es lo que crea su interfaz. Si llega por la "
+        "VPN, eso lo hace la web: <b>Ajustes &rarr; VPN &rarr; Recibir el espejo por la VPN</b>.</p>"
         "<p class=sub2>El <b>primer nodo</b> se configura en la tarjeta de arriba.</p>"
         + otros +
         "<details class=nodonew><summary>Agregar otro MikroTik</summary>"
@@ -14181,6 +14988,13 @@ por el 22, por el 25, cuales escanean.</li>
 del nodo ordenados por cuanto encajan, <b>diciendo por que</b> ("1.500 alertas por 25/tcp"). Cada
 uno lleva su boton de <b>Cuarentena</b> al lado.</li>
 </ol>
+<p><b>Detectar del MikroTik</b> las saca del router: las direcciones de sus <b>interfaces WAN</b>
+(las de la interface-list <code>WAN</code> &mdash;la misma de <b>Acciones por categoria</b>&mdash; mas la
+interfaz de la ruta por defecto activa) y el <code>to-addresses</code> de las reglas <b>srcnat</b> (los
+pools). Las LAN <b>no</b> entran aunque usen rangos que parecen publicos (un <code>172.168.x</code> mal
+copiado de 172.16), ni nada que caiga dentro del <code>src-address</code> de un srcnat, ni el
+<code>to-addresses</code> de un dstnat (el DNS al que rediriges es de otro). Si el router no tiene ni
+lista WAN ni ruta por defecto, solo trae los pools y avisa: crea la lista y vuelve a pulsar.</p>
 <p>Se revisan solas <b>cada 6 horas</b>. Cuando una publica <b>cruza</b> el 25&nbsp;% de abuso llega un
 aviso por Telegram (una vez, no en cada vuelta) y queda en la bitacora. De cada publica se guarda la
 <b>serie por dia</b> durante 180 dias: es lo que permite enseñar que despues de limpiar, el puntaje
@@ -14397,6 +15211,35 @@ borra solo si es una de las que crea la VPN.</li>
 trafico). Antes de cada cambio se respalda <code>/etc/openvpn</code> en <code>/root/backups/</code>
 y todo queda en la <b>Bitacora</b>. Por debajo lo hace <code>/root/openvpn.sh</code>, que el
 instalador deja en cada caja y que tambien se puede usar por consola (sin argumentos abre su menu).</p>
+
+<h2>Espejo por la VPN, desde la web</h2>
+<p>Con la VPN montada quedan dos pasos, y los dos se hacen en <b>Ajustes &rarr; VPN</b>, sin consola:</p>
+<ol>
+<li><b>Montar el espejo en cada MikroTik.</b> En su fila, <b>Montar el espejo</b> (solo si esta
+<b>conectado</b> a la VPN: el sensor le habla por el tunel). Si el panel aun no tiene su API, el boton es
+<b>Dar de alta su API</b>: usuario, clave y puerto; queda como un router del panel con su IP del tunel,
+con el envio a cuarentena <b>apagado</b> (se activa en Ajustes &rarr; MikroTik) y la clave no se vuelve a
+mostrar. Antes de tocar nada sale la <b>vista previa</b>: las lineas exactas que se crearian o
+cambiarian (la lista <code>ids-vigilados</code> con sus redes, el espejo de ida y de vuelta en
+<code>forward</code> con <code>connection-bytes=0-10000</code>, el DNS entero aparte, apagar espejos viejos
+hacia este sensor y sacar la lista del fasttrack). Al confirmar se respalda el firewall del router y se
+aplica. Repetirlo no duplica nada. El espejo va a la IP del sensor <b>dentro del tunel</b>, nunca a la
+publica.</li>
+<li><b>Recibir el espejo por la VPN</b> (debajo de la tabla). El panel calcula las opciones del instalador
+(<code>-t -e vpn -m</code> con las IPs de los MikroTik en el tunel, <code>-n</code> con sus redes) y te
+ensena el comando exacto antes de lanzarlo. Lo ejecuta en el servidor (baja el instalador a
+<code>/root/install-suricata.sh</code>), sin <code>-P</code>: las claves no cambian. Tarda unos minutos y
+<b>reinicia el panel</b>: la ventana de avance aguanta el corte y sigue sola.</li>
+</ol>
+<p><b>Cuidado con quedarte fuera.</b> En modo VPN el sensor cierra el panel y EveBox desde la interfaz
+de internet; solo quedan la VPN y las redes de <code>-a</code>. Por eso <code>-a</code> viene puesto con
+la IP desde la que estas entrando ahora (si entras por un proxy, la del proxy, que es la que llega al
+sensor). Si la quitas, al terminar entraras por la VPN: <code>http://100.64.0.1:5637</code>. SSH no se
+toca nunca. Cada MikroTik entra por su propia interfaz (<code>ids-mon</code>, <code>ids-mon2</code>...):
+el que ya este dado de alta conserva la suya, y la vista previa avisa si alguno cambiaria.</p>
+<p>Antes se respalda lo que se va a reescribir (<code>suricata.yaml</code>, el receptor, el firewall de
+solo-tunel y los routers) en <code>/root/backups/</code>, y en la <b>Bitacora</b> queda quien lo lanzo y
+con que opciones.</p>
 
 <h2>Reinstalar o actualizar</h2>
 <p>Todo esta en un instalador idempotente. Para actualizar a la ultima version
@@ -14790,7 +15633,7 @@ def ficha_ip_html(d, ip="", esc=None, scb=None):
     + ejem + "</div>")
 
 
-def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver=""):
+def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver="", modal=False):
     """Consultar en AbuseIPDB que ataques se le denuncian a una IP publica.
 
     Dos usos, y el segundo es el que de verdad arregla cosas:
@@ -14802,7 +15645,14 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
     quedan_red = aidb_restantes_bloque()
     hay_clave = aidb_configurada()
     banner = ""
-    if msg:
+    aviso_js = ""
+    if msg and modal:
+        # El resultado de una accion (detectar, agregar, quitar) va en el modal del panel,
+        # no en una franja arriba que empuja la pagina. Va como JSON y sin "<": el texto
+        # viene de la URL y no puede cerrar el <script>.
+        aviso_js = ("<script>aviso('Tus IPs publicas'," + json.dumps(msg).replace("<", "\\u003c")
+                    + ");try{history.replaceState(null,'',location.pathname);}catch(e){}</script>")
+    elif msg:
         col = "#1baf7a" if ok else "#e34948"
         banner = (f"<div class=banner style='background:{col};color:#fff;padding:10px 14px;"
                   f"border-radius:8px;margin-bottom:16px;font-size:13px'>{esc(msg)}</div>")
@@ -15034,8 +15884,8 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             acciones.append("<form method=post action='/publicas/detectar'>"
                             f"<input type=hidden name=rid value='{esc(rid)}'>"
                             "<button class=cancelbtn type=submit title='Pregunta al MikroTik "
-                            "por las direcciones de sus interfaces y el to-addresses de sus "
-                            "reglas de src-nat'>Detectar del MikroTik</button></form>")
+                            "por las direcciones de sus interfaces WAN y el to-addresses de "
+                            "sus reglas de src-nat'>Detectar del MikroTik</button></form>")
         if entradas:
             acciones.append("<form method=post action='/publicas/revisar'>"
                             f"<input type=hidden name=rid value='{esc(rid)}'>"
@@ -15157,7 +16007,7 @@ def reputacion_page(res=None, texto="", msg="", ok=False, es_admin=False, volver
             + banner + atras
             + ("".join(tarjetas) if tarjetas else "")
             + ("" if res else pub_html)
-            + "</main></body></html>")
+            + "</main>" + aviso_js + "</body></html>")
 
 def bitacora_page(embed=False):
     """Bitacora auditable: quien hizo que y cuando (logins, cuarentenas, config, usuarios, updates)."""
@@ -17921,6 +18771,9 @@ class H(BaseHTTPRequestHandler):
     def _set_ctx(self):
         s = self._sesion()
         CTX.user = s.get("user"); CTX.role = s.get("role"); CTX.ip = self._client_ip()
+        # la IP que LLEGA al socket (con proxy, la del proxy): es la que ve el firewall de
+        # solo-tunel, asi que es la que hay que dejar entrar con -a para no perder la web
+        CTX.peer = self._peer_ip()
         CTX.exp = s.get("exp")   # el menu del usuario dice cuanto le queda a la sesion
     def _auth_ok(self):
         if not cargar_usuarios():
@@ -18199,6 +19052,11 @@ class H(BaseHTTPRequestHandler):
             if not self._admin():
                 return self._deny()
             return self._json(ovpn_log())
+        if path == "/vpn/sensor-log":
+            # avance del cambio de modo del sensor (el JS lo pide en bucle y tolera cortes)
+            if not self._admin():
+                return self._deny()
+            return self._json(espejo_vpn_avance())
         if path == "/mi-foto":
             ft = foto_de(getattr(CTX, "user", None))
             if not ft:
@@ -18261,7 +19119,10 @@ class H(BaseHTTPRequestHandler):
                 return self._html(reputacion_page(res=_res, texto=_t, msg=_av, ok=not _av,
                                                   es_admin=self._admin(),
                                                   volver=(_qr.get("volver", [""])[0]).strip()))
-            return self._html(reputacion_page(es_admin=self._admin()))
+            # el resultado de agregar/quitar/detectar llega aqui por ?msg= tras el redirect:
+            # sin leerlo, el aviso de "no hay interfaces WAN" no lo veia nadie
+            return self._html(reputacion_page(es_admin=self._admin(), modal=True,
+                                              msg=(_qr.get("msg", [""])[0]).strip()[:800]))
         if path == "/documentacion":
             _qd = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             return self._html(documentacion_page(embed=("1" in _qd.get("embed", [])),
@@ -18655,6 +19516,31 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"ok": okv, "msg": msgv})
             except Exception as ex:
                 return self._json({"ok": False, "msg": "error: %s" % ex})
+        if ruta in ("/vpn/mk-alta", "/vpn/mk-espejo-plan", "/vpn/mk-espejo-aplicar",
+                    "/vpn/sensor-plan", "/vpn/sensor-aplicar"):
+            # Ajustes > VPN: el espejo desde la web (en el router y en el sensor). Solo admin;
+            # respuesta JSON para el modal. Lo que se lanza se recalcula y revalida aqui: no
+            # se ejecuta nada que venga hecho del navegador.
+            if not self._admin():
+                return self._deny()
+            quien = getattr(CTX, "user", "?")
+            usuario = (q.get("usuario", [""])[0]).strip()
+            try:
+                if ruta == "/vpn/mk-alta":
+                    okv, msgv = vpn_mk_alta(usuario, q.get("nombre", [""])[0], q.get("user", [""])[0],
+                                            q.get("pass", [""])[0], q.get("port", [""])[0],
+                                            (q.get("tls", [""])[0] or "") in ("1", "on", "true"), quien=quien)
+                    return self._json({"ok": okv, "msg": msgv})
+                if ruta in ("/vpn/mk-espejo-plan", "/vpn/mk-espejo-aplicar"):
+                    okv, msgv = vpn_mk_espejo(usuario, aplicar=ruta.endswith("-aplicar"), quien=quien)
+                    return self._json({"ok": okv, "msg": msgv})
+                p = espejo_vpn_plan(q.get("n", [""])[0], q.get("a", [""])[0], self._peer_ip())
+                if ruta == "/vpn/sensor-plan" or not p["ok"]:
+                    return self._json(p)
+                okv, msgv = espejo_vpn_lanzar(p["args"], quien=quien)
+                return self._json({"ok": okv, "msg": msgv})
+            except Exception as ex:
+                return self._json({"ok": False, "msg": "error: %s" % ex})
         if ruta == "/mikrotik/listas/recargar":
             # Vuelve a cargar en el router las IPs en cuarentena que faltan en su lista.
             if not self._admin():
@@ -18887,12 +19773,13 @@ class H(BaseHTTPRequestHandler):
             if not r:
                 return self._redirect("/reputacion")
             try:
-                halladas = mk_publicas_detectadas(r)
+                halladas, aviso_wan = mk_publicas_detectadas(r)
             except Exception as ex:
                 return self._redirect("/reputacion?msg=" + _up.quote(
                     f"No se pudo preguntar al MikroTik: {ex}"))
             if not halladas:
                 return self._redirect("/reputacion?msg=" + _up.quote(
+                    aviso_wan or
                     "El MikroTik no devolvio ninguna direccion publica. "
                     "Si el enlace lo termina otro equipo, agregalas a mano."))
             actuales = cargar_publicas().get(rid, [])
@@ -18904,12 +19791,15 @@ class H(BaseHTTPRequestHandler):
             if nuevas:
                 threading.Thread(target=vigilar_dnsbl, daemon=True).start()
                 threading.Thread(target=vigilar_publicas, daemon=True).start()
+            # sin interfaces WAN el resultado es parcial (solo pools): se dice delante, que
+            # "2 publicas nuevas" a secas haria creer que ya esta todo
             return self._redirect("/reputacion?msg=" + _up.quote(
-                (f"{len(nuevas)} publica(s) nueva(s) del MikroTik"
-                 + (f"; {len(tap)} descartada(s) por estar dentro de un rango ya declarado "
-                    "(una consulta de red las cubre todas)" if tap else ""))
-                if nuevas
-                else "El MikroTik no tiene ninguna publica que no estuviera ya"))
+                (aviso_wan + " " if aviso_wan else "") +
+                ((f"{len(nuevas)} publica(s) nueva(s) del MikroTik"
+                  + (f"; {len(tap)} descartada(s) por estar dentro de un rango ya declarado "
+                     "(una consulta de red las cubre todas)" if tap else ""))
+                 if nuevas
+                 else "El MikroTik no tiene ninguna publica que no estuviera ya")))
         if ruta == "/publicas/revisar":
             if not self._operador():
                 return self._deny()
@@ -19890,6 +20780,18 @@ mv /usr/local/bin/suricata-html-report.new   /usr/local/bin/suricata-html-report
 [ -f /usr/local/bin/suricata-feeds-update.new ] && mv /usr/local/bin/suricata-feeds-update.new /usr/local/bin/suricata-feeds-update
 chmod 755 /usr/local/bin/suricata-dashboard /usr/local/bin/suricata-html-report /usr/local/bin/suricata-panel-update
 [ -f /usr/local/bin/suricata-feeds-update ] && chmod 755 /usr/local/bin/suricata-feeds-update
+# suricata-mikrotik-init: Ajustes > VPN lo usa para montar el espejo en un MikroTik, asi que
+# se renueva con el panel (si falla se sigue: el panel lo renueva solo al usarlo). La cadena
+# de busqueda va partida en dos A PROPOSITO: escrita entera, esta linea seria la primera
+# aparicion de la cabecera del heredoc en el instalador y quien busca el programa por esa
+# cabecera (las pruebas, otros extractores) encontraria esto en vez del programa.
+if extraer "cat > /usr/local/bin/suricata-mikrotik""-init <<'MKINIT'" "MKINIT" /usr/local/bin/suricata-mikrotik-init py; then
+  mv /usr/local/bin/suricata-mikrotik-init.new /usr/local/bin/suricata-mikrotik-init
+  chmod 755 /usr/local/bin/suricata-mikrotik-init
+else
+  rm -f /usr/local/bin/suricata-mikrotik-init.new
+  log "no se renovo suricata-mikrotik-init"
+fi
 # cron de feeds (cada 15 min; intervalo minimo por fuente) y primera carga; migra el cron viejo
 if [ -f /usr/local/bin/suricata-feeds-update ]; then
   printf '# Refresca los feeds de reputacion del panel Suricata (falla suave, intervalo por fuente)\n*/15 * * * * root /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1\n' > /etc/cron.d/suricata-feeds
@@ -22088,6 +22990,12 @@ def cliente_api():
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
         if nom in piezas:
             exec(ast.get_source_segment(src, n) or "", ns)
+    # mk_conectar, con api-ssl y sin huella previa, la fija llamando a guardar_mk() del
+    # panel, que aqui no existe: sin esto la conexion moria con un NameError ("No se pudo
+    # conectar: name 'guardar_mk' is not defined"). La huella la guarda esta herramienta
+    # al registrar el router (CERT_FP); MK_CONF lo cita su mensaje de huella cambiada.
+    ns.setdefault("guardar_mk", lambda _d: None)
+    ns.setdefault("MK_CONF", MK_CONF)
     faltan = [p for p in piezas if p not in ns]
     if faltan:
         sys.exit("No se encontro el cliente de API en %s (falta %s)" % (DASHBOARD, faltan[0]))
@@ -22119,64 +23027,31 @@ def leer_credenciales(ruta):
     return d
 
 
+def en_terminal(orden, args):
+    """La orden de la API escrita como en la terminal del router, para la vista previa:
+    /ip/firewall/mangle/add =chain=forward  ->  /ip firewall mangle add chain=forward.
+    Asi el operador lee lo que conoce, no el protocolo de la API."""
+    partes = orden.strip("/").split("/")
+    txt = "/" + " ".join(partes[:-1]) + " " + partes[-1]
+    for x in args:
+        k, v = x[1:].split("=", 1)
+        if k == ".id":
+            txt += " " + v          # set *1A ...: el id interno, como lo admite la terminal
+            continue
+        if v == "" or any(c in v for c in ' \t";\\$[]{}'):
+            v = '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        txt += " %s=%s" % (k, v)
+    return txt
+
+
 def cmd(ns, s, orden, *args):
     ns["_mk_send"](s, [orden] + list(args))
     ok, frases, err = ns["_mk_reply"](s)
     return ok, frases, err
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("-k", "--credenciales", required=True,
-                   help="archivo con HOST/PORT/USER/PASS del MikroTik (chmod 600)")
-    p.add_argument("-s", "--sensor", required=True,
-                   help="IP de ESTE sensor, a donde el router manda el espejo")
-    p.add_argument("-l", "--lista", default="ids-vigilados",
-                   help="address-list con las redes de abonados a vigilar")
-    p.add_argument("-r", "--redes", default="",
-                   help="redes de abonados a meter en la lista, separadas por coma")
-    p.add_argument("-e", "--donde", choices=("local", "vpn"), default="vpn",
-                   help="donde esta el sensor respecto al router")
-    p.add_argument("-p", "--puerto", type=int, default=37008, help="puerto TZSP")
-    p.add_argument("--solo-registrar", action="store_true",
-                   help="da de alta el router en el panel y NO toca su firewall")
-    a = p.parse_args()
-
-    d = leer_credenciales(a.credenciales)
-    ns = cliente_api()
-    print("Conectando a %s:%s como %s ..." % (d["HOST"], d["PORT"], d["USER"]))
-    try:
-        s = ns["mk_conectar"](d, timeout=15)
-    except Exception as e:
-        sys.exit("No se pudo conectar: %s" % e)
-
-    # --- que clase de TLS es esto ----------------------------------------------------
-    # Con api-ssl SIN certificado, RouterOS negocia Diffie-Hellman ANONIMO: el trafico va
-    # cifrado pero NO autenticado, asi que no hay huella que fijar y alguien en medio
-    # podria hacerse pasar por el router y quedarse con esta clave.
-    cert = None
-    try:
-        cert = s.getpeercert(binary_form=True)
-    except Exception:
-        pass
-    fp = _hashlib.sha256(cert).hexdigest() if cert else ""
-    if fp:
-        print("  certificado del router: %s..." % fp[:16])
-    else:
-        print("  [!] api-ssl SIN certificado (cifrado anonimo): el canal va cifrado pero")
-        print("      NO autenticado. Ponle un certificado al router y vuelve a correr esto")
-        print("      para fijar su huella:  /certificate add name=api common-name=<router>")
-
-    ident = ""
-    ok, fr, _e = cmd(ns, s, "/system/identity/print")
-    if ok:
-        for f in fr:
-            for x in f:
-                if x.startswith("=name="):
-                    ident = x[6:]
-    print("  conectado a %s" % (ident or d["HOST"]))
-
-    # --- 1) el panel, para que pueda cortar -------------------------------------------
+def registrar(d, fp, ident):
+    """Da de alta el router en el panel (MK_CONF y, si no habia, la lista de routers)."""
     nuevo = not os.path.exists(MK_CONF)
     viejo = {}
     if not nuevo:
@@ -22223,28 +23098,99 @@ def main():
     else:
         print("  ya habia routers dados de alta; no se toca esa lista")
 
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("-k", "--credenciales", required=True,
+                   help="archivo con HOST/PORT/USER/PASS del MikroTik (chmod 600)")
+    p.add_argument("-s", "--sensor", required=True,
+                   help="IP de ESTE sensor, a donde el router manda el espejo")
+    p.add_argument("-l", "--lista", default="ids-vigilados",
+                   help="address-list con las redes de abonados a vigilar")
+    p.add_argument("-r", "--redes", default="",
+                   help="redes de abonados a meter en la lista, separadas por coma")
+    p.add_argument("-e", "--donde", choices=("local", "vpn"), default="vpn",
+                   help="donde esta el sensor respecto al router")
+    p.add_argument("-p", "--puerto", type=int, default=37008, help="puerto TZSP")
+    p.add_argument("--solo-registrar", action="store_true",
+                   help="da de alta el router en el panel y NO toca su firewall")
+    # Las dos que usa el panel (Ajustes > VPN): el router ya esta dado de alta alli, con
+    # sus listas y su politica, y registrar de nuevo pisaria esa configuracion.
+    p.add_argument("--sin-registrar", action="store_true",
+                   help="no toca la configuracion del panel (el router ya esta dado de alta)")
+    p.add_argument("--plan", action="store_true",
+                   help="vista previa: dice que cambiaria en el router y NO toca nada")
+    a = p.parse_args()
+
+    d = leer_credenciales(a.credenciales)
+    ns = cliente_api()
+    print("Conectando a %s:%s como %s ..." % (d["HOST"], d["PORT"], d["USER"]))
+    try:
+        s = ns["mk_conectar"](d, timeout=15)
+    except Exception as e:
+        sys.exit("No se pudo conectar: %s" % e)
+
+    # --- que clase de TLS es esto ----------------------------------------------------
+    # Con api-ssl SIN certificado, RouterOS negocia Diffie-Hellman ANONIMO: el trafico va
+    # cifrado pero NO autenticado, asi que no hay huella que fijar y alguien en medio
+    # podria hacerse pasar por el router y quedarse con esta clave.
+    cert = None
+    try:
+        cert = s.getpeercert(binary_form=True)
+    except Exception:
+        pass
+    fp = _hashlib.sha256(cert).hexdigest() if cert else ""
+    if fp:
+        print("  certificado del router: %s..." % fp[:16])
+    elif d.get("TLS") != "1":
+        # sin TLS no hay certificado que mirar; el aviso de api-ssl confundia
+        print("  API sin TLS: la clave viaja en claro salvo que vaya por un tunel (VPN)")
+    else:
+        print("  [!] api-ssl SIN certificado (cifrado anonimo): el canal va cifrado pero")
+        print("      NO autenticado. Ponle un certificado al router y vuelve a correr esto")
+        print("      para fijar su huella:  /certificate add name=api common-name=<router>")
+
+    ident = ""
+    ok, fr, _e = cmd(ns, s, "/system/identity/print")
+    if ok:
+        for f in fr:
+            for x in f:
+                if x.startswith("=name="):
+                    ident = x[6:]
+    print("  conectado a %s" % (ident or d["HOST"]))
+
+    # --- 1) el panel, para que pueda cortar -------------------------------------------
+    if a.plan or a.sin_registrar:
+        print("  la configuracion del panel no se toca")
+    else:
+        registrar(d, fp, ident)
+
     if a.solo_registrar:
         print("\n--solo-registrar: no se toca el firewall del router.")
         return 0
 
-    # --- 2) respaldo antes de tocar el firewall ----------------------------------------
-    marca = time.strftime("%Y%m%d-%H%M")
-    ok, _f, err = cmd(ns, s, "/export", "=file=antes-ids-%s" % marca)
-    print("  respaldo /export antes-ids-%s.rsc: %s" % (marca, "hecho" if ok else "no (%s)" % err))
+    # --- 2) que hay que cambiar (solo lectura) -------------------------------------------
+    # Primero se calcula TODO lo que hace falta y despues se hace. La vista previa (--plan)
+    # y la ejecucion salen de la MISMA lista: lo que se ensena antes de confirmar es
+    # exactamente lo que se aplica despues, no una descripcion aproximada.
+    cambios = []      # [(que es, orden de la API, argumentos)]
 
-    # --- 3) la lista de a quien se vigila ----------------------------------------------
+    # la lista de a quien se vigila
     PROP_AL = ["*", ".id", "list", "address"]
     ya = {f.get("address") for f in ns["_mk_print"](s, "/ip/firewall/address-list/print", PROP_AL)
           if f.get("list") == a.lista}
-    nuevas = [r.strip() for r in a.redes.split(",") if r.strip() and r.strip() not in ya]
+    nuevas = []
+    for r in (x.strip() for x in a.redes.split(",")):
+        if r and r not in ya and r not in nuevas:
+            nuevas.append(r)
     for r in nuevas:
-        cmd(ns, s, "/ip/firewall/address-list/add",
-            "=list=" + a.lista, "=address=" + r, "=comment=abonados vigilados (IDS)")
-    print("  address-list %s: %d ya estaban, %d anadida(s)" % (a.lista, len(ya), len(nuevas)))
+        cambios.append(("anadir %s a la lista %s" % (r, a.lista), "/ip/firewall/address-list/add",
+                        ["=list=" + a.lista, "=address=" + r, "=comment=abonados vigilados (IDS)"]))
+    print("  address-list %s: %d ya estaban, %d por anadir" % (a.lista, len(ya), len(nuevas)))
     if not ya and not nuevas:
         print("  [!] la lista %s esta VACIA: no se espejara nada hasta que metas redes" % a.lista)
 
-    # --- 4) las reglas de espejo, sin duplicar ------------------------------------------
+    # las reglas de espejo, sin duplicar
     cb = "0-10000" if a.donde == "vpn" else ""
     quiero = [
         ("%s (ida)" % COMENTARIO,
@@ -22274,14 +23220,13 @@ def main():
             args.append("=connection-bytes=" + cb)
         vieja = por_comentario.get(comentario)
         if vieja:
-            ok, _f, err = cmd(ns, s, "/ip/firewall/mangle/set",
-                              *(["=.id=" + vieja[".id"]] + args))
-            print("  regla %-28s actualizada%s" % (comentario, "" if ok else " FALLO: %s" % err))
+            cambios.append(("regla '%s': actualizar" % comentario, "/ip/firewall/mangle/set",
+                            ["=.id=" + vieja[".id"]] + args))
         else:
-            ok, _f, err = cmd(ns, s, "/ip/firewall/mangle/add", *args)
-            print("  regla %-28s creada%s" % (comentario, "" if ok else " FALLO: %s" % err))
+            cambios.append(("regla '%s': crear" % comentario, "/ip/firewall/mangle/add", args))
 
-    # --- 5) las viejas que apuntan a ESTE sensor y no son nuestras ----------------------
+    # las viejas que apuntan a ESTE sensor y no son nuestras: conviviendo con las nuevas,
+    # el enlace cargaria el doble para ver lo mismo
     mias = {c for c, _ in quiero}
     sobran = [f for f in actuales
               if f.get("action") == "sniff-tzsp"
@@ -22289,14 +23234,10 @@ def main():
               and (f.get("comment") or "") not in mias
               and (f.get("disabled") or "false") == "false"]
     for f in sobran:
-        ok, _fr, err = cmd(ns, s, "/ip/firewall/mangle/set",
-                           "=.id=" + f[".id"], "=disabled=yes")
-        print("  espejo viejo hacia este sensor apagado (comment=%r): %s"
-              % (f.get("comment", ""), "ok" if ok else err))
-    if sobran:
-        print("      (convivian con las nuevas: el enlace cargaba el doble para ver lo mismo)")
+        cambios.append(("apagar un espejo viejo hacia este sensor (comment=%r)" % f.get("comment", ""),
+                        "/ip/firewall/mangle/set", ["=.id=" + f[".id"], "=disabled=yes"]))
 
-    # --- 6) el fasttrack ----------------------------------------------------------------
+    # el fasttrack: sin excluir la lista, mangle solo ve el SYN y se pierde el handshake TLS
     ft = [f for f in ns["_mk_print"](s, "/ip/firewall/filter/print",
                                      ["*", ".id", "action", "src-address-list", "disabled"])
           if f.get("action") == "fasttrack-connection"]
@@ -22306,11 +23247,34 @@ def main():
         if (f.get("src-address-list") or "") == "!" + a.lista:
             print("  fasttrack: ya excluia %s" % a.lista)
             continue
-        ok, _fr, err = cmd(ns, s, "/ip/firewall/filter/set",
-                           "=.id=" + f[".id"], "=src-address-list=!" + a.lista)
-        print("  fasttrack: excluido %s %s" % (a.lista, "ok" if ok else "FALLO: " + err))
-        if ok:
-            print("      (sin esto mangle solo ve el SYN y se pierde el handshake TLS)")
+        cambios.append(("excluir %s del fasttrack (sin esto mangle solo ve el SYN)" % a.lista,
+                        "/ip/firewall/filter/set", ["=.id=" + f[".id"], "=src-address-list=!" + a.lista]))
+
+    # --- 3) vista previa: se dice que se haria y no se toca nada ---------------------------
+    if a.plan:
+        print("\nVISTA PREVIA: no se ha tocado nada. Esto es lo que se haria en %s:" % (ident or d["HOST"]))
+        for que, orden, args in cambios:
+            print("  # " + que)
+            print("  " + en_terminal(orden, args))
+        if not cambios:
+            print("  nada: el router ya esta como debe")
+        try:
+            s.close()
+        except Exception:
+            pass
+        return 0
+
+    # --- 4) respaldo antes de tocar el firewall, y los cambios ----------------------------
+    marca = time.strftime("%Y%m%d-%H%M")
+    ok, _f, err = cmd(ns, s, "/export", "=file=antes-ids-%s" % marca)
+    print("  respaldo /export antes-ids-%s.rsc: %s" % (marca, "hecho" if ok else "no (%s)" % err))
+    fallidos = 0
+    for que, orden, args in cambios:
+        ok, _f, err = cmd(ns, s, orden, *args)
+        print("  %s: %s" % (que, "hecho" if ok else "FALLO: %s" % err))
+        fallidos += 0 if ok else 1
+    if not cambios:
+        print("  nada que cambiar: el router ya estaba como debe")
 
     print("\nListo. Comprueba que los contadores suben, con clientes activos:")
     print("  /ip firewall mangle print stats where comment~\"%s\"" % COMENTARIO)
@@ -22318,7 +23282,7 @@ def main():
         s.close()
     except Exception:
         pass
-    return 0
+    return 1 if fallidos else 0
 
 
 if __name__ == "__main__":

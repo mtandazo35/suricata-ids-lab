@@ -324,6 +324,29 @@ def main():
     ns["cargar_routers"] = lambda: [{"id": "r1", "nombre": "MikroTik"}]
     ns["guardar_publicas_de"]("r1", "200.0.0.0/24")
     adm = ns["reputacion_page"](es_admin=True)
+
+    # --- el resultado de detectar/agregar/quitar llega en el modal, no se pierde ---
+    # Esas acciones redirigen a /reputacion?msg=...; el aviso de "no hay interfaces WAN"
+    # tiene que verse, y en el modal del panel (aviso()), no en alert() ni en una franja.
+    # El texto viene de la URL: no puede cerrar el <script> en el que va.
+    raro = "Sin interfaces WAN </script><script>alert(1)// crea la lista"
+    try:
+        pm = ns["reputacion_page"](es_admin=True, msg=raro, modal=True)
+    except TypeError as ex:
+        pm = "ERROR " + str(ex)
+    _ini = pm.find("<script>aviso(")
+    _arg = pm[_ini:].split(",", 1)[1].split(");try{", 1)[0] if _ini >= 0 else ""
+    try:
+        _leido = json.loads(_arg)
+    except ValueError:
+        _leido = None
+    check("el mensaje de una accion se muestra en el modal del panel",
+          _ini >= 0 and _leido == raro, (_ini, _arg[:80]))
+    check("  y el texto de la URL no puede cerrar el <script>",
+          "</script><script>alert(1)" not in pm, "")
+    check("  sin franja de color ni alert() del navegador",
+          "class=banner style='background:#e34948" not in pm and "alert(" not in pm.replace(
+              _arg, ""), "")
     check("las IPs declaradas se ven como fichas, no en un textarea",
           "pchip" in adm and "<textarea" not in adm, "textarea=%s" % ("<textarea" in adm))
     check("se agregan de una en una, en un campo pequeño",

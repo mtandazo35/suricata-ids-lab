@@ -13,7 +13,11 @@ Lo que protege, por orden de lo que costaria el fallo:
   - Que en modo local NO se ponga recorte, y en vpn si.
   - Que NO active el envio solo: cortarle el internet a un abonado lo decide una persona.
   - Que la clave salga de un archivo y nunca de la linea de comandos.
+  - Que la vista previa (--plan, la usa el panel antes de confirmar) NO toque nada y diga
+    lo mismo que despues se aplica; que --sin-registrar no pise la configuracion del panel.
+  - Que con api-ssl y sin huella previa conecte (antes moria con un NameError).
 """
+import contextlib
 import ast
 import io
 import json
@@ -45,6 +49,7 @@ class Router(object):
         self.filtro = [dict(x) for x in filtro]
         self.lista = [dict(x) for x in lista]
         self.ordenes = []          # [(comando, {clave: valor})]
+        self.falla = None          # una orden que el router rechaza
 
     def ns(self):
         r = self
@@ -73,6 +78,8 @@ class Router(object):
                 r.mangle.append(nueva)
 
         def _reply(_s):
+            if r.falla and r.ordenes and r.ordenes[-1][0] == r.falla:
+                return False, [], "failure: sin permiso"
             return True, [], ""
 
         class Sock(object):
@@ -104,6 +111,27 @@ def correr(router, tmp, *args):
     finally:
         sys.argv = viejo
     return ns
+
+
+def correr_salida(router, tmp, *args):
+    """Como correr(), pero devuelve tambien lo que imprime y lo que retorna main()."""
+    ns = {"__name__": "prueba"}
+    exec(compile(PROG, "<mkinit>", "exec"), ns)
+    ns["MK_CONF"] = os.path.join(tmp, "mikrotik.conf")
+    ns["ROUTERS_CONF"] = os.path.join(tmp, "routers.json")
+    ns["cliente_api"] = router.ns
+    cred = os.path.join(tmp, "cred.conf")
+    io.open(cred, "w", encoding="utf-8", newline="\n").write(
+        "HOST=100.64.0.2\nPORT=8728\nTLS=0\nUSER=ids\nPASS=secreta\n")
+    viejo = sys.argv
+    sys.argv = ["mkinit", "-k", cred, "-s", "100.64.0.1"] + list(args)
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = ns["main"]()
+    finally:
+        sys.argv = viejo
+    return rc, buf.getvalue()
 
 
 def reglas_creadas(r):
@@ -209,6 +237,72 @@ def main():
           "--pass" not in PROG and '"-P"' not in PROG, "")
     check("y avisa si el archivo de credenciales lo puede leer otro",
           "legible por otros" in PROG, "")
+
+    # --- vista previa (--plan): la usa el panel antes de confirmar --------------------------
+    tmp2 = tempfile.mkdtemp()
+    r7 = Router(mangle=[{".id": "*51", "action": "sniff-tzsp", "comment": "IDS", "chain": "forward",
+                         "sniff-target": "100.64.0.1", "disabled": "false"}],
+                filtro=[{".id": "*9", "action": "fasttrack-connection", "disabled": "false"}])
+    rc, out = correr_salida(r7, tmp2, "-e", "vpn", "-r", "10.20.0.0/16", "--plan")
+    tocado = [c for c, _a in r7.ordenes if not c.endswith("/print")]
+    check("--plan no toca NADA: ni reglas, ni lista, ni respaldo en el router",
+          rc == 0 and tocado == [], tocado)
+    check("  ni la configuracion del panel", not os.path.exists(os.path.join(tmp2, "mikrotik.conf"))
+          and not os.path.exists(os.path.join(tmp2, "routers.json")), os.listdir(tmp2))
+    check("  y dice lo que haria, como se escribe en la terminal del router",
+          "VISTA PREVIA" in out
+          and "/ip firewall address-list add list=ids-vigilados address=10.20.0.0/16" in out
+          and '/ip firewall mangle add action=sniff-tzsp sniff-target=100.64.0.1' in out
+          and 'comment="espejo IDS (ida)"' in out and "connection-bytes=0-10000" in out
+          and "/ip firewall mangle set *51 disabled=yes" in out
+          and "/ip firewall filter set *9 src-address-list=!ids-vigilados" in out, out)
+    # lo que se ensena es lo que se aplica: las mismas ordenes, una por linea de la vista
+    r8 = Router(mangle=[dict(x) for x in r7.mangle], filtro=[dict(x) for x in r7.filtro])
+    rc8, out8 = correr_salida(r8, tmp2, "-e", "vpn", "-r", "10.20.0.0/16", "--sin-registrar")
+    hechas = [c for c, _a in r8.ordenes if not c.endswith("/print") and c != "/export"]
+    lineas = [l for l in out.splitlines() if l.startswith("  /")]
+    check("lo aplicado son exactamente las ordenes de la vista previa",
+          rc8 == 0 and len(hechas) == len(lineas) == 6
+          and [h.strip("/").replace("/", " ") for h in hechas] == [" ".join(l.strip().strip("/").split()[:4]) for l in lineas],
+          (hechas, lineas))
+    check("--sin-registrar aplica en el router pero no pisa la configuracion del panel",
+          any(c == "/export" for c, _a in r8.ordenes) and not os.path.exists(os.path.join(tmp2, "mikrotik.conf")), "")
+    check("  sin TLS no confunde con el aviso de api-ssl sin certificado",
+          "api-ssl SIN certificado" not in out8 and "API sin TLS" in out8, out8[:300])
+    r9 = Router()
+    r9.falla = "/ip/firewall/mangle/add"
+    rc9, out9 = correr_salida(r9, tmp2, "-e", "vpn", "-r", "10.20.0.0/16", "--sin-registrar")
+    check("si el router rechaza una orden, sale con error (el panel lo dice)", rc9 == 1 and "FALLO" in out9, (rc9, out9[-300:]))
+
+    # --- api-ssl sin huella previa: antes moria con NameError (guardar_mk no existe aqui) ----
+    tmp3 = tempfile.mkdtemp()
+    _j = SRC.index("cat > /usr/local/bin/suricata-dashboard <<'DASH'")
+    dash = os.path.join(tmp3, "suricata-dashboard")
+    io.open(dash, "w", encoding="utf-8").write(SRC[_j:].split("\n", 1)[1].split("\nDASH\n", 1)[0])
+    ns = {"__name__": "prueba"}
+    exec(compile(PROG, "<mkinit>", "exec"), ns)
+    ns["DASHBOARD"] = dash
+    api = ns["cliente_api"]()
+
+    class SockTLS(object):
+        def getpeercert(self, binary_form=False):
+            return b"certificado-del-router"
+
+        def settimeout(self, t):
+            pass
+
+        def close(self):
+            pass
+    api["_mk_tls_wrap"] = lambda host, port, timeout: SockTLS()
+    api["_mk_send"] = lambda s_, palabras: None
+    api["_mk_reply"] = lambda s_: (True, [], "")
+    try:
+        api["mk_conectar"]({"HOST": "100.64.0.2", "PORT": "8729", "TLS": "1", "USER": "ids", "PASS": "x"})
+        conecto = True
+    except Exception as ex:
+        conecto = ex
+    check("api-ssl sin huella previa: conecta (el cliente del panel no revienta fuera del panel)",
+          conecto is True, conecto)
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

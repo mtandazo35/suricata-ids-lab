@@ -33,7 +33,12 @@ ARBOL = ast.parse(DASH)
 PIEZAS = ("OVPN_MARCA_CLI", "ovpn_script_al_dia", "ovpn_asegurar_script", "_REPO_RAW2", "OVPN_SH", "OVPN_ETC", "OVPN_SRV", "OVPN_CCD", "OVPN_LOG", "OVPN_BACKUPS", "_RE_OVPN_USER",
           "_RE_ANSI", "_ovpn_conf", "_ovpn_conectados", "ovpn_instalando", "ovpn_estado", "_ovpn_gw",
           "ovpn_redes_validas", "ovpn_respaldo", "ovpn_correr", "ovpn_accion", "ovpn_instalar",
-          "ovpn_log", "_mb", "_card_vpn", "_VPN_UI")
+          "ovpn_log", "_mb", "_card_vpn", "_VPN_UI",
+          # la tarjeta ensena tambien el espejo de cada MikroTik y el modo del sensor
+          "_vpn_celda_espejo", "_vpn_bloque_sensor", "sensor_modo", "_systemctl_env", "_lista_csv",
+          "espejo_vpn_corriendo", "espejo_vpn_origenes", "_slot_iface", "espejo_vpn_a_defecto",
+          "espejo_vpn_n_defecto", "espejo_vpn_red_operador", "_url_vpn", "TZSP_PORT_DEF", "SURI_YAML",
+          "IDS_FW_BIN", "EVEBOX_YAML", "ESPEJO_UNIDAD")
 
 fallos = 0
 
@@ -73,11 +78,14 @@ def entorno():
           "hashlib": __import__("hashlib"), "urllib": types.SimpleNamespace(request=None),
           "ipaddress": __import__("ipaddress"), "subprocess": sub,
           "bitacora": lambda a, d="", quien=None, ip=None: bit.append((a, d)),
-          "ask": None}
+          "ask": None, "cargar_routers": lambda: [], "CFG": {"PORT": "5637"}, "IFACE_BASE": "ids-mon",
+          "CTX": types.SimpleNamespace(ip="203.0.113.5", peer="203.0.113.5")}
     for n in ARBOL.body:
         nom = getattr(n, "name", None) or (getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) else "")
         if nom in PIEZAS:
             exec(ast.get_source_segment(DASH, n), ns)
+    ns.update(SURI_YAML=os.path.join(td, "no-hay.yaml"), IDS_FW_BIN=os.path.join(td, "no-hay-fw"),
+              EVEBOX_YAML=os.path.join(td, "no-hay-evebox.yaml"))
     ns.update(OVPN_SH=os.path.join(td, "openvpn.sh"), OVPN_ETC=etc, OVPN_SRV=srv, OVPN_CCD=ccd,
               OVPN_LOG=os.path.join(td, "ovpn.log"), OVPN_BACKUPS=os.path.join(td, "backups"))
     return ns, td, srv, ccd, sub, bit

@@ -131,6 +131,7 @@ correr "instalador de OpenVPN en /root: tal cual, con huella y respaldo si habia
 correr "openvpn.sh sin menu: usuario, redes, quitar y borrar (nunca una cuenta real)" "$PY" tests/test_openvpn_cli.py
 correr "Ajustes > VPN: estado, redes validadas, respaldo, clave fuera de la bitacora" "$PY" tests/test_vpn_panel.py
 correr "espejo por la VPN desde la web: -a del operador, sin -P, respaldo, FIN rc, credenciales borradas" "$PY" tests/test_espejo_vpn.py
+correr "CSRF: un formulario de otra web no puede mandar acciones al panel (Origin/Referer contra Host)" "$PY" tests/test_csrf_origen.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

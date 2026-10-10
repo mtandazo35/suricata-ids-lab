@@ -38,7 +38,7 @@ PIEZAS = ("OVPN_MARCA_CLI", "ovpn_script_al_dia", "ovpn_asegurar_script", "_REPO
           "_vpn_celda_espejo", "_vpn_bloque_sensor", "sensor_modo", "_systemctl_env", "_lista_csv",
           "espejo_vpn_corriendo", "espejo_vpn_origenes", "_slot_iface", "espejo_vpn_a_defecto",
           "espejo_vpn_n_defecto", "espejo_vpn_red_operador", "_url_vpn", "TZSP_PORT_DEF", "SURI_YAML",
-          "IDS_FW_BIN", "EVEBOX_YAML", "ESPEJO_UNIDAD")
+          "IDS_FW_BIN", "EVEBOX_YAML", "ESPEJO_UNIDAD", "OVPN_UNIDAD")
 
 fallos = 0
 

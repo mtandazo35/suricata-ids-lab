@@ -16,6 +16,9 @@ Lo que protege, por orden de lo que costaria el fallo:
   - Que la vista previa (--plan, la usa el panel antes de confirmar) NO toque nada y diga
     lo mismo que despues se aplica; que --sin-registrar no pise la configuracion del panel.
   - Que con api-ssl y sin huella previa conecte (antes moria con un NameError).
+  - Que se pare en el PRIMER fallo (y sin respaldo /export no toque nada): seguir podia dejar
+    el espejo nuevo creado y el viejo sin apagar, dos espejos llenando el enlace.
+  - Que la clave llegue tal cual (espacios o comillas en los bordes son parte de ella).
 """
 import contextlib
 import ast
@@ -273,6 +276,52 @@ def main():
     r9.falla = "/ip/firewall/mangle/add"
     rc9, out9 = correr_salida(r9, tmp2, "-e", "vpn", "-r", "10.20.0.0/16", "--sin-registrar")
     check("si el router rechaza una orden, sale con error (el panel lo dice)", rc9 == 1 and "FALLO" in out9, (rc9, out9[-300:]))
+
+    # --- se para en el PRIMER fallo (hallazgo 9) ---------------------------------------------
+    # Con un espejo viejo hacia este sensor: si se creaba el nuevo y fallaba apagar el viejo,
+    # quedaban DOS espejos llenando el enlace. Ahora el viejo se apaga antes y, si falla, se para.
+    viejo = {".id": "*51", "action": "sniff-tzsp", "comment": "IDS", "chain": "forward",
+             "sniff-target": "100.64.0.1", "disabled": "false"}
+    r10 = Router(mangle=[dict(viejo)], filtro=[{".id": "*9", "action": "fasttrack-connection", "disabled": "false"}])
+    r10.falla = "/ip/firewall/mangle/set"          # el router no deja apagar el espejo viejo
+    rc10, out10 = correr_salida(r10, tmp2, "-e", "vpn", "-r", "10.20.0.0/16", "--sin-registrar")
+    hechas10 = [c for c, _a in r10.ordenes if not c.endswith("/print")]
+    check("si no se puede apagar el espejo viejo, NO se crea el nuevo (nunca dos espejos a la vez)",
+          rc10 == 1 and not reglas_creadas(r10), (rc10, hechas10))
+    check("  y se para ahi: ni el fasttrack ni nada de lo que quedaba",
+          hechas10[-1] == "/ip/firewall/mangle/set" and "/ip/firewall/filter/set" not in hechas10
+          and "Se para aqui" in out10, (hechas10, out10[-300:]))
+    r11 = Router(mangle=[dict(viejo)])
+    r11.falla = "/ip/firewall/mangle/add"            # la primera regla nueva falla
+    rc11, out11 = correr_salida(r11, tmp2, "-e", "vpn", "-r", "10.20.0.0/16", "--sin-registrar")
+    adds = [c for c, _a in r11.ordenes if c == "/ip/firewall/mangle/add"]
+    check("si falla la primera regla nueva, no se intentan las siguientes", rc11 == 1 and len(adds) == 1,
+          (rc11, [c for c, _a in r11.ordenes]))
+    r12 = Router(mangle=[dict(viejo)], lista=[{"list": "ids-vigilados", "address": "10.20.0.0/16"}])
+    r12.falla = "/export"                            # sin respaldo...
+    rc12, out12 = correr_salida(r12, tmp2, "-e", "vpn", "-r", "10.20.0.0/16", "--sin-registrar")
+    tocadas = [c for c, _a in r12.ordenes if not c.endswith("/print") and c != "/export"]
+    check("si el /export de respaldo falla, no se toca NADA del router",
+          rc12 == 1 and tocadas == [] and "no se toca nada" in out12, (rc12, tocadas, out12[-300:]))
+    r13 = Router(mangle=[dict(x, **{".id": "*%d" % (i + 1), "action": "sniff-tzsp"})
+                         for i, x in enumerate(reglas_creadas(r8))],
+                 lista=[{"list": "ids-vigilados", "address": "10.20.0.0/16"}],
+                 filtro=[{".id": "*9", "action": "fasttrack-connection", "src-address-list": "!ids-vigilados"}])
+    rc13, out13 = correr_salida(r13, tmp2, "-e", "vpn", "-r", "10.20.0.0/16", "--sin-registrar")
+    check("  (un router ya al dia sigue saliendo con exito)", rc13 == 0, (rc13, out13[-300:]))
+
+    # --- la clave tal cual (hallazgo 10): espacios o comillas en los bordes son parte de ella --
+    for linea, esperada in (('PASS=" con espacios "\n', " con espacios "), ("PASS=acaba-en-comilla'\n", "acaba-en-comilla'"),
+                            ("PASS='entre simples'\n", "entre simples"), ("PASS=sin comillas \r\n", "sin comillas "),
+                            ('PASS=""doble""\n', '"doble"')):
+        f = os.path.join(tmp2, "cred-clave")
+        io.open(f, "w", encoding="utf-8", newline="").write("HOST=100.64.0.2\nUSER=ids\n" + linea)
+        ns = {"__name__": "prueba"}
+        exec(compile(PROG, "<mkinit>", "exec"), ns)
+        with contextlib.redirect_stdout(io.StringIO()):
+            leida = ns["leer_credenciales"](f)["PASS"]
+        check("clave %r -> %r (solo se quita un par de comillas que la envuelva y el fin de linea)"
+              % (linea.rstrip("\r\n"), esperada), leida == esperada, leida)
 
     # --- api-ssl sin huella previa: antes moria con NameError (guardar_mk no existe aqui) ----
     tmp3 = tempfile.mkdtemp()

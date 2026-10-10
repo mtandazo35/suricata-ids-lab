@@ -116,7 +116,8 @@ sudo bash /root/openvpn.sh
 Orden en una caja nueva: one-liner (deja `/root/openvpn.sh`) -> opcion 1 -> pegar en el
 MikroTik el `/interface ovpn-client` que imprime -> opcion 3 con las redes de los abonados
 -> re-ejecutar el one-liner con `-t -m <IP del MikroTik en el tunel>`. Si el tunel aun no
-esta arriba, el resumen del instalador lo dice.
+esta arriba, el resumen del instalador lo dice. Lo mismo se hace sin consola desde el panel:
+ver [Todo desde la web](#o-todo-desde-la-web-ajustes--vpn).
 
 El modo VPN es el **por defecto** con `-t` (no hace falta `-e vpn`): recorta cada flujo a
 10.000 bytes en el receptor para no saturar el tunel, y las reglas que imprime para el
@@ -136,6 +137,39 @@ tunel**, que el instalador saca de la ruta hacia el MikroTik: por eso la VPN tie
 arriba al instalar (si no, lo avisa y deja el hueco). Si el espejo llegara por internet,
 `suricata-espejo` lo dice con el numero de paquetes descartados. `-e local` quita este
 firewall.
+
+### O todo desde la web: Ajustes → VPN
+
+Con el one-liner basico instalado, el resto se hace en **Ajustes → VPN** del panel, sin
+entrar por consola (por debajo usa el mismo `/root/openvpn.sh` y `suricata-mikrotik-init`):
+
+1. **Instalar el servidor OpenVPN** (mismos parametros que arriba: tunel `100.64.0.0/24`, el
+   sensor es `100.64.0.1`). La ventana muestra el avance.
+2. **Agregar un MikroTik**: un usuario VPN por router. Te da el `/interface ovpn-client`
+   para v6 y v7 listo para pegar; la clave **solo se muestra esa vez**. Ahi mismo se le
+   asignan las **redes de sus abonados** (agregar o quitar una red reinicia OpenVPN: los
+   tuneles se cortan unos segundos).
+3. **Dar de alta su API** (en su fila, cuando esta conectado): usuario, clave y puerto. Queda
+   como router del panel con su IP del tunel y el envio a cuarentena **apagado**.
+4. **Montar el espejo**: primero una **vista previa** con las lineas exactas que se crearian o
+   cambiarian en el router (lista `ids-vigilados`, ida y vuelta en `forward` con
+   `connection-bytes=0-10000`, DNS aparte, apagar espejos viejos hacia este sensor y sacar la
+   lista del fasttrack). Lo que se ve es lo que se aplica. Al confirmar se **respalda el
+   firewall del router** y se aplica; repetirlo no duplica nada.
+5. **Recibir el espejo por la VPN** (debajo de la tabla): el panel calcula las opciones
+   (`-t -e vpn -m <IPs de los MikroTik en el tunel> -n <sus redes>`), ensena el comando exacto
+   y **relanza el instalador** (baja a `/root/install-suricata.sh`). Antes respalda en
+   `/root/backups/` lo que va a reescribir (`suricata.yaml`, receptor, firewall de
+   solo-tunel). **Nunca pasa `-P`**: las claves no cambian. El avance se ve en vivo y aguanta
+   el reinicio del panel.
+
+> **Para no quedarte fuera.** En modo VPN el panel y EveBox se cierran por la interfaz de
+> internet (ver arriba). Por eso `-a` viene relleno con **tu IP** (la que llega al sensor;
+> con proxy inverso, la del proxy). Si la quitas, o si la web no vuelve al terminar, entra
+> por la VPN: `http://100.64.0.1:5637`. SSH no se toca nunca.
+
+Cada paso queda en la **Bitacora**. La vista previa del espejo tambien se puede sacar por
+consola: `suricata-mikrotik-init -k /root/mk.conf -s 100.64.0.1 -e vpn -r <redes> --plan`.
 
 ### Y en el MikroTik, dos lineas
 
@@ -283,7 +317,10 @@ Se puede correr aparte en cualquier momento, sin reinstalar:
 ```bash
 suricata-mikrotik-init -k /root/mk.conf -s <IP-del-sensor> -e vpn -r 192.168.0.0/19
 suricata-mikrotik-init -k /root/mk.conf -s <IP-del-sensor> --solo-registrar   # sin tocar el firewall
+suricata-mikrotik-init -k /root/mk.conf -s <IP-del-sensor> -r 192.168.0.0/19 --plan   # vista previa, no toca nada
 ```
+
+Si el router rechaza algun cambio, sale con codigo 1 (no da por bueno un espejo a medias).
 
 > **Si el router usa `api-ssl` sin certificado**, la herramienta lo avisa: RouterOS negocia
 > entonces Diffie-Hellman anonimo, o sea el canal va **cifrado pero no autenticado** y no
@@ -433,6 +470,10 @@ abriendo el puerto solo a tu IP.
 - Detras de un proxy inverso (Nginx Proxy Manager / openresty) apunta al backend por
   **IP literal** (`http://<IP>:5637`), no por hostname, y en Advanced usa
   `proxy_http_version 1.1;` con `proxy_set_header Connection "";` para que no arrastre latencia.
+- **Proteccion CSRF**: el panel rechaza (403) todo POST cuyo `Origin` o `Referer` sea de otro
+  sitio, haya usuarios o no. Detras de un proxy, este tiene que pasar el `Host` original (o
+  `X-Forwarded-Host`), como hace Nginx Proxy Manager; si no, los formularios del propio panel
+  se rechazan. Las peticiones sin esas cabeceras (curl, scripts) siguen entrando.
 
 ## Apartado de estadisticas (panel web)
 
@@ -442,9 +483,22 @@ Ademas de EveBox, el instalador levanta un **panel de estadisticas** propio en s
 - **En vivo**: el reporte grafico (puertos atacados, IPs origen/destino, linea de tiempo,
   tabla de detalle) siempre al dia; se regenera solo si el ultimo tiene mas de 5 min.
 - **Historico**: los 20 reportes mas recientes, cada uno abrible; el resto se borra solo.
-- **Login basico** (usuario `admin`, clave aleatoria que imprime el instalador y guarda en
+- **Login** (usuario `admin`, clave aleatoria que imprime el instalador y guarda en
   `/etc/suricata-dashboard.conf`). Se sirve por HTTP plano: exponlo solo por VPN o detras
   de tu proxy, o abre el puerto solo a tu IP.
+- **Usuarios y roles** (administrador, operador, solo lectura), en **Perfil**. El **usuario
+  de entrar no se cambia nunca**, tampoco el `admin`: de una cuenta se cambia la clave, el
+  nombre a mostrar, el correo, el rol y la foto, o se elimina. Si hace falta otro usuario,
+  se crea uno nuevo y se borra el viejo.
+- **Reputacion de tus IPs publicas** (AbuseIPDB y listas negras, cada 6 h). **Detectar del
+  MikroTik** las trae del router: solo las direcciones de sus **interfaces WAN** (las de la
+  interface-list WAN de Ajustes mas la de la ruta por defecto activa) y los pools de las
+  reglas **srcnat**. Sin ninguna de las dos, trae solo los pools y avisa. Las LAN no entran, aunque usen rangos que parecen publicos. **Solo
+  anade, nunca borra**: lo declarado antes que ya no sale como WAN se avisa y queda marcado
+  para **Quitar marcadas**. Limite: una LAN que se NATea solo por `out-interface` (sin
+  `src-address`) no se distingue de la WAN; revisa lo que trae.
+- **Ajustes → VPN**: la VPN de los MikroTik y el espejo, desde la web. Ver
+  [Todo desde la web](#o-todo-desde-la-web-ajustes--vpn).
 
 ```
 http://<IP>:5637      (usuario admin, la clave la imprime el instalador)

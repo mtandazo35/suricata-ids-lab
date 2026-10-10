@@ -326,9 +326,11 @@ def main():
     adm = ns["reputacion_page"](es_admin=True)
 
     # --- el resultado de detectar/agregar/quitar llega en el modal, no se pierde ---
-    # Esas acciones redirigen a /reputacion?msg=...; el aviso de "no hay interfaces WAN"
-    # tiene que verse, y en el modal del panel (aviso()), no en alert() ni en una franja.
-    # El texto viene de la URL: no puede cerrar el <script> en el que va.
+    # Esas acciones redirigen a /reputacion?msg=<codigo> y el GET lo traduce al texto
+    # (eso, y que un texto inventado en la URL no se pinte, lo prueba
+    # test_detectar_publicas.py). El aviso de "no hay interfaces WAN" tiene que verse, y
+    # en el modal del panel (aviso()), no en alert() ni en una franja. El texto puede
+    # traer cosas del router (un error, una entrada): no puede cerrar el <script>.
     raro = "Sin interfaces WAN </script><script>alert(1)// crea la lista"
     try:
         pm = ns["reputacion_page"](es_admin=True, msg=raro, modal=True)
@@ -347,6 +349,26 @@ def main():
     check("  sin franja de color ni alert() del navegador",
           "class=banner style='background:#e34948" not in pm and "alert(" not in pm.replace(
               _arg, ""), "")
+    # Detectar avisa de las que ya no salen y las deja MARCADAS: el boton de quitar tiene
+    # que nacer habilitado con la cuenta, y solo esas casillas marcadas. Nada se borra solo.
+    ns["guardar_publicas_de"]("r1", "200.0.0.0/24\n200.0.1.7")
+    try:
+        pmar = ns["reputacion_page"](es_admin=True, marcar={"r1": ["200.0.1.7"],
+                                                             "otro": ["200.0.0.0/24"]})
+    except TypeError as ex:
+        pmar = "ERROR " + str(ex)
+    _cas = re.findall(r"<input type=checkbox name=entrada value='([^']+)'[^>]*>", pmar)
+    _marc = re.findall(r"<input type=checkbox name=entrada value='([^']+)'[^>]* checked[^>]*>",
+                       pmar)
+    check("las que Detectar ya no trae llegan marcadas (solo esas, solo de su nodo)",
+          sorted(_cas) == ["200.0.0.0/24", "200.0.1.7"] and _marc == ["200.0.1.7"],
+          (_cas, _marc, pmar[:120]))
+    _bq = re.search(r"<button type=submit class=delbtn[^>]*>[^<]*</button>", pmar)
+    check("  y 'Quitar marcadas' nace habilitado con la cuenta (y pide confirmacion)",
+          _bq is not None and " disabled" not in _bq.group(0)
+          and "Quitar marcadas (1)" in _bq.group(0) and "ask(this" in _bq.group(0),
+          _bq.group(0) if _bq else pmar[:120])
+    ns["guardar_publicas_de"]("r1", "200.0.0.0/24")
     check("las IPs declaradas se ven como fichas, no en un textarea",
           "pchip" in adm and "<textarea" not in adm, "textarea=%s" % ("<textarea" in adm))
     check("se agregan de una en una, en un campo pequeño",

@@ -120,6 +120,35 @@ def main():
           'ip saddr { 203.0.113.0/24, 198.51.100.7 } tcp dport { 5637, 5636 } accept' in rs2
           and rs2.index("accept") < rs2.index("tcp dport { 5637, 5636 } counter drop"), rs2)
 
+    # ---------- con UFW activo: la web se abre por el tunel, y solo por el tunel ----------
+    # La tabla propia (policy accept, drop solo por la WAN) no cierra el tunel; UFW (deny por
+    # defecto) si: solo abria la web a -a, y "entra por la VPN" no entraba nadie.
+    def con_ufw(td_):
+        ejecutable(td_ + "/bin/ufw", "#!/bin/sh\n"
+                   "if [ \"$1\" = status ]; then echo 'Status: active'; cat \"%s/ufw.rules\" 2>/dev/null; exit 0; fi\n"
+                   "echo \"$*\" >> \"%s/ufw.log\"\nexit 0\n" % (td_, td_))
+    td5 = entorno("100.64.0.2 dev tun0 src 100.64.0.1 uid 0")
+    con_ufw(td5)
+    r5 = correr(td5)
+    ufw5 = open(td5 + "/ufw.log").read() if os.path.exists(td5 + "/ufw.log") else ""
+    check("UFW activo: se abre la web (panel y EveBox) en la interfaz del tunel",
+          r5.returncode == 0 and "allow in on tun0 to any port 5637 proto tcp" in ufw5
+          and "allow in on tun0 to any port 5636 proto tcp" in ufw5, (ufw5, r5.stdout[-300:], r5.stderr[-300:]))
+    check("  y en ningun otro sitio: ni a internet ni a todo el mundo",
+          all(" in on tun0 " in l for l in ufw5.splitlines() if "port 5637" in l or "port 5636" in l), ufw5)
+    td6 = entorno("100.64.0.2 dev tun0 src 100.64.0.1 uid 0")
+    con_ufw(td6)
+    open(td6 + "/ufw.rules", "w").write("5637/tcp on tun0           ALLOW       Anywhere\n")
+    correr(td6)
+    ufw6 = open(td6 + "/ufw.log").read() if os.path.exists(td6 + "/ufw.log") else ""
+    check("  re-ejecutar no la duplica", "port 5637" not in ufw6 and "port 5636" in ufw6, ufw6)
+    td7 = entorno("100.64.0.2 via 10.0.0.4 dev eth0 src 198.51.100.149")
+    con_ufw(td7)
+    r7 = correr(td7)
+    ufw7 = open(td7 + "/ufw.log").read() if os.path.exists(td7 + "/ufw.log") else ""
+    check("  con la VPN caida no se abre nada (no hay tunel) y se avisa",
+          "port 5637" not in ufw7 and "la web no se abre por el tunel" in r7.stdout, (ufw7, r7.stdout[-300:]))
+
     # ---------- VPN caida ----------
     td3 = entorno("100.64.0.2 via 10.0.0.4 dev eth0 src 205.235.2.149")
     r3 = correr(td3)

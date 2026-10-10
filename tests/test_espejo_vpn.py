@@ -15,9 +15,17 @@ Lo que se protege:
     respalda ni toca; aplicar respalda ANTES; las credenciales van en un archivo 600 en
     /root que se borra aunque falle, y la clave no va en la linea de comandos;
   - dar de alta su API: HOST = IP del tunel, envio apagado, la clave fuera de la bitacora;
-  - las rutas son solo de admin.
+    la interfaz, la que le dara -m (no la primera libre);
+  - cada interfaz, de su router: el plan corrige los nodos (el de -m toma la suya; el que no
+    esta en -m pierde la que pasa a otro y su envio a cuarentena) y se guarda al lanzar;
+  - uno a la vez: dos Lanzar a la vez (dos hilos) lanzan UN instalador; unidad de nombre fijo;
+  - el respaldo permite volver atras (programas, config del panel, EveBox...) y es 600;
+  - el instalador reinicia el panel si ya corria; el log de la web va con las claves tapadas;
+  - el actualizador respalda y restaura tambien suricata-mikrotik-init (con dash);
+  - las rutas son solo de admin (ejecutando el handler con una sesion de solo lectura).
 """
 import ast
+import contextlib
 import html
 import io
 import ipaddress
@@ -29,8 +37,11 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import types
+import urllib.parse
+from http.cookies import SimpleCookie
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = open(os.path.join(RAIZ, "install-suricata.sh"), encoding="utf-8").read()
@@ -49,7 +60,40 @@ PIEZAS = {
     "espejo_vpn_args", "espejo_vpn_comando", "_url_vpn", "espejo_vpn_plan", "espejo_vpn_corriendo",
     "espejo_vpn_respaldo", "espejo_vpn_bajar_instalador", "espejo_vpn_lanzar", "espejo_vpn_avance",
     "_router_libre", "router_de_ip", "vpn_mk_alta", "vpn_mk_espejo", "_vpn_celda_espejo",
-    "_vpn_bloque_sensor"}
+    "_vpn_bloque_sensor",
+    "OVPN_UNIDAD", "OVPN_CERROJO", "ESPEJO_CERROJO", "_UnaVez", "_RE_CLAVE_LOG", "enmascarar_claves",
+    "espejo_vpn_reasignar", "espejo_vpn_nodos_txt", "espejo_vpn_nodos_aplicar", "_iface_en_uso",
+    "_iface_vpn", "rid_por_iface", "ovpn_instalar"}
+
+
+class OsEspia(object):
+    """os de verdad, pero apunta con que permisos se crea cada archivo (chmod y os.open).
+    En Windows el modo real no se puede medir; asi se mide lo que el codigo PIDE, en el
+    momento en que lo pide, en cualquier sistema."""
+
+    def __init__(self):
+        self.modos = {}      # ruta -> ultimo modo pedido (chmod u os.open)
+        self.creado = {}     # ruta -> modo con el que se CREO por os.open (si se creo asi)
+
+    def __getattr__(self, n):
+        return getattr(os, n)
+
+    @staticmethod
+    def _k(p):
+        return os.path.normcase(os.path.abspath(p))
+
+    def chmod(self, p, m, *a, **k):
+        self.modos[self._k(p)] = m
+        return os.chmod(p, m, *a, **k)
+
+    def open(self, p, flags, mode=0o777, *a, **k):
+        if flags & os.O_CREAT:
+            self.modos[self._k(p)] = mode
+            self.creado.setdefault(self._k(p), mode)
+        return os.open(p, flags, mode, *a, **k)
+
+    def modo(self, p):
+        return self.modos.get(self._k(p))
 
 fallos = 0
 
@@ -76,6 +120,10 @@ class Sub(object):
         self.mk_lanza = None        # excepcion a lanzar al ejecutar suricata-mikrotik-init
         self.mk_visto = []          # [(argv, contenido del archivo de credenciales, su modo)]
         self.systemd_run = []
+        self.systemd_rc = 0         # 1 = systemd-run falla (p.ej. la unidad ya existe)
+        self.espia = None           # OsEspia: con que permisos se pidio cada archivo
+        self.routers_al_lanzar = None   # los routers guardados en el momento de systemd-run
+        self.leer_routers = None
 
     def call(self, cmd, **k):
         if "suricata-ids-fw" in cmd:
@@ -95,10 +143,17 @@ class Sub(object):
         if cmd and cmd[0] == "systemd-run":
             self.systemd_run.append(list(cmd))
             self.orden.append("systemd-run")
+            if self.leer_routers:
+                self.routers_al_lanzar = self.leer_routers()
+            if self.systemd_rc:
+                return types.SimpleNamespace(returncode=self.systemd_rc, stdout="",
+                                             stderr="Unit suricata-espejo-vpn.service already exists.")
             return r()
         if cmd and cmd[0].endswith("suricata-mikrotik-init"):
             cred = cmd[cmd.index("-k") + 1]
-            self.mk_visto.append((list(cmd), open(cred, encoding="utf-8").read(), os.stat(cred).st_mode, cred))
+            pedido = self.espia.modo(cred) if self.espia else None
+            self.mk_visto.append((list(cmd), open(cred, encoding="utf-8", newline="").read(),
+                                  (pedido, os.stat(cred).st_mode), cred))
             self.orden.append("mkinit" + (" plan" if "--plan" in cmd else ""))
             if self.mk_lanza:
                 raise self.mk_lanza
@@ -106,7 +161,7 @@ class Sub(object):
         return r()
 
 
-def entorno():
+def entorno(routers0=None, usuarios=("a", "b")):
     td = tempfile.mkdtemp()
     etc = os.path.join(td, "etc", "openvpn")
     srv = os.path.join(etc, "server")
@@ -115,20 +170,25 @@ def entorno():
     os.makedirs(ccd)
     open(os.path.join(srv, "server.conf"), "w").write(
         "local 192.0.2.10\nport 1194\nproto tcp\ndev tun\nserver 100.64.0.0 255.255.255.0\n")
-    open(os.path.join(ccd, "vpnaaaaaaaaaaaa"), "w").write(
-        "ifconfig-push 100.64.0.2 255.255.255.0\niroute 10.20.0.0 255.255.0.0\n")
-    open(os.path.join(ccd, "vpnbbbbbbbbbbbb"), "w").write(
-        "ifconfig-push 100.64.0.3 255.255.255.0\niroute 172.30.0.0 255.255.0.0\n")
+    if "a" in usuarios:
+        open(os.path.join(ccd, "vpnaaaaaaaaaaaa"), "w").write(
+            "ifconfig-push 100.64.0.2 255.255.255.0\niroute 10.20.0.0 255.255.0.0\n")
+    if "b" in usuarios:
+        open(os.path.join(ccd, "vpnbbbbbbbbbbbb"), "w").write(
+            "ifconfig-push 100.64.0.3 255.255.255.0\niroute 172.30.0.0 255.255.0.0\n")
     open(os.path.join(srv, "openvpn-status.log"), "w").write(
         "TITLE,OpenVPN 2.6\n"
         "CLIENT_LIST,vpnaaaaaaaaaaaa,198.51.100.7:51234,100.64.0.2,,5242880,1048576,2026-10-10 17:00:00,1791669600,vpnaaaaaaaaaaaa\n")
     orden = []
     sub = Sub(orden)
     bit = []
-    routers = [{"id": "r1", "nombre": "", "iface": "ids-mon", "HOST": "", "USER": "", "PASS": "", "ENABLED": "0"}]
-    ns = {"os": os, "re": re, "time": time, "json": json, "html": html, "hashlib": __import__("hashlib"),
-          "ipaddress": ipaddress, "subprocess": sub,
-          "urllib": types.SimpleNamespace(request=None),
+    routers = [dict(r) for r in routers0] if routers0 is not None else [
+        {"id": "r1", "nombre": "", "iface": "ids-mon", "HOST": "", "USER": "", "PASS": "", "ENABLED": "0"}]
+    espia = OsEspia()
+    sub.espia = espia
+    ns = {"os": espia, "re": re, "time": time, "json": json, "html": html, "hashlib": __import__("hashlib"),
+          "ipaddress": ipaddress, "subprocess": sub, "threading": threading,
+          "urllib": types.SimpleNamespace(request=None, parse=urllib.parse),
           "bitacora": lambda a, d="", quien=None, ip=None: bit.append((a, d)),
           "CFG": {"PORT": "5637"}, "CTX": types.SimpleNamespace(ip="203.0.113.5", peer="203.0.113.5")}
     for n in ARBOL.body:
@@ -147,6 +207,7 @@ def entorno():
               IDS_FW_BIN=os.path.join(td, "suricata-ids-fw"), EVEBOX_YAML=os.path.join(td, "evebox.yaml"),
               INSTALADOR_LOCAL=os.path.join(td, "install-suricata.sh"),
               ESPEJO_LOG=os.path.join(td, "espejo.log"),
+              ESPEJO_CERROJO=os.path.join(td, "espejo.lock"), OVPN_CERROJO=os.path.join(td, "ovpn.lock"),
               ESPEJO_RESPALDAR=(os.path.join(resp, "suricata.yaml"), os.path.join(resp, "tzsp-decap.service"),
                                 os.path.join(resp, "no-existe")))
     open(ns["OVPN_SH"], "w").write("#!/bin/bash\nagregar_redes() { :; }\n")
@@ -159,6 +220,7 @@ def entorno():
         return routers
     ns.update(cargar_routers=cargar_routers, guardar_routers=guardar_routers,
               cargar_mk_de=lambda r: dict(r or {}))
+    sub.leer_routers = cargar_routers
     return ns, td, sub, bit, routers, orden
 
 
@@ -277,8 +339,9 @@ def main():
           open(ns["INSTALADOR_LOCAL"], "rb").read() == INST, "")
     c = sub.systemd_run[0]
     i = c.index("/bin/bash")
-    check("  unidad propia de systemd, con log y sin shell para los argumentos",
-          c[1] == "--unit" and c[2].startswith("suricata-espejo-vpn-")
+    check("  unidad propia de systemd de nombre FIJO (systemd rechaza un segundo) y --collect, con log "
+          "y sin shell para los argumentos",
+          c[1] == "--unit" and c[2] == "suricata-espejo-vpn" and "--collect" in c[:i]
           and "StandardOutput=append:" + ns["ESPEJO_LOG"] in c and c[i + 1] == "-c"
           and c[i + 3] == ns["INSTALADOR_LOCAL"] and c[i + 4:] == args and "-P" not in c, c)
     check("  bitacora: quien, con que opciones, huella del instalador y respaldo",
@@ -356,14 +419,38 @@ def main():
     check("  devuelve lo que se haria y avisa si el sensor aun no lo recibe",
           "VISTA PREVIA" in msg and "Recibir el espejo por la VPN" in msg, msg)
     check("  la clave va en el archivo, nunca en la linea de comandos",
-          "PASS=S3creta!" in cont and "HOST=100.64.0.2" in cont and not any("S3creta" in x for x in argv), (argv, cont))
+          'PASS="S3creta!"' in cont and "HOST=100.64.0.2" in cont and not any("S3creta" in x for x in argv), (argv, cont))
     check("  el archivo esta en /root (aqui, su doble), no en /tmp", os.path.dirname(cred) == ns["CRED_DIR"], cred)
+    # lo que el codigo PIDE (medible en cualquier sistema) y, donde se puede, el modo real
+    check("  con permisos 600 pedidos ANTES de ejecutar la herramienta", modo_c[0] == 0o600, modo_c)
     if os.name == "posix":
-        check("  con permisos 600 (modo real)", (modo_c & 0o077) == 0, oct(modo_c))
-    else:
-        check("  con permisos 600 (no medible en Windows: se comprueba la intencion)",
-              "os.chmod(cred, 0o600)" in DASH, "")
+        check("  y en disco nadie mas lo puede leer (modo real)", (modo_c[1] & 0o077) == 0, oct(modo_c[1]))
     check("  y se borra al terminar", not os.path.exists(cred), cred)
+
+    # hallazgo 10: la clave llega intacta a la herramienta (espacios y comillas en los bordes)
+    i_mk = SRC.index("cat > /usr/local/bin/suricata-mikrotik-init <<'MKINIT'")
+    prog_mk = SRC[i_mk:].split("\n", 1)[1].split("\nMKINIT\n", 1)[0]
+    ns_mk = {"__name__": "prueba"}
+    exec(compile(prog_mk, "<mkinit>", "exec"), ns_mk)
+    for rara in (" empieza-con-espacio", "acaba-en-espacio ", '"entre-comillas"', "'simples'", 'a"b', "x'"):
+        rr = dict(routers[0], PASS=rara)
+        n0 = len(sub.mk_visto)
+        ns["mkinit_correr"](rr, ["--plan"])
+        cont_r = sub.mk_visto[n0][1] if len(sub.mk_visto) > n0 else ""
+        fcred = os.path.join(td, "cred-prueba")
+        io.open(fcred, "w", encoding="utf-8", newline="").write(cont_r)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):   # el aviso de permisos (en Windows siempre)
+                leida = ns_mk["leer_credenciales"](fcred).get("PASS")
+        except SystemExit as ex:
+            leida = "SALIO: %s" % ex
+        check("  clave %r: el panel la escribe y suricata-mikrotik-init la lee IGUAL" % rara, leida == rara,
+              (leida, cont_r))
+    n_r = len(routers)
+    ok_a, msg_a = ns["vpn_mk_alta"]("vpnbbbbbbbbbbbb", "", "ids", " 'clave rara\" ", "", False)
+    check("  y vpn_mk_alta acepta claves asi (no es un caso imposible) y las guarda tal cual",
+          ok_a and routers[-1]["PASS"] == " 'clave rara\" ", (msg_a, routers[-1:]))
+    del routers[n_r:]
 
     # aplicar: respaldo ANTES; si falla el respaldo, no se toca
     del orden[:]
@@ -411,10 +498,38 @@ def main():
     io.open(root2 + "/suricata-mikrotik-init", "w", encoding="utf-8", newline="\n").write("# vieja\n")
     trozo = ("set -u\nlog(){ echo \"LOG $*\"; }\nTMP=%s/instalador.sh\n" % root2 + upd[f_ini:f_fin]
              + upd[b_ini:b_fin]).replace("/usr/local/bin/suricata-mikrotik-init", root2 + "/suricata-mikrotik-init")
-    ru = subprocess.run(["bash", "-s"], input=trozo, capture_output=True, text=True, encoding="utf-8")
-    check("el actualizador renueva suricata-mikrotik-init (el programa, no la linea que lo busca)",
+    # el actualizador es #!/bin/sh: en Debian, dash. Se corre con dash si esta (bash si no), y
+    # en bytes: con text=True, en Windows, el \n se convertiria y el trozo no seria el real
+    shell = shutil.which("dash") or "bash"
+    ru = subprocess.run([shell, "-s"], input=trozo.encode("utf-8"), capture_output=True)
+    check("el actualizador renueva suricata-mikrotik-init (el programa, no la linea que lo busca) [%s]"
+          % os.path.basename(shell),
           ru.returncode == 0 and io.open(root2 + "/suricata-mikrotik-init", encoding="utf-8").read() == prog,
           (ru.stdout[-300:], ru.stderr[-300:]))
+
+    # hallazgo 12: el actualizador la respalda antes y la restaura en el rollback, como al resto
+    root3 = tempfile.mkdtemp().replace("\\", "/")
+    os.makedirs(root3 + "/bin")
+    os.makedirs(root3 + "/bkp")
+    for f in ("suricata-dashboard", "suricata-html-report", "suricata-panel-update", "suricata-mikrotik-init"):
+        io.open(root3 + "/bin/" + f, "w", encoding="utf-8", newline="\n").write("# vieja " + f + "\n")
+    b1 = upd.index('mkdir -p "$BKP"\n') + len('mkdir -p "$BKP"\n')
+    b2 = upd.index("\ndone\n", b1) + 6
+    r1_ = upd.index("for f in", upd.index("ROLLBACK desde"))
+    r2_ = upd.index("\n  done\n", r1_) + 8
+    resp_sh = ("set -e\nBKP=%s/bkp\n" % root3 + upd[b1:b2]
+               + "for f in %s/bin/*; do echo '# nueva' > \"$f\"; done\n" % root3
+               + upd[r1_:r2_] + "echo FIN\n").replace("/usr/local/bin/", root3 + "/bin/")
+    rr_ = subprocess.run([shell, "-s"], input=resp_sh.encode("utf-8"), capture_output=True)
+    check("el actualizador respalda suricata-mikrotik-init antes de renovarla [%s]" % os.path.basename(shell),
+          os.path.isfile(root3 + "/bkp/suricata-mikrotik-init")
+          and io.open(root3 + "/bkp/suricata-mikrotik-init", encoding="utf-8").read() == "# vieja suricata-mikrotik-init\n",
+          (rr_.stdout[-200:], rr_.stderr[-200:]))
+    check("  y el rollback la restaura con el resto (y sigue aunque falte algun programa)",
+          b"FIN" in rr_.stdout
+          and io.open(root3 + "/bin/suricata-mikrotik-init", encoding="utf-8").read() == "# vieja suricata-mikrotik-init\n"
+          and io.open(root3 + "/bin/suricata-dashboard", encoding="utf-8").read() == "# vieja suricata-dashboard\n",
+          (rr_.stdout[-200:], rr_.stderr[-200:]))
 
     # ======================= 4) tarjeta y rutas =======================
     ns["CTX"] = types.SimpleNamespace(ip="203.0.113.5", peer="203.0.113.5")
@@ -424,14 +539,11 @@ def main():
     check("  y debajo, recibir el espejo por la VPN con -a y -n editables",
           "vpnSensorPlan()" in c and "id=vpn_a" in c and "id=vpn_n" in c, "")
     check("  sin dialogos nativos", not re.search(r"(?<![A-Za-z0-9_.])(confirm|alert|prompt)\s*\(", c), "")
-    i = DASH.index('if ruta in ("/vpn/mk-alta", "/vpn/mk-espejo-plan", "/vpn/mk-espejo-aplicar",')
-    check("las rutas nuevas son solo de admin", "if not self._admin():" in DASH[i:i + 500], "")
-    j = DASH.index('if path == "/vpn/sensor-log":')
-    check("  y el avance tambien", "if not self._admin():" in DASH[j:j + 200], "")
-    check("  lo que se lanza se recalcula en el servidor (no viene hecho del navegador)",
-          'espejo_vpn_lanzar(p["args"]' in DASH[i:i + 2500], "")
-    check("la IP que llega al socket queda en el contexto (es la que ve el firewall)",
-          "CTX.peer = self._peer_ip()" in DASH, "")
+    prueba_rutas()
+    prueba_nodos()
+    prueba_uno_a_la_vez()
+    prueba_respaldo_y_reinicio()
+    prueba_claves_en_el_log()
 
     # ======================= 5) el JS del avance aguanta el reinicio =======================
     if shutil.which("node"):
@@ -450,6 +562,359 @@ def main():
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0
+
+
+INSTALADOR_FALSO = b"#!/usr/bin/env bash\n# instalador\ncat > /usr/local/bin/suricata-dashboard <<'DASH'\nDASH\n"
+
+
+class RespFalsa(object):
+    def __init__(self, b_):
+        self.b = b_
+
+    def read(self):
+        return self.b
+
+
+def _bajar(ns, cuerpo=INSTALADOR_FALSO, antes=None):
+    def urlopen(u, timeout=0):
+        if antes:
+            antes()
+        return RespFalsa(cuerpo)
+    ns["urllib"] = types.SimpleNamespace(request=types.SimpleNamespace(urlopen=urlopen), parse=urllib.parse)
+
+
+def _lanzar(ns, args, nodos):
+    """espejo_vpn_lanzar con las correcciones del plan (el codigo viejo no las aceptaba)."""
+    try:
+        return ns["espejo_vpn_lanzar"](args, quien="admin", nodos=nodos)
+    except TypeError:
+        return ns["espejo_vpn_lanzar"](args, quien="admin")
+
+
+MODO_LOCAL = {"tzsp": True, "allow": ["192.0.2.1"], "bytes": 0, "puerto": 37008, "home_net": ["10.0.0.0/8"],
+              "fw": False, "gestion": [], "web": True, "evebox_puerto": "5636", "modo": "local"}
+ENV_LOCAL = "Environment=TZSP_PORT=37008 TZSP_ALLOW=192.0.2.1 TZSP_MAP=192.0.2.1=ids-in TZSP_BYTES=0\n"
+
+
+def _cada_interfaz_de_su_router(ns, mapa, nombre):
+    """Tras lanzar: la alerta que entre por la interfaz de cada origen de -m se atribuye al router
+    con ESE HOST (o a ninguno si ese MikroTik no esta dado de alta), nunca a otro."""
+    rs = ns["cargar_routers"]()
+    por_id = {r["id"]: r for r in rs}
+    malos = []
+    for o in mapa:
+        rid = ns["rid_por_iface"](o["iface"])
+        if rid and por_id.get(rid, {}).get("HOST") != o["ip"]:
+            malos.append((o["iface"], o["ip"], rid, por_id.get(rid, {}).get("HOST")))
+        # router_por_iface no tiene el atajo de "un solo nodo": mira el registro tal cual
+        r = next((x for x in rs if x.get("iface") == o["iface"]), None)
+        if r and r.get("HOST") != o["ip"]:
+            malos.append((o["iface"], o["ip"], r.get("id"), r.get("HOST")))
+    check("%s: tras lanzar, cada interfaz de -m es del router con ese HOST (o de ninguno)" % nombre,
+          not malos, malos)
+
+
+def prueba_nodos():
+    """Hallazgo 1: al pasar a modo VPN, ningun nodo se queda con la interfaz de otro."""
+    local = {"id": "r1", "nombre": "Local", "iface": "ids-mon", "HOST": "192.0.2.1", "USER": "u",
+             "PASS": "p", "ENABLED": "1"}
+    otro = {"id": "r9", "nombre": "Otro local", "iface": "ids-mon2", "HOST": "192.0.2.9", "USER": "u",
+            "PASS": "p", "ENABLED": "1"}
+
+    # --- Escenario A: MikroTik local + dos MikroTik en la VPN SIN API (con uno y con dos nodos locales)
+    for extra, nombre in (([], "A (un nodo local)"), ([otro], "A (dos nodos locales)")):
+        ns, td, sub, bit, routers, orden = entorno([local] + extra)
+        sub.env = ENV_LOCAL
+        _bajar(ns)
+        est = ns["ovpn_estado"]()
+        p = ns["espejo_vpn_plan"]("10.20.0.0/16", "203.0.113.5/32", "203.0.113.5", est=est, modo=MODO_LOCAL,
+                                  routers=ns["cargar_routers"]())
+        txt = " ".join(p.get("nodos_txt") or [])
+        check("%s: la vista previa ensena que el nodo local pierde ids-mon y su envio" % nombre,
+              p["ok"] and "Local" in txt and "ids-mon" in txt and "cuarentena" in txt, p.get("nodos_txt"))
+        check("  y no lleva claves (va al navegador)", "PASS" not in json.dumps(p) and '"p"' not in json.dumps(p.get("nodos")), "")
+        ok, msg = _lanzar(ns, p["args"], p.get("nodos"))
+        check("  lanzado", ok, msg)
+        _cada_interfaz_de_su_router(ns, p["mapa"], nombre)
+        r1 = next(r for r in ns["cargar_routers"]() if r["id"] == "r1")
+        check("  el nodo local, que ya no manda espejo, queda sin interfaz y con el envio apagado",
+              r1["iface"] == "" and r1["ENABLED"] == "0" and r1["PASS"] == "p", r1)
+        check("  y se guardo ANTES de lanzar el instalador (con el respaldo hecho)",
+              sub.routers_al_lanzar is not None
+              and next(r for r in sub.routers_al_lanzar if r["id"] == "r1")["iface"] == "", sub.routers_al_lanzar)
+        check("  la bitacora dice que nodos se corrigieron", "r1:ids-mon->-" in bit[-1][1], bit[-1:])
+
+    # --- Escenario B: MikroTik local + "Dar de alta su API" de uno de la VPN (con uno y con dos en la VPN)
+    for usuarios, nombre in ((("a",), "B (un MikroTik en la VPN)"), (("a", "b"), "B (dos en la VPN)")):
+        ns, td, sub, bit, routers, orden = entorno([local], usuarios=usuarios)
+        sub.env = ENV_LOCAL
+        ns["mk_conectar"] = lambda d, timeout=6: types.SimpleNamespace(close=lambda: None)
+        _bajar(ns)
+        ok, msg = ns["vpn_mk_alta"]("vpnaaaaaaaaaaaa", "Nodo Norte", "ids", "x", "", False, quien="admin")
+        est = ns["ovpn_estado"]()
+        p = ns["espejo_vpn_plan"]("10.20.0.0/16", "203.0.113.5/32", "203.0.113.5", est=est, modo=MODO_LOCAL,
+                                  routers=ns["cargar_routers"]())
+        nuevo = next(r for r in routers if r.get("HOST") == "100.64.0.2")
+        su_m = next(o["iface"] for o in p["mapa"] if o["ip"] == "100.64.0.2")
+        check("%s: el alta le da la interfaz que le dara -m (%s), no la primera libre" % (nombre, su_m),
+              ok and nuevo["iface"] == su_m, (nuevo.get("iface"), su_m, msg))
+        ok, msg = _lanzar(ns, p["args"], p.get("nodos"))
+        _cada_interfaz_de_su_router(ns, p["mapa"], nombre)
+        check("  el nodo dado de alta recibe sus alertas", ok and ns["rid_por_iface"](su_m) == nuevo["id"], msg)
+
+    # --- si el sensor YA recibe su espejo, el alta respeta esa interfaz (es la verdad de ahora)
+    ns, td, sub, bit, routers, orden = entorno()
+    sub.env = "Environment=TZSP_PORT=37008 TZSP_ALLOW=100.64.0.3,100.64.0.2 TZSP_MAP=100.64.0.3=ids-in,100.64.0.2=ids-in2\n"
+    ns["mk_conectar"] = lambda d, timeout=6: types.SimpleNamespace(close=lambda: None)
+    ok, msg = ns["vpn_mk_alta"]("vpnaaaaaaaaaaaa", "", "ids", "x", "", False)
+    check("alta de uno que el sensor ya recibe: conserva la interfaz por la que llega (ids-mon2)",
+          ok and routers[0]["iface"] == "ids-mon2", routers)
+
+    # --- si systemd-run falla, los nodos vuelven a como estaban
+    ns, td, sub, bit, routers, orden = entorno([local])
+    sub.env = ENV_LOCAL
+    sub.systemd_rc = 1
+    _bajar(ns)
+    p = ns["espejo_vpn_plan"]("10.20.0.0/16", "", "203.0.113.5", est=ns["ovpn_estado"](), modo=MODO_LOCAL,
+                              routers=ns["cargar_routers"]())
+    ok, msg = _lanzar(ns, p["args"], p.get("nodos"))
+    check("si no se pudo lanzar, los nodos quedan como estaban",
+          not ok and routers[0]["iface"] == "ids-mon" and routers[0]["ENABLED"] == "1", (msg, routers))
+
+
+def prueba_uno_a_la_vez():
+    """Hallazgo 2: dos Lanzar a la vez (dos hilos del panel) lanzan UN instalador."""
+    ns, td, sub, bit, routers, orden = entorno()
+    args = ["-t", "-e", "vpn", "-m", "100.64.0.2", "-n", "10.20.0.0/16"]
+    dentro, soltar = threading.Event(), threading.Event()
+
+    def frena():
+        if not dentro.is_set():
+            dentro.set()
+            soltar.wait(8)
+    _bajar(ns, antes=frena)
+    res = {}
+    open(ns["ESPEJO_LOG"], "w").write("lo que habia en el log\n")
+    h1 = threading.Thread(target=lambda: res.__setitem__(1, ns["espejo_vpn_lanzar"](args, quien="uno")))
+    h1.start()
+    dentro.wait(8)
+    res[2] = ns["espejo_vpn_lanzar"](args, quien="dos")          # el segundo, con el primero a medias
+    log_entre = open(ns["ESPEJO_LOG"], encoding="utf-8").read()
+    soltar.set()
+    h1.join(10)
+    check("dos a la vez (dos hilos): solo uno lanza el instalador",
+          res.get(1, (False,))[0] and not res[2][0] and "en marcha" in res[2][1] and len(sub.systemd_run) == 1,
+          (res, len(sub.systemd_run)))
+    check("  y el rechazado no toca el log (antes lo truncaba)", log_entre == "lo que habia en el log\n", log_entre)
+    ok3, msg3 = ns["espejo_vpn_lanzar"](args, quien="tres")
+    check("  terminado el primero, el cerrojo queda libre (se suelta siempre)", ok3 and len(sub.systemd_run) == 2, msg3)
+    ns["espejo_vpn_respaldo"], resp0 = (lambda: (_ for _ in ()).throw(OSError("disco lleno"))), ns["espejo_vpn_respaldo"]
+    ns["espejo_vpn_lanzar"](args, quien="cuatro")
+    ns["espejo_vpn_respaldo"] = resp0
+    ok5, msg5 = ns["espejo_vpn_lanzar"](args, quien="cinco")
+    check("  tambien tras un fallo a mitad (respaldo que revienta)", ok5, msg5)
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
+    if fcntl is not None:
+        fd = os.open(ns["ESPEJO_CERROJO"], os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)        # otro proceso del panel lo tiene
+        n = len(sub.systemd_run)
+        ok6, msg6 = ns["espejo_vpn_lanzar"](args, quien="seis")
+        os.close(fd)
+        check("  y otro proceso con el cerrojo (flock en /run) tambien lo impide",
+              not ok6 and len(sub.systemd_run) == n, msg6)
+    else:
+        print("  aviso: sin fcntl (Windows): el flock entre procesos se prueba en Linux")
+
+    # OpenVPN tenia el mismo problema
+    ns2, td2, sub2, _b, _r, _o = entorno()
+    dentro2, soltar2 = threading.Event(), threading.Event()
+
+    def respaldo_lento():
+        if not dentro2.is_set():
+            dentro2.set()
+            soltar2.wait(8)
+        return "/root/backups/x"
+    ns2.update(_ovpn_conf=lambda: None, ovpn_asegurar_script=lambda: (True, ""), ovpn_respaldo=respaldo_lento,
+               OVPN_ETC=td2)
+    r2 = {}
+    h2 = threading.Thread(target=lambda: r2.__setitem__(1, ns2["ovpn_instalar"](quien="uno")))
+    h2.start()
+    dentro2.wait(8)
+    r2[2] = ns2["ovpn_instalar"](quien="dos")
+    soltar2.set()
+    h2.join(10)
+    unidades = [c[c.index("--unit") + 1] for c in sub2.systemd_run]
+    check("instalar OpenVPN dos a la vez: una sola instalacion, unidad de nombre fijo con --collect",
+          r2.get(1, (False,))[0] and not r2[2][0] and unidades == ["suricata-ovpn-instalar"]
+          and "--collect" in sub2.systemd_run[0], (r2, sub2.systemd_run))
+
+
+def prueba_respaldo_y_reinicio():
+    """Hallazgo 3: el respaldo permite volver atras (y es 600); el panel se reinicia de verdad."""
+    ns, td, sub, bit, routers, orden = entorno()
+    os.makedirs(os.path.join(td, "bin"))
+    for f in ("suricata-dashboard", "suricata-mikrotik-init", "otra-cosa"):
+        open(os.path.join(td, "bin", f), "w").write("# " + f + "\n")
+    conf = os.path.join(td, "suricata-dashboard.conf")
+    open(conf, "w").write("PORT=5637\n")
+    ns["ESPEJO_RESPALDAR"] = (conf, os.path.join(td, "bin", "suricata-*"), os.path.join(td, "no-existe"))
+    ruta = ns["espejo_vpn_respaldo"]()
+    nombres = tarfile.open(ruta).getnames()
+    check("respaldo: los programas suricata-* (comodin) y la config del panel; nada mas",
+          any(n.endswith("bin/suricata-dashboard") for n in nombres)
+          and any(n.endswith("bin/suricata-mikrotik-init") for n in nombres)
+          and any(n.endswith("suricata-dashboard.conf") for n in nombres)
+          and not any(n.endswith("otra-cosa") for n in nombres), nombres)
+    check("  el tar NACE 600 (lleva las claves de los routers): no hay un instante legible por otros",
+          sub.espia.creado.get(sub.espia._k(ruta + ".tmp")) == 0o600, sub.espia.creado)
+    if os.name == "posix":
+        check("  y en disco es 600 (modo real)", (os.stat(ruta).st_mode & 0o077) == 0, oct(os.stat(ruta).st_mode))
+    real = {}
+    for n in ARBOL.body:
+        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "ESPEJO_RESPALDAR":
+            exec(ast.get_source_segment(DASH, n), real)
+    faltan = [f for f in ("/usr/local/bin/suricata-*", "/etc/suricata-dashboard.conf",
+                          "/etc/suricata-dashboard-users.json", "/etc/evebox/evebox.yaml",
+                          "/etc/suricata-mikrotik.conf", "/etc/suricata-routers.json",
+                          "/etc/suricata/suricata.yaml") if f not in real.get("ESPEJO_RESPALDAR", ())]
+    check("  en el servidor se respalda todo lo que el instalador de main reescribe", not faltan, faltan)
+
+    # el instalador: si el panel ya corria, se REINICIA (enable --now no lo hace)
+    try:
+        ini = SRC.index("# el panel: si ya corria, REINICIARLO")
+        trozo = SRC[ini:SRC.index("\nfi\n", ini) + 4]
+    except ValueError:
+        trozo = next(l for l in SRC.splitlines() if l.startswith("systemctl enable --now suricata-dashboard")) + "\n"
+    for activo, nombre in ((0, "ya corria"), (3, "no corria")):
+        tdx = tempfile.mkdtemp().replace("\\", "/")
+        guion = ("set -uo pipefail\nwarn(){ echo \"WARN $*\"; }\n"
+                 "systemctl(){ echo \"$*\" >> %s/systemctl.log; [ \"$1\" = is-active ] && return %d; return 0; }\n"
+                 % (tdx, activo)) + trozo
+        rx = subprocess.run(["bash", "-s"], input=guion.encode("utf-8"), capture_output=True)
+        log = open(tdx + "/systemctl.log").read() if os.path.exists(tdx + "/systemctl.log") else ""
+        if activo == 0:
+            check("instalador, panel que %s: se reinicia (si no, seguiria el codigo viejo)" % nombre,
+                  rx.returncode == 0 and "restart suricata-dashboard" in log, (log, rx.stderr[-200:]))
+        else:
+            check("instalador, panel que %s: se habilita y arranca, sin reinicio de mas" % nombre,
+                  rx.returncode == 0 and "enable --now suricata-dashboard" in log
+                  and "restart" not in log, (log, rx.stderr[-200:]))
+
+
+def prueba_claves_en_el_log():
+    """Hallazgo 11: el resumen del instalador lleva claves y el log se ensena en la web."""
+    ns, td, sub, bit, routers, orden = entorno()
+    open(ns["ESPEJO_LOG"], "w", encoding="utf-8").write(
+        "Recibir el espejo por la VPN\n"
+        "[OK] Panel de estadisticas: http://192.0.2.10:5637  (usuario admin, clave Pz9secretoA)\n"
+        "[OK] Clave del panel: puesta de nuevo (para poder entregarla al final).\n"
+        "  Interfaz web (EveBox)\n    Usuario    : admin\n    Clave      : Qw7secretoB\n"
+        "  Panel\n    Clave      : Zx5secretoC   (la misma que EveBox)\n"
+        "evebox: username=admin, password=Rt3secretoD\n"
+        "FIN rc=0\n")
+    l = ns["espejo_vpn_avance"]()["log"]
+    fugas = [s for s in ("Pz9secretoA", "Qw7secretoB", "Zx5secretoC", "Rt3secretoD") if s in l]
+    check("el log que se ensena en la web no lleva ninguna clave", not fugas, (fugas, l))
+    check("  y el resto se sigue leyendo (usuario, avisos, la marca de fin)",
+          "Usuario    : admin" in l and "Clave del panel: puesta de nuevo" in l and "FIN rc=0" in l, l)
+
+
+METODOS_H = ("_sid", "_peer_ip", "_proxy_confiable", "_client_ip", "_sesion", "_sesion_ok", "_rol", "_admin",
+             "_operador", "_set_ctx", "_auth_ok", "_deny", "_seguro", "do_GET", "do_POST", "_post_mismo_origen",
+             "_post", "_get")
+
+
+def handler_real(ns_extra):
+    """La clase H del panel con sus metodos REALES (los de sesion, rol y despacho) y lo de
+    fuera de dobles. Devuelve una funcion que hace una peticion y dice que respondio."""
+    import traceback
+    cls = next(n for n in ARBOL.body if isinstance(n, ast.ClassDef) and n.name == "H")
+    ns = {"urllib": urllib, "json": json, "time": time, "re": re, "html": html, "sys": sys,
+          "traceback": traceback, "SimpleCookie": SimpleCookie, "PROXIES_OK": set(),
+          "CTX": types.SimpleNamespace(), "ip_confiable": lambda ip: True,
+          "cargar_usuarios": lambda: [{"usuario": "ana"}], "cargar_confianza": lambda: [],
+          "bitacora": lambda *a, **k: None, "SESSIONS": {}}
+    for n in ARBOL.body:
+        if isinstance(n, ast.FunctionDef) and n.name in ("origen_ajeno", "_host_puerto"):
+            exec(ast.get_source_segment(DASH, n), ns)
+    ns.update(ns_extra)
+    metodos = {}
+    for m in cls.body:
+        if isinstance(m, ast.FunctionDef) and m.name in METODOS_H:
+            exec(compile(ast.Module(body=[m], type_ignores=[]), "<H.%s>" % m.name, "exec"), ns)
+            metodos[m.name] = ns[m.name]
+    Clase = type("HPrueba", (object,), dict(metodos))
+
+    def peticion(metodo, ruta, cuerpo="", rol="lectura", cabeceras=None, cliente="203.0.113.5"):
+        ns["SESSIONS"].clear()
+        ns["SESSIONS"]["tok"] = {"user": "ana", "role": rol, "exp": time.time() + 3600}
+        p = Clase()
+        data = cuerpo.encode("utf-8")
+        p.headers = {"Content-Length": str(len(data)), "Cookie": "sid=tok", "Host": "192.0.2.10:5637"}
+        p.headers.update(cabeceras or {})
+        p.rfile = io.BytesIO(data)
+        p.path, p.command, p.client_address = ruta, metodo, (cliente, 50000)
+        p.close_connection = False
+        p.resp = []
+        p._html = lambda s, code=200: p.resp.append(("html", code, s))
+        p._json = lambda obj, code=200: p.resp.append(("json", code, obj))
+        p._redirect = lambda loc, cookie=None: p.resp.append(("redirect", 303, loc))
+        (p.do_POST if metodo == "POST" else p.do_GET)()
+        return p.resp
+    return peticion, ns
+
+
+def prueba_rutas():
+    """Hallazgo 14: las rutas del espejo por la VPN, con el handler de verdad."""
+    llamadas = []
+
+    def doble(nombre, ret):
+        return lambda *a, **k: (llamadas.append((nombre, a, k)), ret)[1]
+    plan = {"ok": True, "args": ["-t", "-e", "vpn", "-m", "100.64.0.2", "-n", "10.20.0.0/16"],
+            "nodos": [{"id": "r1", "nombre": "Local", "HOST": "192.0.2.1", "antes": "ids-mon", "despues": "",
+                       "apagar": True}]}
+    peticion, ns = handler_real({
+        "vpn_mk_alta": doble("vpn_mk_alta", (True, "ok")), "vpn_mk_espejo": doble("vpn_mk_espejo", (True, "ok")),
+        "espejo_vpn_plan": doble("espejo_vpn_plan", plan), "espejo_vpn_lanzar": doble("espejo_vpn_lanzar", (True, "ok")),
+        "espejo_vpn_avance": doble("espejo_vpn_avance", {"corriendo": False, "rc": 0, "log": ""}),
+        "ovpn_instalar": doble("ovpn_instalar", (True, "ok")), "ovpn_accion": doble("ovpn_accion", (True, "", {})),
+        "ovpn_estado": doble("ovpn_estado", {"usuarios": [{"usuario": "vpnaaaaaaaaaaaa", "redes": []}]}),
+        "ovpn_redes_validas": doble("ovpn_redes_validas", (["10.0.0.0/8"], [], [])),
+        "ovpn_log": doble("ovpn_log", {"corriendo": False, "rc": 0, "log": ""})})
+    rutas = ("/vpn/mk-alta", "/vpn/mk-espejo-plan", "/vpn/mk-espejo-aplicar", "/vpn/sensor-plan",
+             "/vpn/sensor-aplicar", "/vpn/instalar", "/vpn/usuario", "/vpn/redes", "/vpn/quitar-redes", "/vpn/borrar")
+    for rol in ("lectura", "operador"):
+        malas = []
+        for ruta in rutas:
+            del llamadas[:]
+            r = peticion("POST", ruta, "usuario=vpnaaaaaaaaaaaa&a=&n=10.20.0.0%2F16&user=x&pass=y", rol=rol)
+            if r != [("redirect", 303, "/login")] or llamadas:
+                malas.append((ruta, r, [c[0] for c in llamadas]))
+        for ruta in ("/vpn/sensor-log", "/vpn/log"):
+            del llamadas[:]
+            r = peticion("GET", ruta, rol=rol)
+            if r != [("redirect", 303, "/login")] or llamadas:
+                malas.append((ruta, r, [c[0] for c in llamadas]))
+        check("rutas de Ajustes > VPN con sesion de '%s': todas rechazadas y no se ejecuta nada" % rol,
+              not malas, malas)
+    del llamadas[:]
+    r = peticion("POST", "/vpn/sensor-aplicar", "a=203.0.113.5%2F32&n=10.20.0.0%2F16&args=-P+x", rol="admin")
+    lz = [c for c in llamadas if c[0] == "espejo_vpn_lanzar"]
+    pl = [c for c in llamadas if c[0] == "espejo_vpn_plan"]
+    check("admin: lo que se lanza sale del plan recalculado en el servidor (no del navegador), con sus nodos",
+          r and r[0][0] == "json" and pl and pl[0][1][:3] == ("10.20.0.0/16", "203.0.113.5/32", "203.0.113.5")
+          and lz and lz[0][1][0] == plan["args"] and lz[0][2].get("nodos") == plan["nodos"], (r, llamadas))
+    del llamadas[:]
+    r = peticion("GET", "/vpn/sensor-log", rol="admin")
+    check("  y el avance si lo ve", r == [("json", 200, {"corriendo": False, "rc": 0, "log": ""})], r)
+    ns["PROXIES_OK"] = {"192.0.2.50"}
+    peticion("GET", "/vpn/sensor-log", rol="admin", cliente="192.0.2.50",
+             cabeceras={"X-Forwarded-For": "198.51.100.20"})
+    check("la IP que llega al socket queda en el contexto (es la que ve el firewall), aparte de la real",
+          ns["CTX"].peer == "192.0.2.50" and ns["CTX"].ip == "198.51.100.20", vars(ns["CTX"]))
 
 
 # DOM minimo: la caja del modal y los elementos que vpnSensorLog crea en ella. fetch falla

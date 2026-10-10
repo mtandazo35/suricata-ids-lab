@@ -12,7 +12,8 @@ const casillas=[casilla('cuar|10.6.1.89'),casilla('cuar|10.6.2.82'),casilla('dns
 const els={selall:el('selall'),bmasivo:el('bmasivo'),nmasivo:el('nmasivo'),maslista:el('maslista'),
   mascampos:el('mascampos'),mmasivo:el('mmasivo'),fichamodal:el('fichamodal'),notif:null,
   massub:el('massub'),masprog:el('masprog'),masbar:el('masbar'),massi:el('massi'),masno:el('masno'),
-  fmasivo:el('fmasivo')};
+  fmasivo:el('fmasivo'),masacts:el('masacts'),masespera:el('masespera',{lastChild:{textContent:''}}),
+  mastit:el('mastit')};
 const docLis={};
 global.document={getElementById:id=>els[id]!==undefined?els[id]:null,
   querySelectorAll:s=>s==='input.selm'?casillas:[],
@@ -21,7 +22,9 @@ global.document={getElementById:id=>els[id]!==undefined?els[id]:null,
 
 // fetch simulado: la 2a IP falla (el router no responde)
 const pedidos=[]; let bloqueadoDurante=null;
+let durante=null;
 global.fetch=(url,opts)=>{pedidos.push({url,body:opts.body});if(bloqueadoDurante===null)bloqueadoDurante=window.masRun===true;
+  if(durante===null)durante={sinBotones:els.masacts.classList.contains('off'),espera:els.masespera.classList.contains('on'),tit:els.mastit.textContent};
   const ip=decodeURIComponent(opts.body.split('=')[1]).split('|')[1];
   const falla = ip==='10.6.2.82';
   return Promise.resolve({json:()=>Promise.resolve(
@@ -67,6 +70,10 @@ check('desmarca las casillas que si salieron',
   casillas[0].checked===false&&casillas[1].checked===true, casillas.map(c=>c.checked));
 check('bloquea el cierre MIENTRAS corre', bloqueadoDurante===true, bloqueadoDurante);
 check('y vuelve a permitir cerrarlo al terminar', window.masRun===false, window.masRun);
+check('MIENTRAS corre: sin botones, aviso de espera y titulo "Quitando..."',
+  durante&&durante.sinBotones&&durante.espera&&/Quitando/.test(durante.tit), durante);
+check('al terminar el aviso pasa a "Terminado"',
+  els.masespera.classList.contains('listo')&&/Terminado/.test(els.masespera.lastChild.textContent), els.masespera.lastChild);
 check('deja marcada la posicion para no saltar arriba',
   guardado['posact:/cuarentena']==='1', guardado);
 

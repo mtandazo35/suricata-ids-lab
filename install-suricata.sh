@@ -10799,6 +10799,16 @@ font-size:15px;font-weight:500;transition:background .15s,color .15s}
 .nav .out{margin-left:14px;color:#f3b0b0;text-decoration:none;font-weight:600;padding:9px 17px;border-radius:8px;font-size:15px;
 border:1px solid rgba(243,176,176,.35);transition:background .15s,color .15s,border-color .15s}
 .nav .out:hover{background:#e34948;color:#fff;border-color:#e34948}
+/* quien esta dentro: foto o iniciales + nombre y rol, a la derecha de Salir; lleva a Ajustes (perfil) */
+.nav .yo{flex:0 0 auto;display:flex;align-items:center;gap:9px;margin-left:12px;padding:4px 10px 4px 4px;border-radius:999px;
+color:#e8edf3;text-decoration:none;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);transition:background .15s}
+.nav .yo:hover{background:rgba(255,255,255,.12)}
+.nav .yo .av{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:none;
+color:#fff;font:700 13px system-ui;object-fit:cover;box-shadow:0 0 0 2px rgba(255,255,255,.18)}
+.nav .yo .yot{display:flex;flex-direction:column;line-height:1.15;max-width:170px}
+.nav .yo .yon{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nav .yo .yor{font-size:11.5px;color:#9fb0c3;white-space:nowrap}
+@media(max-width:1440px){.nav .yo{padding:3px}.nav .yo .yot{display:none}}  /* sin sitio: solo la foto, que Salir no se salga */
 .nav .updbtn{display:inline-flex;align-items:center;gap:7px;margin-left:14px;cursor:pointer;background:#e67e22;color:#fff;
 border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0 2px 8px rgba(230,126,34,.4)}
 .nav .updbtn:hover{background:#d3691a}
@@ -10839,6 +10849,8 @@ border:0;padding:9px 15px;border-radius:8px;font:600 14px system-ui;box-shadow:0
        font-weight:600;white-space:nowrap}
 @media(prefers-color-scheme:dark){.wpend{background:#2e2712;border-color:#5c4d1c;color:#f0d78c}}
  .nav .out{margin-left:8px;padding:7px 12px;font-size:14px}
+ .nav .yo{margin-left:8px;padding:3px}
+ .nav .yo .yot{display:none}                /* en movil solo la foto: el nombre no cabe */
  .nav .updbtn{margin-left:8px;padding:7px 11px;font-size:13px}
  .updov,.updask,.askov{padding:14px}
  .empbar .empwrap{padding:6px 14px}
@@ -11003,7 +11015,7 @@ def nav(active=""):
             "document.addEventListener('keydown',function(e){if(e.key==='Escape')updaskHide();});</script>")
     navbar = ('<div class="nav"><div class="navwrap">' + brand + '<span class="push"></span>'
               + "".join(parts) + '<span class="push"></span>' + upd_btn
-              + '<a href="/logout" class="out">Salir</a></div></div>' + upd_modal + updask
+              + '<a href="/logout" class="out">Salir</a>' + _ficha_yo() + '</div></div>' + upd_modal + updask
               # el modal de confirmacion/aviso: sustituye a confirm() y alert() del navegador
               + _ASK)
     # marca de la empresa (logo + nombre) en una franja debajo, alineada a la derecha (bajo Salir)
@@ -11015,6 +11027,48 @@ def nav(active=""):
         enom = f'<span class="en">{html.escape(emp["nombre"])}</span>' if emp.get("nombre") else ""
         empbar = f'<div class="empbar"><div class="empwrap">{elogo}{enom}</div></div>'
     return _NAV_CSS + _SORT_JS + _POS_JS + navbar + empbar
+
+_ROL_TXT = {"admin": "Administrador", "operador": "Operador", "lectura": "Solo lectura"}
+
+def _ficha_yo():
+    """Quien esta dentro, junto a Salir: foto (o iniciales), nombre y rol. Lleva a Ajustes.
+
+    La foto NO va incrustada: puede pesar hasta 300 KB y la barra sale en cada pagina (que
+    ademas se recarga sola cada 5 min). Va por /mi-foto, con ?v= de su huella para que el
+    navegador la guarde y la cambie solo cuando cambia. Sin sesion (panel sin usuarios, o
+    la barra que se arma al cargar el modulo) no sale nada."""
+    yo = getattr(CTX, "user", None)
+    if not yo:
+        return ""
+    try:
+        r = buscar_usuario(yo) or {}
+    except Exception:
+        r = {}
+    nombre = r.get("nombre", "") or ""
+    rol = _ROL_TXT.get(getattr(CTX, "role", None) or r.get("role"), "")
+    foto = r.get("avatar", "") or ""
+    if foto.startswith("data:image/"):
+        v = hashlib.sha1(foto.encode("utf-8")).hexdigest()[:10]
+        av = f'<img class="av" src="/mi-foto?v={v}" alt="">'
+    else:
+        av = _avatar(nombre, yo)
+    disp = html.escape(nombre or yo)
+    tit = html.escape((nombre + " (" + yo + ")") if nombre else yo)
+    return (f'<a href="/ajustes" class="yo" title="{tit} - mi perfil">{av}'
+            f'<span class="yot"><span class="yon">{disp}</span>'
+            + (f'<span class="yor">{rol}</span>' if rol else "") + '</span></a>')
+
+def foto_de(user):
+    """(tipo, bytes) de la foto de perfil guardada como data:image/...;base64, o None."""
+    r = buscar_usuario(user) if user else None
+    foto = (r or {}).get("avatar", "") or ""
+    m = re.match(r"data:(image/(?:png|jpeg|jpg|gif|webp));base64,(.+)$", foto, re.S)
+    if not m:
+        return None
+    try:
+        return m.group(1), base64.b64decode(m.group(2), validate=False)
+    except (ValueError, TypeError):
+        return None
 
 # confirmaciones y avisos del panel, en un modal propio: el dialogo del navegador sale
 # con el nombre del host delante, no cabe explicar que pasa despues de aceptar y no se
@@ -12398,6 +12452,9 @@ tu monitoreo SNMP, un falso positivo puntual). Permite exclusiones <b>temporales
 <b>Documentacion</b> y <b>Actualizaciones</b> del panel.</td></tr>
 <tr><td><b>Documentacion</b></td><td>Esta pagina.</td></tr>
 <tr><td><b>Salir</b></td><td>Cierra la sesion.</td></tr>
+<tr><td><b>Tu usuario</b> (a la derecha de Salir)</td><td>Tu foto (o tus iniciales), tu nombre y tu rol: asi se ve
+siempre con que cuenta estas dentro. Un clic lleva a <b>Ajustes</b>, donde cambias la foto, el nombre o la clave.
+Si la pantalla es estrecha (o en el movil) sale solo la foto; el nombre aparece al pasar el raton.</td></tr>
 </table>
 
 <h2>Cada cuanto se actualiza</h2>
@@ -17225,6 +17282,18 @@ class H(BaseHTTPRequestHandler):
             return self._html(bitacora_page(embed=("embed=1" in (self.path.split("?", 1)[1] if "?" in self.path else ""))))
         if path == "/perfil":
             return self._redirect("/ajustes")
+        if path == "/mi-foto":
+            ft = foto_de(getattr(CTX, "user", None))
+            if not ft:
+                self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", ft[0])
+            self.send_header("Cache-Control", "private, max-age=2592000")   # ?v= cambia con la foto
+            self.send_header("Content-Length", str(len(ft[1])))
+            self.end_headers()
+            self.wfile.write(ft[1])
+            return
         if path == "/ajustes":
             return self._html(perfil_page())
         if path == "/exclusiones/export":

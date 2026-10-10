@@ -279,6 +279,12 @@ alert tcp $HOME_NET any -> $EXTERNAL_NET [3389,5900] (msg:"LOCAL Escaneo RDP/VNC
 # --- SMTP directo desde clientes (spambot): un CPE no deberia hablar 25/tcp a internet ---
 alert tcp $HOME_NET any -> $EXTERNAL_NET 25 (msg:"LOCAL SMTP directo saliente desde cliente (posible spambot)"; flags:S,12; flow:to_server; threshold:type both, track by_src, count 5, seconds 120; classtype:bad-unknown; sid:9000020; rev:1;)
 RULES
+# la regla sid 9000050 carga /var/lib/suricata-feeds/domains.dataset: si el archivo no
+# existe, Suricata NO carga NINGUNA regla ("Loading signatures failed"). Se crea vacio
+# aqui, junto a la regla, en todos los caminos de instalacion (antes solo en el del
+# espejo TZSP: una instalacion directa por eth0 fallaba al validar).
+mkdir -p /var/lib/suricata-feeds
+[ -f /var/lib/suricata-feeds/domains.dataset ] || : > /var/lib/suricata-feeds/domains.dataset
 LOCAL_COUNT="$(grep -c '^alert' "$LOCAL_RULES")"
 # registrar local.rules en rule-files (idempotente). Nota: $CFG aun no esta definido
 # aqui (se fija en la seccion 'config'), por eso se usa la ruta literal.
@@ -946,7 +952,9 @@ try:
 except OSError:
     viejo = ""
 nuevo = "\n".join(sorted(set(ds_lines))) + ("\n" if ds_lines else "")
-if nuevo != viejo:
+# sin dominios (p.ej. sin clave de abuse.ch) el archivo tiene que EXISTIR igual, vacio:
+# la regla que lo carga tumba todas las demas si no esta
+if nuevo != viejo or not os.path.exists(ds_path):
     tmp = ds_path + ".tmp"
     open(tmp, "w", encoding="utf-8").write(nuevo)
     os.replace(tmp, ds_path)
@@ -19313,6 +19321,8 @@ if [ -f /usr/local/bin/suricata-feeds-update ]; then
   chmod 644 /etc/cron.d/suricata-feeds
 fi
 [ -f /var/lib/suricata-feeds/reputation.lst ] || /usr/local/bin/suricata-feeds-update >> /var/log/suricata-feeds.log 2>&1 || true
+mkdir -p /var/lib/suricata-feeds
+[ -f /var/lib/suricata-feeds/domains.dataset ] || : > /var/lib/suricata-feeds/domains.dataset
 # re-generar reputation.lst con procedencia (indicador<TAB>fuente): si el box tiene el
 # formato viejo (sin TAB) y hay fuentes, correr el actualizador una vez para migrar.
 if [ -f /var/lib/suricata-feeds/reputation.lst ] && ! grep -q "$(printf '\t')" /var/lib/suricata-feeds/reputation.lst 2>/dev/null; then

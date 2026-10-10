@@ -125,9 +125,40 @@ def main():
               "load /var/lib/suricata-feeds/domains.dataset" in r, r)
         check("con sid en el rango local (9000000+)", "sid:90000" in r, r)
         check("y mirando dns.query, no el paquete entero", "dns.query;" in r, r)
-    # una regla con load de un archivo inexistente tumba TODAS las reglas al arrancar
-    check("el instalador crea el dataset (vacio) ANTES de que arranque Suricata",
-          "[ -f /var/lib/suricata-feeds/domains.dataset ] || : >" in SRC, "")
+    # una regla con load de un archivo inexistente tumba TODAS las reglas al arrancar.
+    # Paso en una caja nueva (Debian 13, instalacion directa por eth0, sin clave de
+    # abuse.ch): "datasets: fopen domains.dataset failed" -> "Loading signatures failed"
+    # -> el instalador moria en la validacion. El archivo vacio solo se creaba en el
+    # camino del espejo TZSP, y feeds-update no lo escribia si no habia dominios.
+
+    # feeds-update sin dominios y sin archivo: tiene que dejarlo creado, vacio
+    d4 = tempfile.mkdtemp()
+    txt4, llam4 = correr([], d4)
+    check("feeds-update sin dominios (sin clave de abuse.ch) deja el archivo creado, vacio",
+          txt4 == "", repr(txt4))
+    _, llam5 = correr([], d4)
+    check("  y la segunda vez, ya existiendo y vacio, no toca a Suricata", llam5 == [], llam5)
+
+    # instalador: el trozo REAL que escribe local.rules, en el camino directo (sin espejo),
+    # ejecutado con las rutas redirigidas a un temporal
+    import re as _re
+    import subprocess as _sp
+    ini = SRC.index('LOCAL_RULES=/var/lib/suricata/rules/local.rules')
+    fin = SRC.index('LOCAL_COUNT="$(grep -c', ini)
+    trozo = SRC[ini:fin]
+    d5 = tempfile.mkdtemp().replace("\\", "/")
+    trozo = trozo.replace("/var/lib/suricata/rules/local.rules", d5 + "/local.rules")
+    trozo = trozo.replace("/var/lib/suricata-feeds", d5 + "/feeds")
+    r5 = _sp.run(["bash", "-c", trozo], capture_output=True, text=True)
+    check("instalador (camino directo): tras escribir local.rules el dataset ya existe",
+          r5.returncode == 0 and os.path.isfile(os.path.join(d5, "feeds", "domains.dataset")), (r5.returncode, r5.stderr[-200:]))
+    # y no dentro de un if: se crea en TODOS los caminos, antes de validar
+    lineas = SRC.split("\n")
+    top = [i for i, l in enumerate(lineas)
+           if l.startswith("[ -f /var/lib/suricata-feeds/domains.dataset ] || : >")]
+    i_val = next(i for i, l in enumerate(lineas) if l.startswith('info "Validando configuracion..."'))
+    check("  la creacion va a nivel superior (no solo en el bloque del espejo) y antes de validar",
+          any(i < i_val for i in top), top)
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

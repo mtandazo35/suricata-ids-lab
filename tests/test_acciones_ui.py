@@ -156,6 +156,31 @@ def main():
     check("quitar: idem", ("quitar", "r1", "spam", "admin") in llamadas and "quitada" in v.get("texto", ""), v)
     check("queda en la bitacora", any(a == "REGLAS-ROUTER" and "spam" in d for a, d in logs), logs)
 
+    # ---------- la etiqueta "Reglas aplicadas" ----------
+    check("cada clase tiene su etiqueta de estado junto a los botones",
+          "<span class=accest id=accest_%s></span></div>" in DASH, "")
+    i = DASH.index('if ruta == "/mikrotik/reglas/estado":')
+    tramo = DASH[i:DASH.index("self.wfile.write(b)", i)]
+    check("la ruta de estado es solo de admin y contesta JSON (con _error si el router no responde)",
+          "self._admin()" in tramo and "estado_reglas(r)" in tramo and '"_error"' in tramo
+          and "application/json" in tramo, "")
+    check("se mira al abrir MikroTik (no al cargar Ajustes), al cambiar de router y tras aplicar/quitar",
+          "if(id==='mikrotik'&&typeof accEstado==='function')accEstado();" in DASH
+          and "<select id=accrid onchange=accEstado()>" in DASH
+          and "var ok=t.indexOf('OK')===0;accEstado();" in DASH, "")
+    check("en verde 'Reglas aplicadas'; ambar lo que falta; 'Sin guardar' si se cambio la accion",
+          "'ok','\\u2713 Reglas aplicadas'" in DASH and "' cambio(s) sin aplicar'" in DASH
+          and "'Sin guardar: guarda y vuelve a mirar'" in DASH, "")
+    # de 'accest_botnet' sale la clase cortando el prefijo: con un caracter de mas salia
+    # 'otnet', ninguna etiqueta se encontraba y todas se quedaban en "Comprobando..."
+    cortes = re.findall(r"\.id\.slice\((\d+)\)", DASH[DASH.index("function accEstado()"):])
+    check("la clase se saca del id cortando EXACTAMENTE 'accest_'",
+          cortes and all(int(c) == len("accest_") for c in cortes), cortes)
+    # el modal escapa la cabecera: una entidad HTML ahi salia como texto ("&middot;")
+    cabs = [l for l in DASH.split("\n") if "cab = " in l or "cab += " in l]
+    check("las cabeceras de vista previa/verificacion no llevan entidades HTML (el modal las escapa)",
+          cabs and not any("&middot;" in l for l in cabs), [l for l in cabs if "&middot;" in l])
+
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0
 

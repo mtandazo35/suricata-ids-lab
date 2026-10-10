@@ -5550,6 +5550,35 @@ def plan_reglas(router, cat, accion=None, m=None):
         except Exception: pass
 
 
+def estado_reglas(router, m=None):
+    """Como esta cada clase en ESE router, sin tocar nada y con UN login (no uno por clase).
+    {cat: {"estado": "aplicadas" | "pendientes" | "ninguna" | "error", "cambios": n}}
+
+    - aplicadas: el router ya tiene exactamente lo que toca (la vista previa daria 0 cambios);
+    - pendientes: falta aplicar algo (o quedan reglas de una accion que ya no esta);
+    - ninguna: la clase no tiene accion y en el router no queda nada nuestro."""
+    m = m if m is not None else _mk_globales()
+    s_ = mk_conectar(cargar_mk_de(router))
+    out = {}
+    try:
+        for cat in ACCIONES_POR_CAT:
+            try:
+                p = _plan_en(s_, cat, None, m, verificar=False)
+            except Exception as ex:
+                out[cat] = {"estado": "error", "cambios": 0, "msg": str(ex)[:160]}
+                continue
+            quedan = sum(1 for a in p["acciones"] if a[0] in ("add", "set", "igual"))
+            if p["cambios"]:
+                est = "pendientes"
+            else:
+                est = "aplicadas" if quedan else "ninguna"
+            out[cat] = {"estado": est, "cambios": p["cambios"]}
+    finally:
+        try: s_.close()
+        except Exception: pass
+    return out
+
+
 def _mk_print_todo(s_, cmd):
     """Un print SIN proplist: todas las propiedades, para el respaldo."""
     filas = []
@@ -11269,19 +11298,20 @@ def _card_listas(m):
                   "<button type=button class=cancelbtn onclick=\"reglasPlan('%s')\">Ver / aplicar en el router</button>"
                   "<button type=button class=cancelbtn onclick=\"if(ask(this,'Quitar del router las reglas de %s',"
                   "'Se quitan SOLO las reglas que puso el panel para esta clase (comment Suricata:%s:*). "
-                  "La address-list y las IPs que tenga se quedan.','Quitar',''))reglasQuitar('%s')\">Quitar del router</button></div>"
+                  "La address-list y las IPs que tenga se quedan.','Quitar',''))reglasQuitar('%s')\">Quitar del router</button>"
+                  "<span class=accest id=accest_%s></span></div>"
                   "<textarea name=reglas_%s id=reglas_%s class=rsc rows=6 style='display:%s' "
                   "placeholder='/ip firewall raw&#10;add chain=prerouting action=drop src-address-list={LISTA} place-before=0'>%s</textarea>"
                   "<div id=verif_%s style='display:%s;margin-top:6px'><button type=button class=cancelbtn "
                   "onclick=\"reglasVerificar('%s')\">Verificar mis reglas</button></div>"
                   "</div>" % (esc(nom), esc(cat), esc(actual), esc(por_defecto),
-                              cat, cat, ops, extra, cat, esc(nom), cat, cat,
+                              cat, cat, ops, extra, cat, esc(nom), cat, cat, cat,
                               cat, cat, "block" if acc == "propias" else "none", esc(propias),
                               cat, "block" if acc == "propias" else "none", cat))
     # con varios routers, a cual se le miran/aplican las reglas
     sel_router = ""
     if len(routers) > 1:
-        sel_router = ("<div class=field><label>Router al que aplicar las reglas</label><select id=accrid>"
+        sel_router = ("<div class=field><label>Router al que aplicar las reglas</label><select id=accrid onchange=accEstado()>"
                       + "".join("<option value='%s'>%s</option>" % (esc(r.get("id", "")), esc(r.get("nombre") or r.get("HOST", "")))
                                 for r in routers) + "</select></div>")
     js_acc = (
@@ -11289,6 +11319,10 @@ def _card_listas(m):
         ".accrow select{padding:7px 10px;border:1px solid #d7d6d2;border-radius:8px;font:13px system-ui}"
         ".accrow .cancelbtn{padding:6px 10px;font-size:12.5px}"
         ".acclim{width:220px;padding:7px 10px;border:1px solid #d7d6d2;border-radius:8px;font:13px system-ui}"
+        ".accest{display:none;align-items:center;gap:5px;font:600 12.5px system-ui;padding:5px 11px;border-radius:999px;white-space:nowrap}"
+        ".accest.ok{display:inline-flex;background:#e6f4ea;color:#1a7f37;border:1px solid #b7e0c2}"
+        ".accest.pend{display:inline-flex;background:#fff4e5;color:#a15c12;border:1px solid #f2d3ad}"
+        ".accest.gris{display:inline-flex;background:#f1f1ef;color:#6b6a66;border:1px solid #e0dfda;font-weight:500}"
         ".rsc{width:100%;box-sizing:border-box;margin-top:6px;font:12px ui-monospace,Consolas,monospace;"
         "padding:8px;border:1px solid #d7d6d2;border-radius:8px}</style>"
         "<script>"
@@ -11296,7 +11330,22 @@ def _card_listas(m):
         "if(t)t.style.display=(sel.value==='propias')?'block':'none';"
         "var vb=document.getElementById('verif_'+cat);if(vb)vb.style.display=(sel.value==='propias')?'block':'none';"
         "var l=sel.form.querySelector('[name=limite_'+cat+']');if(l)l.style.display=(sel.value==='limitar')?'inline-block':'none';"
-        "if(cat==='dns'){var d=sel.form.querySelector('[name=accion_dns_ip]');if(d)d.style.display=(sel.value==='redirigir-dns'||sel.value==='dns-protegido')?'inline-block':'none';}}"
+        "if(cat==='dns'){var d=sel.form.querySelector('[name=accion_dns_ip]');if(d)d.style.display=(sel.value==='redirigir-dns'||sel.value==='dns-protegido')?'inline-block':'none';}"
+        # la etiqueta habla de lo GUARDADO: con la accion cambiada y sin guardar ya no vale
+        "_accEt(cat,'gris','Sin guardar: guarda y vuelve a mirar');}"
+        "function _accEt(cat,cls,txt){var b=document.getElementById('accest_'+cat);if(!b)return;b.className='accest'+(cls?' '+cls:'');b.textContent=txt||'';}"
+        # una consulta para todas las clases: al abrir MikroTik, al cambiar de router y tras aplicar/quitar
+        "function accEstado(){var bs=document.querySelectorAll('.accest');if(!bs.length)return;"
+        "for(var i=0;i<bs.length;i++){bs[i].className='accest gris';bs[i].textContent='Comprobando\u2026';}"
+        "var d=new URLSearchParams();d.set('rid',_accRid());"
+        "fetch('/mikrotik/reglas/estado',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:d.toString()})"
+        ".then(function(r){return r.json();}).then(function(j){"
+        "for(var i=0;i<bs.length;i++){var cat=bs[i].id.slice(7),e=j[cat];"
+        "if(j._error||!e||e.estado==='error'){_accEt(cat,'gris','No se pudo comprobar el router');}"
+        "else if(e.estado==='aplicadas'){_accEt(cat,'ok','\u2713 Reglas aplicadas');}"
+        "else if(e.estado==='pendientes'){_accEt(cat,'pend',e.cambios+' cambio(s) sin aplicar');}"
+        "else{_accEt(cat,'','');}}})"
+        ".catch(function(){for(var i=0;i<bs.length;i++){_accEt(bs[i].id.slice(7),'gris','No se pudo comprobar el router');}});}"
         "function _accRid(){var s=document.getElementById('accrid');return s?s.value:'';}"
         "function _accBox(h){var mo=document.getElementById('mkwait'),bx=mo.querySelector('.mkbox');"
         "bx.style.maxWidth='780px';bx.style.alignItems='flex-start';bx.innerHTML=h;mo.style.display='flex';}"
@@ -11322,7 +11371,7 @@ def _card_listas(m):
         "<div style='font-size:13px;color:#52514e;margin:4px 0 8px'>\"+_accEsc(cab)+\"</div>\"+ver+pre+"
         "\"<div class=actions style='margin-top:12px'>\"+((L.length&&!hayE)?\"<button type=button class=primary onclick=\\\"reglasAplicar('\"+cat+\"')\\\">Aplicar en el router</button>\":'')+"
         "\"<button type=button class=cancelbtn onclick='_accCerrar()'>Cerrar</button></div></div>\");});}"
-        "function _accResultado(ruta,cat,titulo){_accPost(ruta,cat,function(t){var ok=t.indexOf('OK')===0;"
+        "function _accResultado(ruta,cat,titulo){_accPost(ruta,cat,function(t){var ok=t.indexOf('OK')===0;accEstado();"
         "var c=t.replace(/^OK ?/,'').replace(/^ERR: /,'');"
         "_accBox(\"<div style='font-size:30px'>\"+(ok?'&#9989;':'&#9940;')+\"</div><div><b>\"+(ok?titulo:'No se hizo')+\"</b><br>"
         "<span style='font-size:13px'>\"+_accEsc(c)+\"</span><div class=actions style='margin-top:10px'>"
@@ -12175,6 +12224,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
     ntf = ("<div id=notif class='notifm " + ("ok" if ok else "err") + "'>"
            "<span class=ni>" + ("✅" if ok else "⛔") + "</span><span>" + esc(msg) + "</span></div>") if msg else ""
     hubjs = ("<script>function openm(id){var mo=document.getElementById('m-'+id);if(!mo)return false;"
+             "if(id==='mikrotik'&&typeof accEstado==='function')accEstado();"
              "var fr=mo.querySelector('iframe[data-src]');if(fr&&!fr.src){fr.src=fr.getAttribute('data-src');}"
              "mo.style.display='flex';document.body.style.overflow='hidden';"
              "try{sessionStorage.setItem('apt',id);}catch(e){}return false;}"
@@ -13349,7 +13399,11 @@ van a crear, corregir o quitar en ese router; solo si confirmas se toca. Antes d
 <b>respalda</b> el firewall (raw, nat, filter, mangle y queue tree) en <code>/root/backups/panel/</code>; si
 el respaldo falla, no se toca nada. Cada regla del panel lleva <code>comment="Suricata:&lt;clase&gt;:&lt;n&gt;"</code>
 y la reconciliacion es <b>idempotente</b> (aplicar dos veces no cambia nada) y <b>acotada</b>: jamas toca una
-regla que no lleve ese comentario. <i>Quitar del router</i> elimina solo las del panel para esa clase; la
+regla que no lleve ese comentario. Junto a los botones, una etiqueta dice como esta cada clase en el router:
+<b style="color:#1a7f37">&#10003; Reglas aplicadas</b> (el router ya tiene exactamente lo que toca),
+<b style="color:#a15c12">N cambio(s) sin aplicar</b>, o <i>Sin guardar</i> si cambiaste la accion y aun no la
+guardaste; se comprueba al abrir el apartado, al cambiar de router y despues de aplicar o quitar.
+<i>Quitar del router</i> elimina solo las del panel para esa clase; la
 lista y sus IPs se quedan.</p>
 <p><b>Por que en raw prerouting.</b> Se evalua antes del fasttrack y de conntrack: corta aunque la conexion
 ya este establecida y sin depender del orden del <code>filter</code>. Las acciones de NAT y de colas van en su
@@ -17826,8 +17880,29 @@ class H(BaseHTTPRequestHandler):
             else:
                 ver.append({"nivel": "info", "donde": "router", "msg": "sin router configurado: solo la revision estatica"})
             ne = sum(1 for v in ver if v["nivel"] == "error"); na = sum(1 for v in ver if v["nivel"] == "aviso")
-            cab = "%d regla(s) &middot; %d error(es) &middot; %d aviso(s)" % (len(reglas), ne, na)
+            cab = "%d regla(s) \u00b7 %d error(es) \u00b7 %d aviso(s)" % (len(reglas), ne, na)
             return _txtv(cab + "\n" + "\n".join(lineas_verificacion(ver)))
+        if ruta == "/mikrotik/reglas/estado":
+            # La etiqueta de cada clase en Ajustes ("Reglas aplicadas" en verde, o lo que
+            # falta). JSON; con el router caido, {"_error": motivo} y la pagina no se rompe.
+            if not self._admin():
+                return self._deny()
+            rid = (q.get("rid", [""])[0]).strip()
+            r = next((x for x in cargar_routers() if x.get("id") == rid), None) if rid else router_defecto()
+            if not r or not (r.get("HOST") and r.get("USER") and r.get("PASS")):
+                res = {"_error": "router sin conexion configurada"}
+            else:
+                try:
+                    res = estado_reglas(r)
+                except Exception as ex:
+                    res = {"_error": "no se pudo hablar con el router: %s" % ex}
+            b = json.dumps(res).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers(); self.wfile.write(b)
+            return
         if ruta in ("/mikrotik/reglas/plan", "/mikrotik/reglas/aplicar", "/mikrotik/reglas/quitar"):
             # Las reglas de una clase en UN router: vista previa (sin tocar), aplicar o quitar.
             # Responde texto plano para el modal: "OK <cabecera>\n<rsc...>" o "ERR: motivo".
@@ -17850,12 +17925,13 @@ class H(BaseHTTPRequestHandler):
             try:
                 if ruta.endswith("/plan"):
                     p = plan_reglas(r, cat)
-                    cab = "%d cambio(s) en %s &middot; accion: %s &middot; lista: %s" % (
+                    # texto plano: el modal lo escapa, una entidad salia tal cual ("&middot;")
+                    cab = "%d cambio(s) en %s \u00b7 accion: %s \u00b7 lista: %s" % (
                         p["cambios"], r.get("nombre") or r.get("HOST", ""), ACCIONES.get(p["accion"], p["accion"]), p["lista"])
                     if p["aviso"]:
-                        cab += " &middot; " + p["aviso"]
+                        cab += " \u00b7 " + p["aviso"]
                     if p.get("bloqueado"):
-                        cab += " &middot; el verificador encontro errores: no se puede aplicar"
+                        cab += " \u00b7 el verificador encontro errores: no se puede aplicar"
                     _lin = lineas_verificacion(p.get("verificacion", [])) + p["rsc"]
                     return _txt(True, cab + (("\n" + "\n".join(_lin)) if _lin else ""))
                 if ruta.endswith("/aplicar"):

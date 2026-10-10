@@ -45,7 +45,7 @@ PIEZAS = ("ACCIONES", "ACCIONES_POR_CAT", "ACCION_DEFECTO", "T_RAW", "T_NAT", "T
           "_TABLA_RSC", "_PROPS_TABLA", "RESPALDOS_MK", "accion_de_clase", "reglas_de_accion",
           "_com_regla", "_prefijo_regla", "_rsc_val", "rsc_de", "_reglas_nuestras", "_params_accion",
           "_plan", "_plan_en", "plan_reglas", "_mk_print_todo", "_mk_print", "respaldar_firewall", "aplicar_reglas",
-          "quitar_reglas", "guardar_mk", "_mk_globales")
+          "quitar_reglas", "guardar_mk", "_mk_globales", "estado_reglas")
 
 
 class RouterFalso(object):
@@ -133,6 +133,31 @@ def entorno():
     ns["_mk_globales"] = lambda: m
     td = tempfile.mkdtemp(); ns["RESPALDOS_MK"] = os.path.join(td, "backups")
     return ns, rt, m, logs, td
+
+
+def estado_por_clase():
+    """La etiqueta de Ajustes: "Reglas aplicadas" en verde cuando el router ya tiene lo que
+    toca. Con UN login para todas las clases (abrir MikroTik no puede costar ocho)."""
+    ns, rt, m, logs, td = entorno()
+    rt.t["/interface/list"] = [{".id": "*1", "name": "WAN"}]
+    conexiones = []
+    ns["mk_conectar"] = lambda d, timeout=6: (conexiones.append(1), rt)[1]
+    e = ns["estado_reglas"]({"id": "r1"})
+    check("estado: una sola conexion para todas las clases", len(conexiones) == 1, len(conexiones))
+    check("  router vacio: las clases con accion salen pendientes, con cuantos cambios",
+          e["botnet"]["estado"] == "pendientes" and e["botnet"]["cambios"] == 5, e["botnet"])
+    check("  las que no tienen accion (p2p/minado/otros) no dicen nada",
+          all(e[c]["estado"] == "ninguna" for c in ("p2p", "minado", "otros")), e)
+    ok, msg, _p = ns["aplicar_reglas"]({"id": "r1"}, "botnet", quien="admin")
+    e2 = ns["estado_reglas"]({"id": "r1"})
+    check("  tras aplicar botnet: 'aplicadas' (0 cambios)", ok and e2["botnet"] == {"estado": "aplicadas", "cambios": 0}, (msg, e2["botnet"]))
+    check("  y las demas siguen pendientes", e2["fuerza"]["estado"] == "pendientes", e2["fuerza"])
+    m["ACCION_BOTNET"] = "nada"
+    e3 = ns["estado_reglas"]({"id": "r1"})
+    check("  si la clase pasa a 'nada' y quedan reglas en el router: pendientes (hay que quitarlas)",
+          e3["botnet"]["estado"] == "pendientes" and e3["botnet"]["cambios"] == 5, e3["botnet"])
+    ns["quitar_reglas"]({"id": "r1"}, "botnet", quien="admin")
+    check("  y quitadas: ninguna", ns["estado_reglas"]({"id": "r1"})["botnet"]["estado"] == "ninguna", "")
 
 
 def main():
@@ -397,6 +422,7 @@ add chain=prerouting action=drop protocol=tcp dst-port=25
     g = ns["_mk_globales"]()
     check("guardar_mk conserva ACCION_*", g.get("ACCION_BOTNET") == "solo-web" and g.get("ACCION_DNS_IP") == "192.0.2.53" and g.get("ACCION_LIMITE_P2P") == "2M", g)
 
+    estado_por_clase()
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0
 

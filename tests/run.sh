@@ -125,6 +125,7 @@ correr "barra: menu del usuario (Mi cuenta, clave, cerrar sesion, reloj) y su fo
 correr "api-ssl del MikroTik: recuerda el cifrado, dice cada fallo, aplicar con una conexion" "$PY" tests/test_mk_tls.py
 correr "listas del router: sync contra SU lista, falta en el router, y recargar solo lo que falta" "$PY" tests/test_recargar_listas.py
 correr "instalador: las claves se entregan siempre (una para las dos webs, -P las recupera)" "$PY" tests/test_instalador_claves.py
+correr "modo VPN: solo se recibe por el tunel (firewall propio, sniff-target = IP del tunel)" "$PY" tests/test_solo_vpn.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

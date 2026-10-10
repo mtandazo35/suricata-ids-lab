@@ -20381,6 +20381,102 @@ fi
 PUB_IP="$(ip -o -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
 [ -n "$PUB_IP" ] || PUB_IP="$(ip -o -4 addr show dev "$IFACE" scope global | awk '{split($4,a,"/"); print a[1]; exit}')"
 WEB_URL="https://${PUB_IP:-<IP>}:${WEB_PORT}"
+# A donde manda el MikroTik el espejo. En local, la IP del sensor en la LAN. En VPN NO es
+# la publica: con la publica el espejo viaja por internet en claro (y el firewall del modo
+# VPN lo descarta); es la IP del sensor DENTRO del tunel, la que usa para llegar al router.
+ESPEJO_IP="$PUB_IP"
+if [ "$TZSP" -eq 1 ] && [ "$ESPEJO_DONDE" = "vpn" ]; then
+  _m1="${MIRROR_SRC%%,*}"; _m1="${_m1%%/*}"; _m1="$(printf '%s' "$_m1" | tr -d ' ')"
+  _rt="$(ip -o -4 route get "$_m1" 2>/dev/null || true)"
+  _rdev="$(printf '%s\n' "$_rt" | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' || true)"
+  _rsrc="$(printf '%s\n' "$_rt" | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
+  _rwan="$(ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}' || true)"
+  if [ -n "$_rdev" ] && [ -n "$_rsrc" ] && [ "$_rdev" != "$_rwan" ]; then
+    ESPEJO_IP="$_rsrc"
+    ok "VPN: el MikroTik (${_m1}) se alcanza por ${_rdev}; el espejo va a ${ESPEJO_IP}."
+  else
+    ESPEJO_IP=""
+    warn "VPN: el MikroTik (${_m1}) aun no se alcanza por un tunel (sale por ${_rdev:-?})."
+    warn "     Levanta la VPN y re-ejecuta: las reglas del router necesitan la IP del sensor en el tunel."
+  fi
+fi
+ESPEJO_IP_TXT="${ESPEJO_IP:-<IP-del-sensor-en-la-VPN>}"
+
+# ------------------------------------------- modo VPN: el sensor solo escucha por el tunel
+# "Solo debe recibir por VPN": desde la interfaz de internet (la de la ruta por defecto) no
+# entra el espejo, ni se abren el panel y EveBox, ni LLMNR. Tabla nft PROPIA (no depende
+# de UFW ni lo toca; un drop aqui no lo salta nadie y un accept no abre nada de UFW).
+# SSH no se toca: es la puerta para arreglar cualquier cosa. Las reglas llevan contador:
+# si el espejo llegara por internet (sensor en realidad local), suricata-espejo lo dice.
+FW_BIN=/usr/local/sbin/suricata-ids-fw
+FW_UNIT=/etc/systemd/system/suricata-ids-fw.service
+if [ "$TZSP" -eq 1 ] && [ "$ESPEJO_DONDE" = "vpn" ]; then
+  command -v nft >/dev/null 2>&1 || apt-get install -y -qq nftables >/dev/null 2>&1 || true
+  _FW_WEB="${DASH_PORT:-5637}"
+  [ "$WEB" -eq 1 ] && _FW_WEB="${_FW_WEB}, ${WEB_PORT}"
+  _FW_ACEPTA=""
+  if [ -n "$GESTION" ]; then
+    _FW_GES="$(printf '%s' "$GESTION" | tr -d ' ' | sed 's/,/, /g')"
+    _FW_ACEPTA="    iifname \"\$WAN\" ip saddr { ${_FW_GES} } tcp dport { ${_FW_WEB} } accept comment \"web desde -a\""
+  fi
+  cat > "$FW_BIN" <<FWSH
+#!/bin/sh
+# Generado por install-suricata.sh (modo VPN): el sensor solo escucha por el tunel.
+# Desde la interfaz de internet (la de la ruta por defecto) se descarta el espejo TZSP
+# (udp ${TZSP_PORT}), el panel y EveBox (tcp ${_FW_WEB}) y LLMNR (5355). SSH no se toca.
+# Ver contadores: nft list table inet suricata_ids
+# Quitarlo:       systemctl disable --now suricata-ids-fw   (o reinstalar con -e local)
+NFT="\$(command -v nft || echo /usr/sbin/nft)"
+if [ "\${1:-start}" = "stop" ]; then
+  "\$NFT" delete table inet suricata_ids 2>/dev/null
+  exit 0
+fi
+WAN="\$(ip -o -4 route show to default 2>/dev/null | awk '{print \$5; exit}')"
+if [ -z "\$WAN" ]; then
+  echo "suricata-ids-fw: sin ruta por defecto, no se aplica nada" >&2
+  exit 0
+fi
+"\$NFT" delete table inet suricata_ids 2>/dev/null
+"\$NFT" -f - <<NFTR
+table inet suricata_ids {
+  chain input {
+    type filter hook input priority -10; policy accept;
+${_FW_ACEPTA}
+    iifname "\$WAN" udp dport ${TZSP_PORT} counter drop comment "espejo TZSP solo por la VPN"
+    iifname "\$WAN" tcp dport { ${_FW_WEB} } counter drop comment "panel y EveBox solo por la VPN"
+    iifname "\$WAN" meta l4proto { tcp, udp } th dport 5355 drop comment "LLMNR"
+  }
+}
+NFTR
+FWSH
+  chmod 755 "$FW_BIN"
+  cat > "$FW_UNIT" <<UNIT
+[Unit]
+Description=Suricata IDS (modo VPN): solo se escucha por el tunel
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${FW_BIN} start
+ExecStop=${FW_BIN} stop
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable suricata-ids-fw >/dev/null 2>&1 || true
+  if systemctl restart suricata-ids-fw; then
+    ok "Solo por la VPN: desde internet no entran el espejo (${TZSP_PORT}/udp) ni la web (${_FW_WEB}). SSH sigue abierto."
+  else
+    warn "No pude aplicar el firewall del modo VPN (journalctl -u suricata-ids-fw)."
+  fi
+elif [ -f "$FW_UNIT" ]; then
+  # se reinstala en local: el espejo llega por la LAN y no puede quedar bloqueado
+  systemctl disable --now suricata-ids-fw >/dev/null 2>&1 || true
+  rm -f "$FW_UNIT" "$FW_BIN"
+  systemctl daemon-reload
+  ok "Modo local: quitado el firewall del modo VPN (el espejo puede llegar por la LAN)."
+fi
 
 if [ "$TZSP" -eq 1 ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
   if [ -n "$MIRROR_SRC" ]; then
@@ -20505,8 +20601,42 @@ def fila(etq, valor, nota=""):
     print("  %-18s %s%s" % (etq, valor, ("   " + GRIS + nota + FIN) if nota else ""))
 
 
+def fuera_del_tunel():
+    """Paquetes del espejo descartados por llegar por internet y no por la VPN (contador
+    del firewall del modo VPN). 0 si no hay ese firewall o no se puede leer."""
+    try:
+        out = subprocess.check_output(["nft", "list", "table", "inet", "suricata_ids"],
+                                      stderr=subprocess.DEVNULL).decode()
+    except (OSError, subprocess.CalledProcessError):
+        return 0
+    for l in out.splitlines():
+        if "udp dport" in l and "counter packets" in l:
+            try:
+                return int(l.split("counter packets", 1)[1].split()[0])
+            except (IndexError, ValueError):
+                return 0
+    return 0
+
+
+def recorte_configurado():
+    """El recorte del servicio (TZSP_BYTES). El estado del receptor solo lo trae cuando ya
+    llego algo; sin trafico decia "recorte apagado" con el recorte puesto."""
+    try:
+        out = subprocess.check_output(["systemctl", "show", "tzsp-decap", "-p", "Environment"],
+                                      stderr=subprocess.DEVNULL).decode()
+    except (OSError, subprocess.CalledProcessError):
+        return 0
+    for tok in out.replace("Environment=", " ").split():
+        if tok.startswith("TZSP_BYTES="):
+            try:
+                return int(tok.split("=", 1)[1])
+            except ValueError:
+                return 0
+    return 0
+
+
 def veredicto(receptor, suri, vistos, rechazados, aceptados,
-              entra, llega, desperdicio, alertas, minutos):
+              entra, llega, desperdicio, alertas, minutos, fuera=0):
     """Que pasa y, sobre todo, que hacer. Devuelve (nivel, frase).
 
     El orden importa: primero lo que deja el sensor inutil, despues lo que lo degrada.
@@ -20517,6 +20647,11 @@ def veredicto(receptor, suri, vistos, rechazados, aceptados,
         return "rojo", "El receptor TZSP esta caido. systemctl start tzsp-decap"
     if not suri:
         return "rojo", "Suricata esta parado. systemctl start suricata"
+    if not vistos and fuera:
+        return "rojo", ("El espejo llega por INTERNET, no por la VPN, y el firewall del modo "
+                        "VPN lo descarta (%d paquetes). En el MikroTik, sniff-target tiene que "
+                        "ser la IP de este sensor DENTRO del tunel. Si el sensor esta en la "
+                        "misma LAN que el router, reinstala con -e local." % fuera)
     if not vistos:
         return "rojo", ("Nadie esta espejando hacia aqui. Revisa las reglas del MikroTik "
                         "y que sniff-target sea la IP de este sensor.")
@@ -20570,7 +20705,7 @@ def main():
 
     rx = int(est.get("rx", 0) or 0)
     rec = int(est.get("recortados", 0) or 0)
-    recorte = int(est.get("recorte_bytes", 0) or 0)
+    recorte = int(est.get("recorte_bytes", 0) or 0) or recorte_configurado()
     # Acumulado desde que arranco el receptor. Sirve de contexto, NO para decidir: despues
     # de arreglar el router sigue diciendo lo de antes durante dias. Se aprendio cayendo
     # en ello: el acumulado marcaba 91% cuando en vivo ya no se tiraba casi nada.
@@ -20592,8 +20727,9 @@ def main():
     receptor = activo("tzsp-decap")
     suri = activo("suricata")
 
+    fuera = fuera_del_tunel()
     nivel, txt = veredicto(receptor, suri, vistos, ven_rech, aceptados,
-                           entra, llega, desperdicio, alertas, a.minutos)
+                           entra, llega, desperdicio, alertas, a.minutos, fuera)
 
     if a.json:
         print(json.dumps({"entra_mbps": entra, "a_suricata_mbps": round(llega, 2),
@@ -20616,6 +20752,9 @@ def main():
         fila("origenes", ROJO + "ninguno" + FIN, "nadie espeja hacia aqui")
     if ven_rech:
         fila("rechazados", AMBAR + ", ".join(sorted(ven_rech)) + FIN, "no autorizados")
+    if fuera:
+        fila("fuera de la VPN", AMBAR + "{:,}".format(fuera).replace(",", ".") + FIN,
+             "paquetes de espejo descartados por llegar por internet")
     fila("entrando (%s)" % (wan or "?"),
          "%.1f Mbps" % entra if entra is not None else "?")
     fila("a Suricata", "%.1f Mbps" % llega,
@@ -20629,6 +20768,8 @@ def main():
              "desde que arranco el receptor, no lo de ahora")
     elif recorte == 0:
         fila("recorte", "apagado", "-b 10000 si el sensor es remoto")
+    else:
+        fila("recorte", "%d bytes por flujo" % recorte)
     fila("alertas (%d min)" % a.minutos,
          "?" if alertas is None else "{:,}".format(alertas).replace(",", "."))
 
@@ -20939,12 +21080,12 @@ if [ -n "$MK_CRED" ]; then
   info "Configurando el MikroTik desde aqui (-k $MK_CRED)..."
   # La IP a la que el router tiene que mandar el espejo es la de ESTE sensor. Si se
   # equivoca, el espejo se va a otra parte y el panel dira "sin trafico" sin mas pista.
-  if /usr/local/bin/suricata-mikrotik-init -k "$MK_CRED" -s "${PUB_IP:-}" \
+  if /usr/local/bin/suricata-mikrotik-init -k "$MK_CRED" -s "${ESPEJO_IP:-}" \
        -e "$ESPEJO_DONDE" -p "$TZSP_PORT" -r "$HOME_NET"; then
     ok "MikroTik configurado: router dado de alta y espejo montado."
   else
     warn "No se pudo configurar el MikroTik. El sensor queda igual de operativo:"
-    warn "  reintenta con  suricata-mikrotik-init -k $MK_CRED -s ${PUB_IP:-<IP>} -e $ESPEJO_DONDE"
+    warn "  reintenta con  suricata-mikrotik-init -k $MK_CRED -s ${ESPEJO_IP_TXT} -e $ESPEJO_DONDE"
   fi
 fi
 
@@ -20958,7 +21099,7 @@ if [ "$ESPEJO_DONDE" = "vpn" ]; then
       # el DNS entero y aparte: pesa nada y es donde mas se detecta (C2, DGA,
       # tunneling). No lleva connection-bytes para que no se corte nunca.
       add chain=forward src-address-list=ids-vigilados protocol=udp dst-port=53 \\
-          action=sniff-tzsp sniff-target=${PUB_IP:-<IP>} sniff-target-port=${TZSP_PORT} \\
+          action=sniff-tzsp sniff-target=${ESPEJO_IP_TXT} sniff-target-port=${TZSP_PORT} \\
           passthrough=yes comment=\"espejo IDS: DNS completo\"
 "
   MK_AVISO="
@@ -21022,11 +21163,18 @@ cat <<EOF
                  ya no queda en texto plano en el .conf (esta hasheada). Guardala.
 EOF
 fi
+FW_TXT=""
+if [ "$TZSP" -eq 1 ] && [ "$ESPEJO_DONDE" = "vpn" ]; then
+  FW_TXT="
+    Solo VPN   : desde internet (${_rwan:-la WAN}) no entran ni el espejo ni el panel/EveBox;
+                 se entra por la VPN: http://${ESPEJO_IP_TXT}:${DASH_PORT:-5637}
+                 (-a <red> abre la web a esa red; -e local quita este firewall)"
+fi
 if [ "$TZSP" -eq 1 ]; then
 cat <<EOF
 
   ${c_g}Receptor TZSP (espejo MikroTik)${c_0}
-    Escucha    : UDP ${TZSP_PORT} en ${PUB_IP:-<IP>}  ->  ${TZSP_MON} (Suricata la captura)
+    Escucha    : UDP ${TZSP_PORT} en ${ESPEJO_IP_TXT}  ->  ${TZSP_MON} (Suricata la captura)${FW_TXT}
     Servicio   : tzsp-decap   (journalctl -u tzsp-decap -f  muestra rx/tx cada 60 s)
     ${c_g}Estoy leyendo?${c_0} : suricata-espejo
                  Mide 5 s y responde en una linea: cuanto entra, cuanto llega a
@@ -21050,10 +21198,10 @@ cat <<EOF
       #    tu IP publica y el sentido de vuelta NO se espejaria.
       /ip firewall mangle
       add chain=forward src-address-list=ids-vigilados ${MK_CB}\\
-          action=sniff-tzsp sniff-target=${PUB_IP:-<IP>} sniff-target-port=${TZSP_PORT} \\
+          action=sniff-tzsp sniff-target=${ESPEJO_IP_TXT} sniff-target-port=${TZSP_PORT} \\
           passthrough=yes comment="espejo IDS (ida)"
       add chain=forward dst-address-list=ids-vigilados ${MK_CB}\\
-          action=sniff-tzsp sniff-target=${PUB_IP:-<IP>} sniff-target-port=${TZSP_PORT} \\
+          action=sniff-tzsp sniff-target=${ESPEJO_IP_TXT} sniff-target-port=${TZSP_PORT} \\
           passthrough=yes comment="espejo IDS (vuelta)"
 ${MK_DNS}
       # 3) SIN ESTO NO FUNCIONA: con fasttrack activo, mangle solo ve los

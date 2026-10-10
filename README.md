@@ -115,6 +115,16 @@ router, anade `-e local` (ver [`-e local` o `-e vpn`](#-e-local-o--e-vpn-la-opci
 Opcional en la misma linea: `-a <red de gestion>` (quien puede abrir la web) y
 `-k /root/mk.conf` (que el instalador configure el espejo en el MikroTik por la API).
 
+**En modo VPN el sensor solo escucha por el tunel.** Un firewall propio (`suricata-ids-fw`,
+tabla nft `suricata_ids`, independiente de UFW) descarta lo que llega por la interfaz de
+internet: el espejo TZSP, el panel (5637) y EveBox (5636), y LLMNR. **SSH no se toca.** La web
+se abre por la VPN (`http://<IP del sensor en el tunel>:5637`) o desde las redes de `-a`.
+Las reglas que imprime para el router usan como `sniff-target` la **IP del sensor dentro del
+tunel**, que el instalador saca de la ruta hacia el MikroTik: por eso la VPN tiene que estar
+arriba al instalar (si no, lo avisa y deja el hueco). Si el espejo llegara por internet,
+`suricata-espejo` lo dice con el numero de paquetes descartados. `-e local` quita este
+firewall.
+
 ### Y en el MikroTik, dos lineas
 
 Instalar el sensor no basta: alguien tiene que mandarle el trafico. Si ya tienes una

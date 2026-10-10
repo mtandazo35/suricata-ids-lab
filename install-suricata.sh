@@ -9541,7 +9541,23 @@ PUERTOS_NOMBRE = {
     "445/tcp": "comparticion de archivos (SMB)", "1433/tcp": "SQL Server",
     "3306/tcp": "MySQL", "5900/tcp": "VNC", "53/udp": "DNS",
     "123/udp": "NTP", "161/udp": "SNMP", "1900/udp": "SSDP", "19/udp": "chargen",
+    "53/tcp": "DNS (por TCP)", "80/tcp": "web (HTTP)", "443/tcp": "web segura (HTTPS)",
+    "443/udp": "web segura (QUIC)", "8080/tcp": "web alterna / proxy (HTTP)",
+    "8443/tcp": "web segura alterna (HTTPS)", "3128/tcp": "proxy (HTTP)",
+    "2525/tcp": "correo saliente alterno (SMTP)", "110/tcp": "correo entrante (POP3)",
+    "143/tcp": "correo entrante (IMAP)", "993/tcp": "correo entrante (IMAP seguro)",
+    "995/tcp": "correo entrante (POP3 seguro)", "2323/tcp": "Telnet alterno",
+    "5555/tcp": "depuracion de Android (ADB)", "7547/tcp": "gestion remota de routers (TR-069)",
+    "8291/tcp": "Winbox (MikroTik)", "8728/tcp": "API de MikroTik", "21/tcp": "FTP",
+    "1194/udp": "OpenVPN", "389/udp": "CLDAP", "11211/udp": "memcached",
+    "5060/udp": "telefonia IP (SIP)", "5060/tcp": "telefonia IP (SIP)",
 }
+
+def que_es_puerto(k):
+    """Que es un puerto ("22/TCP" -> "SSH"). El sensor guarda el protocolo como lo da
+    Suricata (TCP/UDP, en mayusculas) y la tabla esta en minusculas: sin normalizar,
+    "Que es" salia vacio SIEMPRE, hasta para el 22 y el 53."""
+    return PUERTOS_NOMBRE.get(str(k or "").strip().lower(), "")
 
 def perfil_abuso(dias, n=7):
     """Por donde sale el abuso: puertos de destino y categorias de los ultimos n dias.
@@ -9564,7 +9580,7 @@ def perfil_abuso(dias, n=7):
     return {
         "dias": n, "alertas": total,
         "puertos": [{"puerto": k, "n": v, "pct": round(v * 100.0 / suma, 1),
-                     "que_es": PUERTOS_NOMBRE.get(k, "")} for k, v in tp],
+                     "que_es": que_es_puerto(k)} for k, v in tp],
         "categorias": sorted(cats.items(), key=lambda kv: -kv[1])[:6],
     }
 
@@ -9587,7 +9603,7 @@ def reglas_puertos(puertos, lista):
         proto = (proto or "tcp").lower()
         if proto not in ("tcp", "udp"):
             continue
-        que = PUERTOS_NOMBRE.get("%d/%s" % (num, proto), "")
+        que = que_es_puerto("%d/%s" % (num, proto))
         out.append('add chain=forward src-address-list=%s protocol=%s dst-port=%d '
                    'action=drop comment="Suricata: salida %d/%s%s"'
                    % (ros_lista(lista), proto, num, num, proto,
@@ -9824,7 +9840,7 @@ def plan_bloqueo_html(bl, limpio, esc=None):
         mot = (plan or {}).get("motivo", {}).get(pk, "")
         filas += ("<tr><td class=num>%d</td><td class=mono>%s</td><td>%s</td>"
                   "<td class=num>%s</td><td class=num>%s&nbsp;%%</td><td>%s</td></tr>"
-                  % (i, esc(pk), esc(p["que_es"] or "&mdash;"), format(p["n"], ","),
+                  % (i, esc(pk), esc(p["que_es"]) if p["que_es"] else "&mdash;", format(p["n"], ","),
                      p["pct"], esc(mot) or "&mdash;"))
 
     cab = ("<h3 style='margin:16px 0 4px;font-size:14px'>Que bloquear para dejar de "

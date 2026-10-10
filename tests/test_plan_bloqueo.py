@@ -32,7 +32,7 @@ _i = SRC.index("cat > /usr/local/bin/suricata-dashboard <<'DASH'")
 DASH = SRC[_i:].split("\n", 1)[1].split("\nDASH\n", 1)[0]
 ARBOL = ast.parse(DASH)
 
-PIEZAS = ("PUERTOS_NOMBRE", "perfil_abuso", "reglas_puertos", "IA_PLAN_SISTEMA",
+PIEZAS = ("PUERTOS_NOMBRE", "que_es_puerto", "perfil_abuso", "plan_bloqueo_html", "reglas_puertos", "IA_PLAN_SISTEMA",
           "ia_plan_bloqueo", "ia_activa", "_RE_IP", "_ia_huella", "_ia_cache",
           "_ia_guardar_cache", "_ia_estado", "_ia_guardar_estado", "_ia_apuntar",
           "ia_restantes", "IA_CACHE", "IA_ESTADO", "IA_CUOTA", "IA_TIMEOUT",
@@ -177,6 +177,29 @@ def main():
               n2["ia_plan_bloqueo"](p, []) is None, "")
     n2 = entorno(tempfile.mkdtemp(), "no es json")
     check("una respuesta ilegible tampoco da un plan", n2["ia_plan_bloqueo"](p, []) is None, "")
+
+    # =====================================================================================
+    # Con los puertos COMO LOS GUARDA EL SENSOR: "22/TCP" (Suricata da el protocolo en
+    # mayusculas). Con las claves en minusculas de arriba esto nunca se vio: "Que es" salia
+    # vacio siempre, y el guion de relleno se escapaba y se leia "&mdash;" en la tabla.
+    # =====================================================================================
+    f = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+    reales = {f: {"sal": 1000, "puertos": {"22/TCP": 700, "53/UDP": 290, "7777/TCP": 10},
+                  "cats": {"fuerza": 700}}}
+    pr = ns["perfil_abuso"](reales)
+    q = {x["puerto"]: x["que_es"] for x in pr["puertos"]}
+    check("con el protocolo en mayusculas (como lo guarda el sensor) dice que es",
+          q.get("22/TCP") == "SSH" and q.get("53/UDP") == "DNS", q)
+    check("  un puerto sin nombre conocido queda vacio", q.get("7777/TCP") == "", q)
+    import html as _html
+    ns.update({"html": _html, "cargar_metricas": lambda: reales,
+               "ia_plan_bloqueo": lambda *a, **k: None, "lista_de_categoria": lambda c: "L"})
+    h = ns["plan_bloqueo_html"]({"listas": []}, None)
+    check("la tabla no pinta '&mdash;' como texto (no se escapa el guion)", "&amp;mdash;" not in h, h[:300])
+    check("  dice SSH y DNS en 'Que es', y el guion de verdad donde no se sabe",
+          "<td>SSH</td>" in h and "<td>DNS</td>" in h and "<td>&mdash;</td>" in h, "")
+    check("  las reglas para el MikroTik tambien dicen que es (comentario)",
+          "salida 22/tcp - SSH" in ns["reglas_puertos"](["22/TCP"], "L"), ns["reglas_puertos"](["22/TCP"], "L"))
 
     # =====================================================================================
     # Las reglas que se pegan

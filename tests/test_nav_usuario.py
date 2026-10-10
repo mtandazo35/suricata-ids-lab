@@ -107,6 +107,9 @@ def main():
           "_cuenta(location.hash.slice(1))" in pp and "hashchange" in pp, "")
     check("  lectura/operador: su tarjeta Perfil; admin: SU fila de Usuarios",
           "openm('perfil')" in pp and "abrirEdit(bs[k])" in pp and "data-user')===_YO" in pp, "")
+    check("  la ventana de editar dice de quien es y avisa si falta nombre/correo (vacio en los datos, no fallo)",
+          "<h3 id=etit>Editar usuario</h3>" in pp and "'Editar usuario: '+_u" in pp
+          and "placeholder='Sin nombre guardado'" in pp and "placeholder='Sin correo guardado'" in pp, "")
     yo_js = re.search(r'"var _YO=" \+ (.+?) \+ ";"', pp).group(1)
     raro = "a</script><script>alert(1)//"
     salida = eval(yo_js, {"json": json, "yo": raro})

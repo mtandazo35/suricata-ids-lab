@@ -11927,7 +11927,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<button class=primary type=submit>Crear usuario</button></div></form></div></div>")
         modal_edit = (
             "<div id=ovlEdit class=ovl hidden onmousedown=\"this._dn=event.target\" onclick=\"if(event.target===this&&this._dn===this){cerrar('ovlEdit')}\">"
-            "<div class=modal><div class=mhead><h3>Editar usuario</h3>"
+            "<div class=modal><div class=mhead><h3 id=etit>Editar usuario</h3>"
             "<button class=mx type=button onclick=\"cerrar('ovlEdit')\" aria-label=Cerrar>&times;</button></div>"
             "<form method=post action='/perfil'><input type=hidden name=accion value=edit_user>"
             "<input type=hidden name=user id=eu>"
@@ -12093,6 +12093,11 @@ def perfil_page(msg="", ok=False, edit_user=None):
               "function abrirEdit(b){document.getElementById('eu').value=b.getAttribute('data-user');"
               "document.getElementById('en').value=b.getAttribute('data-nombre')||'';"
               "document.getElementById('ec').value=b.getAttribute('data-correo')||'';"
+              # la cuenta que crea el instalador no trae nombre ni correo: en la tabla y en el
+              # menu se ve el usuario en su lugar, y la ventana vacia parecia un fallo
+              "var _u=b.getAttribute('data-user')||'';document.getElementById('etit').textContent='Editar usuario: '+_u;"
+              "document.getElementById('en').placeholder='Sin nombre guardado';"
+              "document.getElementById('ec').placeholder='Sin correo guardado';"
               "document.getElementById('er').value=b.getAttribute('data-role')||'lectura';"
               "var p=document.querySelector('#ovlEdit input[name=npass]');if(p)p.value='';abrir('ovlEdit');}"
               "function ufiltrar(){var q=(document.getElementById('usearch').value||'').toLowerCase();"

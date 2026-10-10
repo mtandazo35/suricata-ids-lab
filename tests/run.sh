@@ -123,6 +123,7 @@ correr "acciones por categoria: tarjeta de Ajustes y rutas plan/aplicar/quitar" 
 correr "verificador de reglas: errores que bloquean, avisos que no, y releer tras aplicar" "$PY" tests/test_verificador_reglas.py
 correr "barra: menu del usuario (Mi cuenta, clave, cerrar sesion, reloj) y su foto por /mi-foto" "$PY" tests/test_nav_usuario.py
 correr "api-ssl del MikroTik: recuerda el cifrado, dice cada fallo, aplicar con una conexion" "$PY" tests/test_mk_tls.py
+correr "listas del router: sync contra SU lista, falta en el router, y recargar solo lo que falta" "$PY" tests/test_recargar_listas.py
 
 printf '\n'
 if [ "$fallos" -eq 0 ]; then

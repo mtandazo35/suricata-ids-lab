@@ -6642,49 +6642,187 @@ def abonado_de(ip, rid="", mapa=None):
             return datos
     return {}
 
+def _mk_ips_listas_en(s_, listas):
+    """{lista: set(ips)} de esas address-lists, sobre una conexion abierta. Una consulta
+    filtrada por lista: pedir todas traeria tambien las blocklists de miles de entradas."""
+    out = {}
+    for lst in sorted(set(l for l in listas if l)):
+        _mk_send(s_, ["/ip/firewall/address-list/print", "=.proplist=address", "?list=" + lst])
+        ok, frases, err = _mk_reply(s_)
+        if not ok:
+            raise IOError(err or "no se pudo leer la lista %s" % lst)
+        out[lst] = {a[len("=address="):] for f in frases if f and f[0] == "!re"
+                    for a in f if a.startswith("=address=")}
+    return out
+
+def _mk_ips_listas(router, listas):
+    s_ = mk_conectar(cargar_mk_de(router))
+    try:
+        return _mk_ips_listas_en(s_, listas)
+    finally:
+        try: s_.close()
+        except Exception: pass
+
+def _rid_entrada(k, v, rid_def):
+    return rid_de(k) or ((v or {}).get("router") or rid_def)
+
 def mk_sync_enviados():
     """Sincroniza el registro del panel con lo que REALMENTE hay en el MikroTik, para que el
-    indicador 'En cuarentena' sea fiable y no se reintente enviar algo que ya esta. Agrega los
-    que estan en el router y faltan (marcados manual), y quita los que ya no estan."""
+    indicador 'En cuarentena' sea fiable y no se reintente enviar algo que ya esta.
+
+    Cada entrada se compara con SU lista (la de su categoria, la que se guardo al
+    mandarla). Antes se comparaba todo con la lista vieja unica (LIST): cada 5 minutos se
+    soltaba del registro a todo CPE que estaba en clientes-botnet, clientes-spam..., y el
+    panel lo olvidaba aunque siguiera bloqueado (el liberador ya no podia sacarlo, y la
+    politica lo volvia a mandar en el ciclo siguiente).
+
+    - Lo que esta en el router y el panel no conoce, se registra (como manual).
+    - Lo que el panel tiene y FALTA en el router:
+        con TTL -> caduco en el router: se suelta, como siempre;
+        permanente (politica, o sin TTL) -> NO se olvida: queda marcado "falta en el
+        router" (en_router=False) para que "Recargar las listas" lo vuelva a cargar."""
     routers = [r for r in cargar_routers() if r.get("ENABLED") == "1" and (r.get("HOST") or "")]
     if not routers:
         return
     multi = len(cargar_routers()) > 1
-    for list_key, sent_path in (("LIST", MK_SENT), ("LIST_DNS", MK_SENT_DNS)):
+    rid_def = routers[0]["id"]
+    nowt = int(time.time())
+    for list_key, ttl_key, sent_path in (("LIST", "TTL", MK_SENT), ("LIST_DNS", "TTL_DNS", MK_SENT_DNS)):
         # Se consulta CADA router y se compara solo contra SUS entradas. Mirar un solo
         # router borraria del registro los CPEs de los demas, que seguirian bloqueados y
         # ya invisibles para el panel (no habria forma de liberarlos).
-        reales = {}          # id de router -> ips en esa lista
+        env0 = cargar_enviados(sent_path)
+        reales = {}          # id de router -> {lista: ips}
+        base = {}            # id de router -> lista por defecto (la vieja unica)
+        cfg = {}
         fallo = set()
         for r in routers:
-            d = cargar_mk_de(r)
-            lst = d.get(list_key, "")
-            if not lst:
+            d = cargar_mk_de(r); cfg[r["id"]] = d
+            base[r["id"]] = d.get(list_key, "")
+            listas = {base[r["id"]]}
+            if sent_path == MK_SENT:
+                listas |= {lista_de_categoria(c) for c in ACCIONES_POR_CAT}
+            listas |= {(v or {}).get("lista", "") for k, v in env0.items()
+                       if _rid_entrada(k, v, rid_def) == r["id"]}
+            listas.discard("")
+            if not listas:
                 continue
             try:
-                reales[r["id"]] = set(mk_list_ips(lst, router=r))
+                reales[r["id"]] = _mk_ips_listas(r, listas)
             except Exception:
                 fallo.add(r["id"])         # ese router no responde -> no tocar lo suyo
         if not reales:
             continue
-        env = cargar_enviados(sent_path); cambiado = False; nowt = int(time.time())
-        for rid, ips in reales.items():
-            for ip in ips:
-                k = clave_cpe(ip, rid if multi else "")
-                if k not in env:           # esta en el router pero no en el panel -> registrarlo
-                    env[k] = {"cuando": nowt, "score": "", "por": "mikrotik", "manual": True,
-                              "router": rid}
-                env[k]["en_router"] = True; env[k]["sync_ts"] = nowt
-                env[k].setdefault("router", rid)
-                cambiado = True
-        for k in list(env.keys()):
-            rid = rid_de(k) or (env[k].get("router") or (routers[0]["id"] if routers else ""))
-            if rid in fallo or rid not in reales:
-                continue                   # de ese router no sabemos nada ahora mismo
-            if ip_de(k) not in reales[rid]:   # ya no esta en SU router -> soltar
-                env.pop(k, None); cambiado = True
-        if cambiado:
-            guardar_enviados(env, sent_path)
+        # se relee DENTRO del cerrojo: hablar con los routers lleva segundos y otro hilo
+        # (barrido rapido, politicas) puede haber anotado algo mientras tanto
+        with _ENV_LOCK:
+            env = cargar_enviados(sent_path); cambiado = False
+            for rid, por_lista in reales.items():
+                for lst, ips in por_lista.items():
+                    for ip in ips:
+                        k = clave_cpe(ip, rid if multi else "")
+                        if k not in env:   # esta en el router pero no en el panel -> registrarlo
+                            env[k] = {"cuando": nowt, "score": "", "por": "mikrotik", "manual": True,
+                                      "router": rid, "lista": lst}
+                            cambiado = True
+            for k in list(env.keys()):
+                v = env[k]
+                rid = _rid_entrada(k, v, rid_def)
+                if rid in fallo or rid not in reales:
+                    continue                   # de ese router no sabemos nada ahora mismo
+                lst = v.get("lista") or base.get(rid, "")
+                if not lst:
+                    continue
+                if ip_de(k) in reales[rid].get(lst, ()):
+                    v["en_router"] = True; v["sync_ts"] = nowt
+                    v.pop("falta_desde", None)
+                    v.setdefault("router", rid)
+                    cambiado = True
+                elif v.get("pol") or _ttl_efectivo(cfg.get(rid) or {}, ttl_key) == "":
+                    if v.get("en_router") is not False:
+                        v["en_router"] = False; v["falta_desde"] = nowt; cambiado = True
+                else:
+                    env.pop(k, None); cambiado = True   # tenia TTL y ya no esta: caduco
+            if cambiado:
+                guardar_enviados(env, sent_path)
+
+def recargar_listas(router, quien="?"):
+    """Vuelve a cargar en ESE router las IPs que el panel tiene en cuarentena y faltan en
+    su address-list (alguien vacio la lista, se restauro un backup viejo, se cambio el
+    router...). Las que ya estan se omiten; las que ahora estan en "nunca bloquear" no se
+    cargan. Una sola conexion. (ok, mensaje)"""
+    rid = (router or {}).get("id", "")
+    rs = cargar_routers()
+    rid_def = rs[0]["id"] if rs else ""
+    d = cargar_mk_de(router)
+    pend = []            # (registro, clave, ip, lista, ttl, categoria)
+    for list_key, ttl_key, path in (("LIST", "TTL", MK_SENT), ("LIST_DNS", "TTL_DNS", MK_SENT_DNS)):
+        for k, v in (cargar_enviados(path) or {}).items():
+            v = v or {}
+            if _rid_entrada(k, v, rid_def) != rid:
+                continue
+            lst = v.get("lista") or d.get(list_key, "")
+            if not lst:
+                continue
+            ttl = "" if v.get("pol") else _ttl_efectivo(d, ttl_key)
+            pend.append((path, k, ip_de(k), lst, ttl, v.get("categoria", "") or ""))
+    if not pend:
+        return (True, "el panel no tiene ninguna IP en cuarentena para este router: no hay nada que cargar")
+    det = {}
+    cargadas = {MK_SENT: [], MK_SENT_DNS: []}
+    s_ = mk_conectar(d)
+    try:
+        hay = _mk_ips_listas_en(s_, {p[3] for p in pend})
+        for path, k, ip, lst, ttl, cat in pend:
+            e = det.setdefault(lst, {"ya": 0, "cargadas": 0, "nunca": 0, "fallos": 0, "err": ""})
+            if ip in hay.get(lst, ()):
+                e["ya"] += 1
+                continue
+            if nunca_bloquear(ip):
+                e["nunca"] += 1
+                continue
+            words = ["/ip/firewall/address-list/add", "=list=" + lst, "=address=" + ip,
+                     "=comment=suricata %s recargada %s" % (cat or "cuarentena", time.strftime("%Y-%m-%d %H:%M"))]
+            if ttl:
+                words.append("=timeout=" + ttl)
+            _mk_send(s_, words)
+            ok, _fr, err = _mk_reply(s_)
+            if ok or "already have such entry" in (err or "").lower():
+                e["cargadas"] += 1
+                cargadas[path].append(k)
+                hay.setdefault(lst, set()).add(ip)
+            else:
+                e["fallos"] += 1
+                e["err"] = e["err"] or (err or "")
+    finally:
+        try: s_.close()
+        except Exception: pass
+    nowt = int(time.time())
+    for path, ks in cargadas.items():
+        if not ks:
+            continue
+        with _ENV_LOCK:
+            env = cargar_enviados(path)
+            for k in ks:
+                if k in env:
+                    env[k]["en_router"] = True; env[k]["sync_ts"] = nowt
+                    env[k].pop("falta_desde", None)
+            guardar_enviados(env, path)
+    tot = {c: sum(e[c] for e in det.values()) for c in ("ya", "cargadas", "nunca", "fallos")}
+    partes = []
+    for lst in sorted(det):
+        e = det[lst]
+        t = "%s: %d cargada(s), %d ya estaban" % (lst, e["cargadas"], e["ya"])
+        if e["nunca"]:
+            t += ", %d en 'nunca bloquear' (no se cargan)" % e["nunca"]
+        if e["fallos"]:
+            t += ", %d fallaron (%s)" % (e["fallos"], e["err"][:80])
+        partes.append(t)
+    bitacora("LISTAS-RECARGADAS", "router=%s cargadas=%d ya=%d nunca=%d fallos=%d" % (
+        rid, tot["cargadas"], tot["ya"], tot["nunca"], tot["fallos"]), quien=quien)
+    cab = ("%d IP(s) cargadas en el router, %d ya estaban" % (tot["cargadas"], tot["ya"])
+           if tot["cargadas"] else "No faltaba nada: las %d IP(s) ya estaban en el router" % tot["ya"])
+    return (tot["fallos"] == 0, cab + ". " + "; ".join(partes))
 
 # --- allowlist "nunca bloquear": IPs/CIDR que jamas van a cuarentena (infra, clientes clave) ---
 NUNCA_FILE = "/etc/suricata-nunca-bloquear.lst"
@@ -7059,7 +7197,7 @@ def cpes_por_lista():
         out.setdefault(l, []).append({
             "clave": k, "ip": ip_de(k), "router": v.get("router", "") or rid_de(k),
             "cuando": int(v.get("cuando", 0) or 0), "por": str(v.get("por", "") or ""),
-            "categoria": v.get("categoria", "") or ""})
+            "categoria": v.get("categoria", "") or "", "falta": v.get("en_router") is False})
     for l in out:
         out[l].sort(key=lambda e: e["cuando"], reverse=True)
     return out
@@ -11401,6 +11539,9 @@ def _card_listas(m):
         "function reglasAplicar(cat){_accBox(\"<div class='mkspin'></div><div><b>Aplicando&hellip;</b><br>"
         "<span style='font-size:13px;color:#52514e'>Primero se respalda el firewall del router.</span></div>\");"
         "_accResultado('/mikrotik/reglas/aplicar',cat,'Aplicado');}"
+        "function listasRecargar(){_accBox(\"<div class='mkspin'></div><div><b>Cargando las listas&hellip;</b><br>"
+        "<span style='font-size:13px;color:#52514e'>Se comparan con el router y se cargan solo las que faltan.</span></div>\");"
+        "_accResultado('/mikrotik/listas/recargar','','Listas recargadas');}"
         "function reglasQuitar(cat){_accBox(\"<div class='mkspin'></div><div><b>Quitando&hellip;</b></div>\");"
         "_accResultado('/mikrotik/reglas/quitar',cat,'Quitadas');}"
         "function _accVer(V){if(!V.length)return '';return \"<ul style='margin:0 0 10px;padding-left:18px;font-size:13px'>\"+"
@@ -11437,6 +11578,13 @@ def _card_listas(m):
         "Tiene que existir en el router, o la regla se rechaza al aplicar.</div></div>"
         % esc("" if (m.get("ACCION_WAN_LIST", "WAN") or "").lower() == "ninguna" else m.get("ACCION_WAN_LIST", "WAN")) +
         "<div class=grid2>" + filas + "</div>"
+        "<div class=field style='margin-top:6px'>"
+        "<button type=button class=cancelbtn onclick=\"if(ask(this,'Recargar las listas en el router',"
+        "'Se vuelven a cargar en el router las IPs que el panel tiene en cuarentena y que faltan en su lista. "
+        "Las que ya estan se dejan como estan; no se quita nada.','Recargar',''))listasRecargar()\">"
+        "&#8635; Recargar las listas en el router</button>"
+        "<div class=hint>Si alguien vacio una lista en el router (o se restauro un respaldo viejo), "
+        "esto vuelve a cargar las IPs que el panel tiene en cuarentena. Las que ya estan se omiten.</div></div>"
         "<h3 style='margin:18px 0 2px;font-size:15px'>Caducidad</h3>"
         "<p class=sub2 style='margin:0 0 10px'>Cuanto dura cada entrada en el router si no "
         "se mantiene sola. Vale para todas las listas de arriba.</p>"
@@ -13425,6 +13573,11 @@ regla que no lleve ese comentario. Junto a los botones, una etiqueta dice como e
 <b style="color:#1a7f37">&#10003; Reglas aplicadas</b> (el router ya tiene exactamente lo que toca),
 <b style="color:#a15c12">N cambio(s) sin aplicar</b>, o <i>Sin guardar</i> si cambiaste la accion y aun no la
 guardaste; se comprueba al abrir el apartado, al cambiar de router y despues de aplicar o quitar.
+Debajo de las listas, <b>Recargar las listas en el router</b> vuelve a cargar las IPs que el panel tiene
+en cuarentena y que faltan en su address-list (alguien la vacio, se restauro un respaldo viejo); las que ya
+estan se omiten y no se quita nada. El panel compara cada IP con <b>su</b> lista cada pocos minutos: si una
+entrada permanente falta en el router, no la olvida, la marca <i>falta en el router</i> para poder recargarla
+(una con TTL que ya no esta se da por caducada).
 <i>Quitar del router</i> elimina solo las del panel para esa clase; la
 lista y sus IPs se quedan.</p>
 <p><b>Por que en raw prerouting.</b> Se evalua antes del fasttrack y de conntrack: corta aunque la conexion
@@ -16603,6 +16756,8 @@ def cuarentena_page(msg="", es_admin=False):
             p.append("sigue activo" if mm.get("sigue") else "sin actividad reciente")
         if mm.get("en_router"):
             p.append("en router ✓")
+        elif mm.get("en_router") is False:
+            p.append("FALTA en el router (Ajustes > MikroTik > Recargar las listas)")
         return " · ".join(p)
 
     def _mot_txt(mm):
@@ -16738,7 +16893,9 @@ def cuarentena_page(msg="", es_admin=False):
                               "<td>%s</td><td class=mono>%s</td><td>%s</td></tr>"
                               # la ficha busca por IP (como el resto del panel), no por clave
                               % (esc(e["ip"]), esc(e["ip"]),
-                                 (" <span class=sub2>&middot; %s</span>" % esc(e["router"])) if _multi and e["router"] else "",
+                                 ((" <span class=sub2>&middot; %s</span>" % esc(e["router"])) if _multi and e["router"] else "")
+                                 + (" <span style='color:#a15c12;font-weight:600'>&middot; falta en el router</span>"
+                                    if e.get("falta") else ""),
                                  esc(nombre) or "<span class=sub2>&mdash;</span>",
                                  time.strftime("%d/%m %H:%M", time.localtime(e["cuando"])) if e["cuando"] else "&mdash;",
                                  esc(_quien(e))))
@@ -17924,6 +18081,25 @@ class H(BaseHTTPRequestHandler):
             ne = sum(1 for v in ver if v["nivel"] == "error"); na = sum(1 for v in ver if v["nivel"] == "aviso")
             cab = "%d regla(s) \u00b7 %d error(es) \u00b7 %d aviso(s)" % (len(reglas), ne, na)
             return _txtv(cab + "\n" + "\n".join(lineas_verificacion(ver)))
+        if ruta == "/mikrotik/listas/recargar":
+            # Vuelve a cargar en el router las IPs en cuarentena que faltan en su lista.
+            if not self._admin():
+                return self._deny()
+            rid = (q.get("rid", [""])[0]).strip()
+            r = next((x for x in cargar_routers() if x.get("id") == rid), None) if rid else router_defecto()
+            if not r or not (r.get("HOST") and r.get("USER") and r.get("PASS")):
+                okr, msg = False, "ese router no tiene la conexion configurada: guarda primero host, usuario y clave"
+            else:
+                try:
+                    okr, msg = recargar_listas(r, quien=getattr(CTX, "user", "?"))
+                except Exception as ex:
+                    okr, msg = False, "no se pudo hablar con el router: %s" % ex
+            b = (("OK " if okr else "ERR: ") + msg).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers(); self.wfile.write(b)
+            return
         if ruta == "/mikrotik/reglas/estado":
             # La etiqueta de cada clase en Ajustes ("Reglas aplicadas" en verde, o lo que
             # falta). JSON; con el router caido, {"_error": motivo} y la pagina no se rompe.

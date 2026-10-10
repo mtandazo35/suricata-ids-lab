@@ -58,7 +58,7 @@ def main():
     check("mas reciente primero", [e["ip"] for e in d["clientes-botnet"]] == ["10.0.0.8", "10.0.0.7"], d["clientes-botnet"])
     check("lleva clave, ip, router, cuando, por y categoria",
           d["clientes-p2p"][0] == {"clave": "r2|10.0.0.9", "ip": "10.0.0.9", "router": "r2", "cuando": 1700000100,
-                                   "por": "politica-rapida", "categoria": "p2p"}, d["clientes-p2p"][0])
+                                   "por": "politica-rapida", "categoria": "p2p", "falta": False}, d["clientes-p2p"][0])
     check("la entrada sin lista no se inventa una", not any(e["ip"] == "10.0.0.10" for l in d.values() for e in l), "")
 
     # --- la seccion ---------------------------------------------------------------------

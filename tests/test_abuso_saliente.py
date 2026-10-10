@@ -144,14 +144,38 @@ def main():
     json.dump({"dias": dias}, open(d["METRICAS_FILE"], "w", encoding="utf-8"))
 
     pag = d["historico_page"](30)
-    check("sale el dato de hoy (como pista, parcial)", "hoy (parcial): 123" in pag, "")
-    check("el cuadro grande es el total del periodo elegido", "ataques salientes en 30 dias" in pag
-          and "media diaria (30 dias)" in pag, "")
+    check("ya no sale 'hoy' en el cuadro del periodo (eran las ultimas horas)", "hoy (parcial)" not in pag, "")
+    check("el cuadro grande es el total del periodo elegido, y dice que dias abarca",
+          "ataques salientes en 30 dias" in pag and "del " in pag, "")
+    check("la media es de los dias CON datos (15 de 30), no de 30",
+          "media diaria (15 dias con datos)" in pag and "solo 15 tienen datos" in pag, "")
     pag7 = d["historico_page"](7)
     check("y cambia con el periodo", "ataques salientes en 7 dias" in pag7 and "media diaria (7 dias)" in pag7, "")
-    check("la tendencia dice que compara", "tendencia (7 dias vs los 7 anteriores)" in pag, "")
-    check("y la tendencia a la baja, en verde", "&darr;" in pag and "#3a9d5d" in pag,
-          "flecha=%s" % ("&darr;" in pag))
+    check("la tendencia de 30 dias compara 30 con 30 (no 7 con 7)",
+          "tendencia (30 dias vs los 30 anteriores)" in pag and "7 dias vs" not in pag, "")
+    check("  y sin 60 dias de historia lo dice", "hacen falta 60 dias de datos (hay 15)" in pag, "")
+    check("la de 7 dias compara 7 con 7, y SALE (antes solo cargaba 7 y hacian falta 14)",
+          "tendencia (7 dias vs los 7 anteriores)" in pag7 and "frente a los 7 dias anteriores" in pag7, "")
+    check("y la tendencia a la baja, en verde", "&darr;" in pag7 and "#3a9d5d" in pag7,
+          "flecha=%s" % ("&darr;" in pag7))
+    # hoy va a medias: si contara, 7 dias de 500 + hoy 123 parecerian una bajada que no es
+    dias_planos = {dia(-i): {"sal": 500, "cpes_n": 1} for i in range(14, 0, -1)}
+    dias_planos[hoy] = {"sal": 10, "cpes_n": 1}
+    json.dump({"dias": dias_planos}, open(d["METRICAS_FILE"], "w", encoding="utf-8"))
+    pp = d["historico_page"](7)
+    check("hoy (parcial) no cuenta para la tendencia: plano es plano", "&rarr;" in pp and "&darr;" not in pp, "")
+    dias_planos[dia(-1)] = {"sal": 20, "cpes_n": 1, "hueco": True}
+    json.dump({"dias": dias_planos}, open(d["METRICAS_FILE"], "w", encoding="utf-8"))
+    pg = d["historico_page"](7)
+    check("un dia gris (faltan datos) tampoco: no es una mejora", "&rarr;" in pg and "&darr;" not in pg, "")
+    check("  y el cuadro dice cuantos dias incompletos hay", "1 dia(s) incompleto(s)" in pg, "")
+    for i in range(6, 1, -1):
+        dias_planos[dia(-i)] = {"sal": 900, "cpes_n": 1, "hueco": True}
+    json.dump({"dias": dias_planos}, open(d["METRICAS_FILE"], "w", encoding="utf-8"))
+    pg2 = d["historico_page"](7)
+    check("con casi todo el periodo en gris NO se calcula tendencia (1 dia completo no es una semana)",
+          "pocos dias completos (0 de 7)" in pg2 and "&uarr;" not in pg2 and "&darr;" not in pg2, "")
+    json.dump({"dias": dias}, open(d["METRICAS_FILE"], "w", encoding="utf-8"))
     check("se cuentan las cuarentenas del periodo", "puestos en cuarentena" in pag)
     check("se dice por que atacan", "Spam" in pag and "Escaneo SSH" in pag)
     check("y por que puerto salen", "25/tcp" in pag and "22/tcp" in pag)

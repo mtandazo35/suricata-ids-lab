@@ -12721,8 +12721,10 @@ de tu red</b>. Es el dato que hace que las IPs publicas acaben en listas negras,
 para demostrarle a alguien &mdash;a quien te deslista, o a tu cliente&mdash; que la limpieza
 funciona.</p>
 <p>Arriba salen los numeros de cabecera <b>del periodo elegido</b> (7, 30, 90 o 365 dias): el total
-de ataques salientes en ese periodo (con hoy, que es parcial, y ayer como pista), la <b>media diaria</b>
-del periodo, la <b>tendencia</b> (siempre los ultimos 7 dias frente a los 7 anteriores, en verde si baja), el
+de ataques salientes en ese periodo (y que dias abarca), la <b>media diaria</b> de los dias que tienen
+datos (los de antes de instalar no cuentan como dias tranquilos), la <b>tendencia</b> (el periodo elegido
+frente al anterior del mismo largo: 7 contra 7, 30 contra 30...; en verde si baja; sin contar hoy, que va
+a medias, ni los dias grises, a los que les faltan datos; si no hay historia suficiente lo dice), el
 maximo de <b>CPEs distintos atacando</b> y cuantos se pusieron en cuarentena y cuantos se liberaron.
 Debajo, una barra por dia (7, 30, 90 o 365) y dos tablas: <b>por que atacan</b> y <b>por que puerto
 salen</b>, que es justo lo que hay que mirar para decidir la regla de salida que mas abuso corta.</p>
@@ -14511,14 +14513,22 @@ def _serie(dias, n):
         out.append((f, dias.get(f) or {}))
     return out
 
-def tendencia_txt(ult7, prev7, dias_prev, n_dias):
-    """El cuadro de tendencia: (valor, aclaracion).
+def tendencia_txt(ult7, prev7, dias_prev, n_dias, periodo=7, dias_act=None):
+    """El cuadro de tendencia: (valor, aclaracion). Compara el periodo elegido (7, 30,
+    90 o 365 dias) con el anterior del mismo largo; n_dias = dias de historia que hay.
 
     Comparar con la semana anterior solo dice algo si esa semana existe. Con `prev7 > 0`
     bastaba UN dia con veinte eventos para dividir por el, y salia un porcentaje de seis
     cifras: no es que el abuso se haya multiplicado por tres mil, es que no hay con que
     comparar. Y un numero asi ni siquiera cabe en el cuadro."""
-    if prev7 > 0 and dias_prev >= 4:
+    minimo = max(4, -(-periodo * 4 // 7))   # 4 de 7: algo mas de la mitad del periodo
+    # y lo mismo para el periodo ACTUAL: con 1 dia completo de 7 (el resto gris) salia
+    # "baja un 4 %", que es comparar un dia contra una semana
+    if dias_act is not None and dias_act < minimo:
+        return ("<span style='color:#8a8a86'>&mdash;</span>",
+                "hacen falta %d dias de datos (hay %d)" % (2 * periodo, n_dias) if n_dias < 2 * periodo
+                else "este periodo tiene pocos dias completos (%d de %d)" % (dias_act, periodo))
+    if prev7 > 0 and dias_prev >= minimo:
         var = (ult7 - prev7) / prev7 * 100.0
         col = "#3a9d5d" if var < 0 else ("#e34948" if var > 0 else "#8a8a86")
         flecha = "&darr;" if var < 0 else ("&uarr;" if var > 0 else "&rarr;")
@@ -14531,10 +14541,10 @@ def tendencia_txt(ult7, prev7, dias_prev, n_dias):
             # espacio duro: con uno normal el "%" se iba solo a la linea siguiente
             val = "%s %s&nbsp;%%" % (flecha, format(abs(var), ".0f"))
         return ("<span style='color:%s'>%s</span>" % (col, val),
-                "frente a los 7 dias anteriores")
+                "frente a los %d dias anteriores" % periodo)
     return ("<span style='color:#8a8a86'>&mdash;</span>",
-            "el periodo anterior casi no tiene datos" if n_dias >= 14
-            else "hacen falta 14 dias de datos")
+            "el periodo anterior casi no tiene datos" if n_dias >= 2 * periodo
+            else "hacen falta %d dias de datos (hay %d)" % (2 * periodo, n_dias))
 
 def _media(serie, clave="sal"):
     vals = [int((d or {}).get(clave, 0)) for _f, d in serie]
@@ -15806,16 +15816,37 @@ def historico_page(dias_n=30):
     hay = any(d for _f, d in serie)
 
     # --- el numero que hay que poder enseñar ---
-    hoy = int((serie[-1][1] or {}).get("sal", 0)) if serie else 0
-    ayer = int((serie[-2][1] or {}).get("sal", 0)) if len(serie) > 1 else 0
-    ult7 = _media(serie[-7:]) if len(serie) >= 7 else _media(serie)
-    prev7 = _media(serie[-14:-7]) if len(serie) >= 14 else 0.0
-    # Cuantos de los 7 dias anteriores tienen algo. Con `prev7 > 0` bastaba UN dia con
+    # TODO sigue al periodo elegido. Antes, con "30 dias" la tendencia seguia siendo de 7
+    # (y parecia una grafica de 7 dias), y con "7 dias" el primer cuadro enseñaba "hoy"
+    # (las ultimas horas). Con "7 dias" ademas la tendencia no salia NUNCA: solo se
+    # cargaban 7 dias y hacian falta 14.
+    hoy_f = serie[-1][0] if serie else ""
+    doble = _serie(dias, 2 * dias_n)          # el periodo y el anterior, del mismo largo
+
+    def _completos(tramo):
+        # sin hoy (va a medias) ni dias grises (faltan datos): bajan la media sin que el
+        # abuso baje, y la tendencia diria "mejora" cuando solo falta medir
+        return [(f, d) for f, d in tramo if f != hoy_f and d and not d.get("hueco")]
+    _act, _ant = _completos(doble[dias_n:]), _completos(doble[:dias_n])
+    # cuantos dias del periodo anterior tienen algo. Con `prev > 0` bastaba UN dia con
     # veinte eventos para dividir por el, y salia un porcentaje de seis cifras que no
     # significa nada: no es que el abuso se haya multiplicado, es que no hay con que
     # comparar.
-    dias_prev = sum(1 for _f, d in serie[-14:-7] if int((d or {}).get("sal", 0)) > 0)
-    var_val, var_hint = tendencia_txt(ult7, prev7, dias_prev, len(serie))
+    dias_prev = sum(1 for _f, d in _ant if int(d.get("sal", 0)) > 0)
+    _con = sorted(k for k, v in (dias or {}).items() if v)
+    try:
+        n_hist = int((time.mktime(time.strptime(hoy_f, "%Y-%m-%d"))
+                      - time.mktime(time.strptime(_con[0], "%Y-%m-%d"))) // 86400) + 1 if _con else 0
+    except (ValueError, OverflowError):
+        n_hist = len(_con)
+    var_val, var_hint = tendencia_txt(_media(_act), _media(_ant), dias_prev, n_hist, dias_n,
+                                      sum(1 for _f, d in _act if int(d.get("sal", 0)) > 0))
+    # la media, de los dias que TIENEN datos: los de antes de instalar no son dias tranquilos
+    _con_datos = [(f, d) for f, d in serie if d]
+    n_grises = sum(1 for _f, d in serie if (d or {}).get("hueco"))
+
+    def _ddmm(f):
+        return f[8:10] + "/" + f[5:7] if len(f) >= 10 else f
 
     total = sum(int((d or {}).get("sal", 0)) for _f, d in serie)
     ruido = sum(int((d or {}).get("ruido", 0)) for _f, d in serie)
@@ -15829,13 +15860,18 @@ def historico_page(dias_n=30):
         return (f"<div class=kpi><div class=kv>{v}</div><div class=kt>{esc(t)}</div>"
                 + (f"<div class=kh>{h}</div>" if h else "") + "</div>")
 
-    # El cuadro grande es el del PERIODO elegido: con '7 dias' pulsado, ensenar solo 'hoy'
-    # (las ultimas horas) desconcertaba. Hoy y ayer quedan como pista; hoy es parcial.
+    # El cuadro grande es el del PERIODO elegido, y la pista dice que dias abarca (no
+    # "hoy": con '7 dias' pulsado, ver las ultimas horas desconcertaba).
     kpis = ("<div class=kpis>"
             + _kpi(f"{total:,}", f"ataques salientes en {dias_n} dias",
-                   f"hoy (parcial): {hoy:,} &middot; ayer: {ayer:,}")
-            + _kpi(f"{_media(serie):,.0f}", f"media diaria ({dias_n} dias)")
-            + _kpi(var_val, "tendencia (7 dias vs los 7 anteriores)", var_hint)
+                   (f"del {_ddmm(serie[0][0])} al {_ddmm(hoy_f)}" if serie else "")
+                   + (f" &middot; {n_grises} dia(s) incompleto(s), en gris" if n_grises else ""))
+            + _kpi(f"{_media(_con_datos):,.0f}",
+                   f"media diaria ({dias_n} dias)" if len(_con_datos) >= dias_n
+                   else f"media diaria ({len(_con_datos)} dias con datos)",
+                   "" if len(_con_datos) >= dias_n
+                   else f"de los {dias_n}, solo {len(_con_datos)} tienen datos")
+            + _kpi(var_val, f"tendencia ({dias_n} dias vs los {dias_n} anteriores)", var_hint)
             + _kpi(f"{cpes_pico:,}", "CPEs distintos atacando", "maximo en el periodo")
             + _kpi(f"{ruido:,}", "no abusivo", "P2P, chequeos de conectividad: no banean")
             + _kpi(f"{enviados:,}", "puestos en cuarentena", f"liberados: {liberados:,}")

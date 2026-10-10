@@ -110,6 +110,12 @@ def main():
 
     val, hint = tend(500.0, 0.0, 0, 5)
     check("sin 14 dias, lo dice tal cual", "hacen falta 14 dias" in hint, hint)
+    val, hint = tend(500.0, 0.0, 0, 20, 30)
+    check("con un periodo de 30 hacen falta 60, y dice cuantos hay", "hacen falta 60 dias de datos (hay 20)" in hint, hint)
+    val, hint = tend(120.0, 100.0, 10, 70, 30)
+    check("  con 10 de 30 dias anteriores no se compara (hace falta algo mas de la mitad)", "%" not in val, val)
+    val, hint = tend(120.0, 100.0, 20, 70, 30)
+    check("  con 20 de 30 si, y dice contra que", "20&nbsp;%" in val and "frente a los 30 dias anteriores" in hint, (val, hint))
 
     # --- el caso normal ---------------------------------------------------------------
     val, hint = tend(120.0, 100.0, 7, 20)
@@ -138,7 +144,7 @@ def main():
     # el de tendencia usaba su propia estructura y metia la aclaracion DENTRO del hueco
     # del numero, asi que salia en grande y por encima de la etiqueta
     check("el cuadro de tendencia se arma como los demas",
-          '_kpi(var_val, "tendencia (7 dias vs los 7 anteriores)", var_hint)' in DASH, "")
+          '_kpi(var_val, f"tendencia ({dias_n} dias vs los {dias_n} anteriores)", var_hint)' in DASH, "")
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

@@ -56,7 +56,8 @@ Uso: sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] 
                  vpn    al otro lado de un tunel o de un enlace. Recorta a 10000
                         bytes por flujo (salvo que pongas -b) y las reglas que se
                         imprimen al final llevan connection-bytes.
-               Default: local. Elegir mal aqui es el fallo mas caro de todos: un
+               Default: vpn (es como se usa: el MikroTik llega por un tunel).
+               Elegir mal aqui es el fallo mas caro de todos: un
                sensor remoto con el espejo entero satura el enlace y, cuando el
                enlace se llena, el TZSP (que es UDP) no se retrasa, DESAPARECE.
   -m ORIGEN    con -t: IP/CIDR del MikroTik que envia el espejo TZSP (una o varias,
@@ -84,7 +85,9 @@ USAGE
 IFACE=""; HOME_NET=""; HOME_NET_GIVEN=0; WEB=1; WEB_PORT=5636; WEB_PASS=""; TZSP=0; TZSP_PORT=37008; MIRROR_SRC=""
 TZSP_BYTES=0   # recorte por flujo en el receptor (0 = sin recorte)
 TZSP_BYTES_DADO=0
-ESPEJO_DONDE="local"   # local | vpn  (ver -e)
+ESPEJO_DONDE="vpn"     # local | vpn  (ver -e). Por defecto vpn: los sensores reciben el
+                       # espejo por un tunel; un sensor remoto con el espejo entero satura
+                       # el enlace, y equivocarse hacia 'vpn' solo recorta payload
 ESPEJO_DADO=0          # 1 si lo dijo -e: entonces no se pregunta nada
 GESTION=""     # red(es) desde las que se permite llegar a la web (UFW)
 MK_CRED=""     # archivo con las credenciales del MikroTik (ver -k)
@@ -128,19 +131,19 @@ if [ "$ESPEJO_DADO" -eq 0 ] && [ "$TZSP" -eq 1 ]; then
     {
       printf '\n%sComo llega el espejo a este sensor?%s\n' "$c_b" "$c_0"
       printf '  1) Local  - el MikroTik esta en la misma red\n'
-      printf '  2) VPN    - el MikroTik se conecta por un tunel\n'
-      printf 'Elige [1]: '
+      printf '  2) VPN    - el MikroTik se conecta por un tunel (por defecto)\n'
+      printf 'Elige [2]: '
     } > /dev/tty
     _resp=""
     read -r _resp < /dev/tty || _resp=""
     case "$_resp" in
-      2|v|vpn|VPN|Vpn) ESPEJO_DONDE="vpn" ;;
-      *)               ESPEJO_DONDE="local" ;;
+      1|l|local|LOCAL|Local) ESPEJO_DONDE="local" ;;
+      *)                     ESPEJO_DONDE="vpn" ;;
     esac
     printf '\n' > /dev/tty
     info "Espejo: ${ESPEJO_DONDE}."
   else
-    info "Sin terminal para preguntar: se asume espejo ${ESPEJO_DONDE} (usa -e vpn si va por tunel)."
+    info "Sin terminal para preguntar: se asume espejo ${ESPEJO_DONDE} (usa -e local si el MikroTik esta en la misma red)."
   fi
 fi
 # Con el sensor al otro lado de un enlace, el recorte no es un ajuste fino: es lo que
@@ -20661,7 +20664,7 @@ def main():
                    help="address-list con las redes de abonados a vigilar")
     p.add_argument("-r", "--redes", default="",
                    help="redes de abonados a meter en la lista, separadas por coma")
-    p.add_argument("-e", "--donde", choices=("local", "vpn"), default="local",
+    p.add_argument("-e", "--donde", choices=("local", "vpn"), default="vpn",
                    help="donde esta el sensor respecto al router")
     p.add_argument("-p", "--puerto", type=int, default=37008, help="puerto TZSP")
     p.add_argument("--solo-registrar", action="store_true",

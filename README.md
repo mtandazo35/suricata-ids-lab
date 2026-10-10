@@ -252,8 +252,11 @@ Al apagar el espejo sin filtrar, la entrada bajo a **22 Mbps** y Suricata paso a
 | Reglas que imprime | espejo entero | con `connection-bytes=0-10000` + DNS aparte |
 | Que se pierde | nada | el payload a mitad de transferencia (con TLS ya era ciego) |
 
-Con `-t` y sin `-e`, el default es `local`. Si mueves el sensor detras de un tunel,
-**reinstala con `-e vpn`**: es idempotente y solo re-configura.
+Con `-t` y sin `-e`, el default es **`vpn`**, que es como se usan los sensores: el MikroTik
+llega por un tunel. Si hay terminal, el instalador lo pregunta igual (Enter = VPN). Si el
+sensor esta en la misma LAN que el router, **instala o reinstala con `-e local`**: es
+idempotente y solo re-configura. Equivocarse hacia `vpn` solo recorta payload; equivocarse
+hacia `local` satura el enlace.
 
 > **Si ya tenias reglas de espejo, apagalas antes.** Convivir con una regla vieja sin
 > `connection-bytes` es el fallo que mas caro sale, porque el espejo bueno y el que sobra

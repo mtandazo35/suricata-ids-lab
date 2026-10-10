@@ -37,13 +37,18 @@ set -uo pipefail
 c_b=; c_0=
 info() { :; }
 TZSP=1
-ESPEJO_DONDE="local"
+ESPEJO_DONDE="${DEFECTO:-vpn}"
 ESPEJO_DADO="${FORZADO:-0}"
 [ "$ESPEJO_DADO" -eq 1 ] && ESPEJO_DONDE="${MODO:-vpn}"
 CAB
 cat "$TMPD/trozo.sh" >> "$TMPD/correr.sh"
 printf 'printf "RESULTADO=%%s\\n" "$ESPEJO_DONDE"\n' >> "$TMPD/correr.sh"
 chmod +x "$TMPD/correr.sh"
+# el valor por defecto, tal cual lo declara el instalador
+DEFECTO="$(sed -n 's/^ESPEJO_DONDE="\([a-z]*\)".*/\1/p' "$SRC" | head -1)"
+export DEFECTO
+[ "$DEFECTO" = "vpn" ]
+check "el modo por defecto del instalador es vpn (los sensores reciben el espejo por tunel)" $? "$DEFECTO"
 
 # --- 1) sin terminal NO se puede colgar -------------------------------------------------
 # Es el caso del one-liner y el de cualquier deploy automatizado. Con timeout: si se
@@ -52,14 +57,19 @@ out="$(printf 'esto es el script, no una respuesta\n' | timeout 10 "$TMPD/correr
 rc=$?
 check "sin terminal no se queda esperando una respuesta" \
       "$([ $rc -ne 124 ] && echo 0 || echo 1)" "se colgo (timeout)"
-check "y se queda en local, que es lo seguro" \
-      "$(printf '%s' "$out" | grep -q 'RESULTADO=local' && echo 0 || echo 1)" "$out"
+check "y se queda en vpn, el modo por defecto" \
+      "$(printf '%s' "$out" | grep -q 'RESULTADO=vpn' && echo 0 || echo 1)" "$out"
 
 # --- 2) lo que viene por stdin NO se consume como respuesta -----------------------------
 # Si se leyera de stdin, esa linea seria la respuesta Y desapareceria del script.
-out2="$(printf '2\n' | timeout 10 "$TMPD/correr.sh" < /dev/null 2>&1)"
+# se manda "1" (local): si se tomara como respuesta, saldria local en vez del defecto
+out2="$(printf '1\n' | timeout 10 "$TMPD/correr.sh" < /dev/null 2>&1)"
 check "una linea en stdin no se toma por respuesta" \
-      "$(printf '%s' "$out2" | grep -q 'RESULTADO=local' && echo 0 || echo 1)" "$out2"
+      "$(printf '%s' "$out2" | grep -q 'RESULTADO=vpn' && echo 0 || echo 1)" "$out2"
+grep -q "Elige \[2\]" "$SRC" && grep -q '1|l|local|LOCAL|Local) ESPEJO_DONDE="local"' "$SRC"
+check "con terminal, Enter = VPN; solo 1/local elige local" $? ""
+grep -q 'choices=("local", "vpn"), default="vpn"' "$SRC"
+check "suricata-mikrotik-init tambien asume vpn por defecto" $? ""
 
 # --- 3) con -e no se pregunta nada ------------------------------------------------------
 # Es lo que permite seguir automatizando: los flags mandan sobre la pregunta.

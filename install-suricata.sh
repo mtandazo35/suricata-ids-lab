@@ -4908,12 +4908,24 @@ def _mk_reply(sock):
         if tipo == "!fatal":
             return (False, frases, err or "conexion terminada")
 
+_MK_TLS_OK = {}     # (host, port) -> cifrados que funcionaron la ultima vez
+
 def _mk_tls_wrap(host, port, timeout):
     """Envuelve en TLS probando cifrados en orden. RouterOS api-ssl SIN certificado usa
     cifrados ANONIMOS (ADH) -> hay que habilitarlos con @SECLEVEL=0 (Python los desactiva
-    por defecto). Con certificado usa los normales. Se prueban ambos para no exigir cert."""
-    ultimo = None
-    for ciphers in ("ADH:@SECLEVEL=0", "DEFAULT:@SECLEVEL=0", None):
+    por defecto). Con certificado usa los normales. Se prueban ambos para no exigir cert.
+
+    Se empieza por el que funciono la ultima vez con ese router: cada intento es una
+    conexion TCP nueva, y "Aplicar" sumaba hasta doce en dos segundos contra la API.
+    Si fallan todos se dice el motivo de CADA uno: antes solo salia el del ultimo (el
+    cifrado por defecto de Python, que RouterOS siempre rechaza), que tapaba el de verdad."""
+    orden = ["ADH:@SECLEVEL=0", "DEFAULT:@SECLEVEL=0", None]
+    previo = _MK_TLS_OK.get((host, port), "-")
+    if previo in orden:
+        orden.remove(previo)
+        orden.insert(0, previo)
+    fallos = []
+    for ciphers in orden:
         try:
             raw = _socket.create_connection((host, port), timeout=timeout)
         except Exception as e:
@@ -4926,12 +4938,15 @@ def _mk_tls_wrap(host, port, timeout):
             try: ctx.set_ciphers(ciphers)
             except Exception: pass
         try:
-            return ctx.wrap_socket(raw, server_hostname=host)
+            sk = ctx.wrap_socket(raw, server_hostname=host)
+            _MK_TLS_OK[(host, port)] = ciphers
+            return sk
         except Exception as e:
-            ultimo = e
+            fallos.append("%s: %s" % (ciphers or "cifrados por defecto", e))
             try: raw.close()
             except Exception: pass
-    raise IOError(f"TLS handshake fallo ({ultimo})")
+    _MK_TLS_OK.pop((host, port), None)
+    raise IOError("TLS handshake fallo con los %d cifrados probados (%s)" % (len(fallos), " | ".join(fallos)))
 
 def mk_conectar(d, timeout=6):
     """Abre el socket y hace login. Devuelve el socket o lanza excepcion."""
@@ -5624,7 +5639,20 @@ def aplicar_reglas(router, cat, accion=None, quien="?"):
     Respaldo antes del primer cambio; si el respaldo falla, no se toca nada. Si una orden
     falla, se para ahi y se dice cual (lo ya hecho queda, y el plan siguiente lo ve)."""
     m = _mk_globales()
-    plan = plan_reglas(router, cat, accion, m)
+    # UNA conexion para todo (plan, respaldo, cambios y relectura): antes eran cuatro
+    # logins seguidos y, con el reintento de cifrados, hasta doce conexiones a la API en
+    # dos segundos; el router terminaba rechazando el handshake ("No se hizo")
+    d = cargar_mk_de(router)
+    s_ = mk_conectar(d)
+    try:
+        return _aplicar_en(s_, router, cat, accion, quien, m)
+    finally:
+        try: s_.close()
+        except Exception: pass
+
+
+def _aplicar_en(s_, router, cat, accion, quien, m):
+    plan = _plan_en(s_, cat, accion, m)
     if plan.get("bloqueado"):
         return (False, "el verificador encontro errores, no se toca el router: " + "; ".join(
             "%s: %s" % (v["donde"], v["msg"]) for v in plan["verificacion"] if v["nivel"] == "error"), plan)
@@ -5632,53 +5660,47 @@ def aplicar_reglas(router, cat, accion=None, quien="?"):
         return (False, plan["aviso"], plan)
     if not plan["cambios"]:
         return (True, "sin cambios: el router ya tiene estas reglas", plan)
-    d = cargar_mk_de(router)
     try:
-        respaldo = respaldar_firewall(router)
+        respaldo = respaldar_firewall(router, s_=s_)
     except Exception as ex:
         return (False, "no se pudo respaldar el firewall del router (%s): no se toca nada" % ex, plan)
-    s_ = mk_conectar(d)
     hechos = {"add": 0, "set": 0, "remove": 0}
     _tope = {}          # (tabla, cadena) -> .id de la que era la primera antes de insertar
-    try:
-        for op, tabla, props, com, rid in plan["acciones"]:
-            if op == "igual":
-                continue
-            limpias = {k: v for k, v in props.items() if not k.startswith("_")}
-            if op == "add":
-                words = [tabla + "/add"] + ["=%s=%s" % (k, v) for k, v in limpias.items()] + ["=comment=" + com]
-                destino = ""
-                if props.get("_antes_de"):
-                    ref = next((f for f in _mk_print(s_, tabla + "/print", [".id", "chain", "comment"])
-                                if f.get("comment") == props["_antes_de"]
-                                and (not props.get("_antes_cadena") or f.get("chain") == props["_antes_cadena"])), None)
-                    destino = (ref or {}).get(".id", "")
-                if not destino and (props.get("_arriba") or props.get("_antes_de")) and props.get("chain"):
-                    # "arriba" = delante de la que era la PRIMERA antes de empezar, no de la
-                    # primera actual: si no, varias reglas arriba quedan en orden inverso
-                    # (un accept seguido de un drop acabaria drop-accept)
-                    clave_t = (tabla, props["chain"])
-                    if clave_t not in _tope:
-                        primera = next((f for f in _mk_print(s_, tabla + "/print", [".id", "chain"])
-                                        if f.get("chain") == props["chain"]), None)
-                        _tope[clave_t] = (primera or {}).get(".id", "")
-                    destino = _tope[clave_t]
-                if destino:
-                    words.append("=place-before=" + destino)
-            elif op == "set":
-                words = [tabla + "/set", "=.id=" + rid] + ["=%s=%s" % (k, v) for k, v in limpias.items()] + ["=comment=" + com]
-            else:
-                words = [tabla + "/remove", "=.id=" + rid]
-            _mk_send(s_, words)
-            ok, _fr, err = _mk_reply(s_)
-            if not ok:
-                mk_log("REGLAS-ERROR", "-", quien, "router=%s clase=%s %s %s: %s" % (
-                    (router or {}).get("id", ""), cat, op, com, err))
-                return (False, "fallo en %s %s: %s (respaldo en %s)" % (op, com, err, respaldo), plan)
-            hechos[op] += 1
-    finally:
-        try: s_.close()
-        except Exception: pass
+    for op, tabla, props, com, rid in plan["acciones"]:
+        if op == "igual":
+            continue
+        limpias = {k: v for k, v in props.items() if not k.startswith("_")}
+        if op == "add":
+            words = [tabla + "/add"] + ["=%s=%s" % (k, v) for k, v in limpias.items()] + ["=comment=" + com]
+            destino = ""
+            if props.get("_antes_de"):
+                ref = next((f for f in _mk_print(s_, tabla + "/print", [".id", "chain", "comment"])
+                            if f.get("comment") == props["_antes_de"]
+                            and (not props.get("_antes_cadena") or f.get("chain") == props["_antes_cadena"])), None)
+                destino = (ref or {}).get(".id", "")
+            if not destino and (props.get("_arriba") or props.get("_antes_de")) and props.get("chain"):
+                # "arriba" = delante de la que era la PRIMERA antes de empezar, no de la
+                # primera actual: si no, varias reglas arriba quedan en orden inverso
+                # (un accept seguido de un drop acabaria drop-accept)
+                clave_t = (tabla, props["chain"])
+                if clave_t not in _tope:
+                    primera = next((f for f in _mk_print(s_, tabla + "/print", [".id", "chain"])
+                                    if f.get("chain") == props["chain"]), None)
+                    _tope[clave_t] = (primera or {}).get(".id", "")
+                destino = _tope[clave_t]
+            if destino:
+                words.append("=place-before=" + destino)
+        elif op == "set":
+            words = [tabla + "/set", "=.id=" + rid] + ["=%s=%s" % (k, v) for k, v in limpias.items()] + ["=comment=" + com]
+        else:
+            words = [tabla + "/remove", "=.id=" + rid]
+        _mk_send(s_, words)
+        ok, _fr, err = _mk_reply(s_)
+        if not ok:
+            mk_log("REGLAS-ERROR", "-", quien, "router=%s clase=%s %s %s: %s" % (
+                (router or {}).get("id", ""), cat, op, com, err))
+            return (False, "fallo en %s %s: %s (respaldo en %s)" % (op, com, err, respaldo), plan)
+        hechos[op] += 1
     mk_log("REGLAS-APLICADAS", "-", quien, "router=%s clase=%s accion=%s +%d ~%d -%d respaldo=%s" % (
         (router or {}).get("id", ""), cat, plan["accion"], hechos["add"], hechos["set"], hechos["remove"],
         respaldo))
@@ -5687,7 +5709,7 @@ def aplicar_reglas(router, cat, accion=None, quien="?"):
     # verificacion tras aplicar: se relee el router. Si no devuelve lo mismo que se mando
     # (un valor que guarda normalizado), la proxima vez se reescribiria sin motivo.
     try:
-        p2 = plan_reglas(router, cat, plan["accion"], m)
+        p2 = _plan_en(s_, cat, plan["accion"], m)
         if p2["cambios"]:
             ej = []
             for c, difs in list(p2.get("diferencias", {}).items())[:3]:

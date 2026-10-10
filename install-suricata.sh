@@ -10,6 +10,8 @@
 #   One-liner:
 #     curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash
 #     curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -i ens18 -n 10.0.0.0/24
+#   Espejo del MikroTik por VPN (lo habitual; -m = IP del MikroTik dentro del tunel):
+#     curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -m 100.64.0.2 -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 #
 #   Uso:   sudo ./install-suricata.sh [-i IFACE] [-n HOME_NET] [-p PUERTO] [-P CLAVE] [-t] [-W] [-h]
 #
@@ -13903,8 +13905,13 @@ re-ejecutando el instalador. Necesita salida a internet la primera vez.</li>
 
 <h2>Reinstalar o actualizar</h2>
 <p>Todo esta en un instalador idempotente. Para actualizar a la ultima version
-(ejemplo ISP con espejo y todas las redes privadas):</p>
-<pre><code>curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -m &lt;IP_MikroTik&gt; -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16</code></pre>"""
+(ejemplo ISP con el espejo del MikroTik <b>por VPN</b>, que es el modo por defecto con
+<code>-t</code>, y todas las redes privadas):</p>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -t -m &lt;IP del MikroTik en el tunel&gt; -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16</code></pre>
+<p><code>-m</code> es la IP del MikroTik <b>dentro del tunel</b> (p.ej. <code>100.64.0.2</code>): solo
+se acepta espejo de esa IP. La VPN tiene que estar arriba antes; el instalador no la monta.
+Sin <code>-t</code> el sensor vigila solo el trafico de la propia caja. Si el sensor esta en la
+misma LAN que el router, anade <code>-e local</code>.</p>"""
     # --- La documentacion se parte en PAGINAS (una por tema), agrupadas en categorias.
     # Antes era un unico muro con indice lateral: con 23 temas costaba encontrar nada.
     # Las categorias se marcan en el texto con <!--CAT:Nombre--> delante del <h2> que

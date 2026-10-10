@@ -84,6 +84,37 @@ Al terminar imprime la **URL de la web, el usuario `admin` y la clave generada**
 Entra con el navegador a `https://<IP>:5636` (certificado autofirmado: acepta la
 advertencia).
 
+> **Sin opciones vigila solo el trafico de la PROPIA caja** (su interfaz, `HOME_NET` = su
+> IP). Sirve para probar. Para ver a los abonados de un ISP hace falta el espejo del
+> MikroTik: lo habitual es por VPN, abajo.
+
+### Por VPN (lo habitual): el MikroTik manda el espejo por un tunel
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- \
+  -t -m 100.64.0.2 -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+```
+
+| Opcion | Que poner |
+|---|---|
+| `-t` | activa el receptor del espejo (TZSP, UDP 37008) |
+| `-m` | la IP del MikroTik **dentro del tunel** (en el ejemplo, `100.64.0.2`). Solo se acepta espejo de esa IP |
+| `-n` | las **redes de tus abonados** que el router espeja (las que el panel puede mandar a cuarentena) |
+
+**Antes de lanzarlo** la VPN tiene que estar arriba: el sensor como servidor (p.ej.
+OpenVPN, `tun0` = `100.64.0.1`) y el MikroTik conectado como cliente (`100.64.0.2`). El
+instalador **no monta la VPN**: la usa. Para OpenVPN con MikroTik, nada de `tls-crypt`
+ni `tls-auth` (RouterOS no los soporta).
+
+El modo VPN es el **por defecto** con `-t` (no hace falta `-e vpn`): recorta cada flujo a
+10.000 bytes en el receptor para no saturar el tunel, y las reglas que imprime para el
+router ya llevan `connection-bytes`. En el router, `IP_IDS` es la IP del sensor **dentro
+del tunel** (`100.64.0.1`), no su IP publica. Si el sensor esta en la misma LAN que el
+router, anade `-e local` (ver [`-e local` o `-e vpn`](#-e-local-o--e-vpn-la-opcion-que-mas-caro-sale-equivocar)).
+
+Opcional en la misma linea: `-a <red de gestion>` (quien puede abrir la web) y
+`-k /root/mk.conf` (que el instalador configure el espejo en el MikroTik por la API).
+
 ### Y en el MikroTik, dos lineas
 
 Instalar el sensor no basta: alguien tiene que mandarle el trafico. Si ya tienes una
@@ -124,6 +155,10 @@ Opciones (se pasan tras `bash -s --`):
 | `-p PUERTO` | puerto de la web | `5636` |
 | `-P CLAVE` | clave del usuario web `admin` | aleatoria (se muestra al final) |
 | `-t` | **receptor TZSP** (UDP 37008) para espejo MikroTik. Requiere `-m` | apagado |
+| `-e vpn\|local` | con `-t`: donde esta el sensor respecto al router. `vpn` recorta a 10.000 bytes por flujo y las reglas del router llevan `connection-bytes`; `local` espeja entero | `vpn` |
+| `-a CIDR[,CIDR]` | redes desde las que se puede entrar a la web (UFW). Sin esto los puertos web no se abren | - |
+| `-k ARCHIVO` | con `-t`: configura el espejo en el MikroTik por la API (archivo con HOST/PORT/USER/PASS, `chmod 600`) | - |
+| `-b BYTES` | con `-t`: recorte por flujo en el receptor | `10000` en vpn, sin recorte en local |
 | `-m IP[,IP]` | con `-t`: **IP/CIDR de cada MikroTik** que envia espejo (varios = multi-nodo: una interfaz por router). Restringe UFW y el receptor solo a ese origen. **Obligatorio con `-t`**: sin origen conocido cualquier host de la red podria inyectar tramas forjadas en el IDS, y el receptor no arranca | - |
 | `-W` | **sin web**, solo Suricata + logs | web activada |
 
@@ -169,9 +204,10 @@ curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/in
   -m 10.87.87.1 -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 \
   -a 203.0.113.0/24 -P 'MiClaveSegura'
 
-# 7) ISP, SENSOR REMOTO (al otro lado de una VPN o de un enlace).
-#    -e vpn = recorta cada flujo a 10.000 bytes en el receptor Y las reglas que
-#    el instalador imprime al final ya salen con connection-bytes.
+# 7) ISP, SENSOR REMOTO (al otro lado de una VPN o de un enlace). Es el modo por
+#    defecto con -t: -e vpn se puede omitir. Recorta cada flujo a 10.000 bytes en el
+#    receptor Y las reglas que el instalador imprime al final ya salen con
+#    connection-bytes. -m = la IP del MikroTik DENTRO del tunel.
 curl -fsSL https://raw.githubusercontent.com/mtandazo35/suricata-ids-lab/main/install-suricata.sh | sudo bash -s -- -i ens18 -t -e vpn \
   -m 10.87.87.1 -n 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 \
   -a 203.0.113.0/24 -P 'MiClaveSegura'

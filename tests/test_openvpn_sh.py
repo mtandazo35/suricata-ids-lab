@@ -90,6 +90,27 @@ def main():
     check("  y da el comando ovpn-client para v6 y v7",
           "ROUTEROS v7" in SCRIPT and "ROUTEROS v6" in SCRIPT and "/interface ovpn-client" in SCRIPT, "")
 
+    # ---- el actualizador (boton Actualizar) tambien lo renueva, verificado ----
+    upd = SRC.split("cat > /usr/local/bin/suricata-panel-update <<'UPDSH'\n", 1)[1].split("\nUPDSH\n", 1)[0]
+    f_ini = upd.index("extraer() {")
+    f_fin = upd.index("\n}\n", f_ini) + 3
+    b_ini = upd.index("# /root/openvpn.sh (Ajustes > VPN")
+    b_fin = upd.index('log "no se renovo /root/openvpn.sh"', b_ini)
+    b_fin = upd.index("\nfi\n", b_fin) + 4
+    root2 = tempfile.mkdtemp().replace("\\", "/")
+    inst = root2 + "/instalador.sh"
+    open(inst, "w", encoding="utf-8", newline="\n").write(SRC)
+    open(root2 + "/openvpn.sh", "w", encoding="utf-8", newline="\n").write("#!/bin/bash\n# version vieja\n")
+    trozo = ("set -u\nlog(){ echo \"LOG $*\"; }\nTMP=%s\n" % inst
+             + upd[f_ini:f_fin] + upd[b_ini:b_fin]).replace("/root/", root2 + "/")
+    ru = subprocess.run(["bash", "-s"], input=trozo, capture_output=True, text=True, encoding="utf-8")
+    dest2 = root2 + "/openvpn.sh"
+    check("el actualizador renueva /root/openvpn.sh (identico, misma huella)",
+          ru.returncode == 0 and hashlib.sha256(open(dest2, "rb").read()).hexdigest() == SHA, (ru.stdout, ru.stderr[-300:]))
+    check("  respaldando el que habia", any(".bak-" in f for f in os.listdir(root2)), os.listdir(root2))
+    check("  y lo valida con bash -n (usa sintaxis de bash, no de sh)",
+          'extraer "cat > \\"\\$_ovpn_tmp\\" <<\'OVPNSH\'" "OVPNSH" /root/openvpn.sh bash' in upd, "")
+
     check("en modo VPN sin tunel, el resumen dice como montarlo",
           'bash /root/openvpn.sh   -> 1) instala el servidor' in SRC
           and '[ "$ESPEJO_DONDE" = "vpn" ] && [ -z "$ESPEJO_IP" ]' in SRC, "")

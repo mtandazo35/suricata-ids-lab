@@ -11437,7 +11437,457 @@ _IC_LOG   = _ic("M3 5h18v2H3V5zm0 6h18v2H3v-2zm0 6h12v2H3v-2z")
 _IC_BOOK  = _ic("M18 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 4h5v8l-2.5-1.5L6 12V4z")
 _IC_AUDIT = _ic("M19 3h-4.18C14.4 1.84 13.3 1 12 1c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm-2 14l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z")
 _IC_DNS   = _ic("M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.93 9h-2.95a15.65 15.65 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.93 11zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96zM4.26 14C4.1 13.36 4 12.69 4 12s.1-1.36.26-2h3.38c-.08.66-.14 1.32-.14 2s.06 1.34.14 2H4.26zm.82 2h2.95c.32 1.25.78 2.45 1.38 3.56A7.987 7.987 0 0 1 5.08 16zm2.95-8H5.08a7.987 7.987 0 0 1 4.33-3.56A15.65 15.65 0 0 0 8.03 8zM12 19.96c-.83-1.2-1.48-2.53-1.91-3.96h3.82c-.43 1.43-1.08 2.76-1.91 3.96zM14.34 14H9.66c-.09-.66-.16-1.32-.16-2s.07-1.35.16-2h4.68c.09.65.16 1.32.16 2s-.07 1.34-.16 2zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56zM16.36 14c.08-.66.14-1.32.14-2s-.06-1.34-.14-2h3.38c.16.64.26 1.31.26 2s-.1 1.36-.26 2h-3.38z")
+_IC_VPN   = _ic("M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z")
 _IC_FEED  = _ic("M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 4.5a2.5 2.5 0 0 1 2.5 2.5c0 1-.6 1.9-1.5 2.3V17h-2v-4.7A2.5 2.5 0 0 1 9.5 8 2.5 2.5 0 0 1 12 5.5z")
+
+# =====================================================================================
+# VPN (OpenVPN): el tunel por el que los MikroTik mandan el espejo. Lo monta y administra
+# /root/openvpn.sh (lo deja el instalador). El panel LEE el estado de sus archivos y le
+# PIDE los cambios por sus ordenes sin menu: asi todo se hace desde la web, sin consola, y
+# hay una sola logica (la del script) para crear usuarios y rutas. Antes de cada cambio,
+# respaldo de /etc/openvpn en /root/backups; despues, bitacora.
+OVPN_SH = "/root/openvpn.sh"
+OVPN_ETC = "/etc/openvpn"
+OVPN_SRV = "/etc/openvpn/server"
+OVPN_CCD = "/etc/openvpn/open-vpn"
+OVPN_LOG = "/var/log/suricata-openvpn.log"
+OVPN_BACKUPS = "/root/backups"
+_RE_OVPN_USER = re.compile(r"^[a-z0-9][a-z0-9_-]{2,31}$")   # igual que valid_vpn_user del script
+_RE_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+def _ovpn_conf():
+    """Lo que interesa de server.conf, o None si OpenVPN no esta instalado."""
+    out = {}
+    try:
+        for l in open(os.path.join(OVPN_SRV, "server.conf"), encoding="utf-8", errors="replace"):
+            p = l.split()
+            if len(p) >= 2 and p[0] in ("local", "port", "proto", "server"):
+                out[p[0]] = p[1:]
+    except OSError:
+        return None
+    return out
+
+def _ovpn_conectados():
+    """{usuario: {real, ip, rx, tx, desde}} del status de OpenVPN (status-version 2).
+    Con username-as-common-name el Common Name ES el usuario."""
+    out = {}
+    try:
+        lineas = open(os.path.join(OVPN_SRV, "openvpn-status.log"), encoding="utf-8",
+                      errors="replace").read().splitlines()
+    except OSError:
+        return out
+    for l in lineas:
+        c = l.split(",")
+        if c[0] == "CLIENT_LIST" and len(c) >= 9:
+            try:
+                out[c[1]] = {"real": c[2].rsplit(":", 1)[0], "ip": c[3], "rx": int(c[5] or 0),
+                             "tx": int(c[6] or 0), "desde": int(c[8] or 0)}
+            except ValueError:
+                continue
+    return out
+
+def ovpn_instalando():
+    """La instalacion corre como unidad propia de systemd (sigue aunque el panel reinicie)."""
+    try:
+        r = subprocess.run(["systemctl", "list-units", "--type=service", "--state=active",
+                            "--no-legend", "suricata-ovpn-instalar-*"],
+                           capture_output=True, text=True, timeout=10)
+        return bool(r.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+def ovpn_estado():
+    est = {"script": os.path.isfile(OVPN_SH), "instalado": False, "activo": False,
+           "puerto": "", "proto": "", "local": "", "red": "", "servidor": "", "usuarios": [],
+           "instalando": ovpn_instalando()}
+    conf = _ovpn_conf()
+    if conf is None:
+        return est
+    est["instalado"] = True
+    est["puerto"] = (conf.get("port") or [""])[0]
+    est["proto"] = (conf.get("proto") or [""])[0]
+    est["local"] = (conf.get("local") or [""])[0]
+    srv = conf.get("server") or []
+    if len(srv) >= 2:
+        try:
+            net = ipaddress.IPv4Network(srv[0] + "/" + srv[1], strict=False)
+            est["red"] = str(net)
+            est["servidor"] = str(next(net.hosts()))
+        except (ValueError, StopIteration):
+            pass
+    try:
+        est["activo"] = subprocess.call(["systemctl", "is-active", "--quiet", "openvpn-server@server"]) == 0
+    except OSError:
+        pass
+    con = _ovpn_conectados()
+    try:
+        nombres = sorted(os.listdir(OVPN_CCD))
+    except OSError:
+        nombres = []
+    for u in nombres:
+        ruta = os.path.join(OVPN_CCD, u)
+        if u == "rutas.sh" or not _RE_OVPN_USER.match(u) or not os.path.isfile(ruta):
+            continue
+        ip, redes = "", []
+        try:
+            for l in open(ruta, encoding="utf-8", errors="replace"):
+                p = l.split()
+                if len(p) >= 2 and p[0] == "ifconfig-push":
+                    ip = p[1]
+                elif len(p) >= 3 and p[0] == "iroute":
+                    try:
+                        redes.append(str(ipaddress.IPv4Network(p[1] + "/" + p[2], strict=False)))
+                    except ValueError:
+                        pass
+        except OSError:
+            continue
+        est["usuarios"].append({"usuario": u, "ip": ip, "redes": redes, "conexion": con.get(u)})
+    return est
+
+def _ovpn_gw():
+    """La puerta de enlace por defecto del servidor ("" si no hay)."""
+    try:
+        out = subprocess.run(["ip", "-o", "-4", "route", "show", "to", "default"],
+                             capture_output=True, text=True, timeout=5).stdout.split()
+        return out[out.index("via") + 1] if "via" in out else ""
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return ""
+
+def ovpn_redes_validas(texto, usuario, est, gw=None):
+    """(nuevas normalizadas, errores, avisos) para agregar a ese MikroTik.
+
+    No pasa nada que el script no fuera a aceptar, y ademas lo que el script no mira:
+    una red enorme (/0 a /7) mandaria por el tunel la salida del propio servidor; pisar la
+    red del tunel lo rompe; y dos MikroTik con redes solapadas no se pueden enrutar."""
+    nuevas, errores, avisos = [], [], []
+    mias = set()
+    otras = {}
+    for x in est.get("usuarios") or []:
+        for r in x.get("redes") or []:
+            if x["usuario"] == usuario:
+                mias.add(r)
+            else:
+                otras[r] = x["usuario"]
+    try:
+        vpn = ipaddress.IPv4Network(est["red"]) if est.get("red") else None
+    except ValueError:
+        vpn = None
+    gw = _ovpn_gw() if gw is None else gw
+    for tok in re.split(r"[\s,;]+", texto or ""):
+        if not tok:
+            continue
+        try:
+            n = ipaddress.IPv4Network(tok if "/" in tok else tok + "/32", strict=False)
+        except ValueError:
+            errores.append("%s no es una red IPv4 (ejemplo: 192.168.10.0/24)" % tok)
+            continue
+        if n.prefixlen < 8:
+            errores.append("%s es demasiado grande: mandaria por el tunel casi todo internet, "
+                           "incluida la salida del propio servidor" % n)
+            continue
+        if vpn and n.overlaps(vpn):
+            errores.append("%s pisa la red del propio tunel (%s)" % (n, vpn))
+            continue
+        if str(n) in mias:
+            avisos.append("%s ya era de este MikroTik" % n)
+            continue
+        choque = next((u for r, u in otras.items() if ipaddress.IPv4Network(r).overlaps(n)), None)
+        if choque:
+            errores.append("%s se solapa con una red de %s: dos MikroTik no pueden tener la "
+                           "misma red" % (n, choque))
+            continue
+        try:
+            if gw and ipaddress.IPv4Address(gw) in n:
+                avisos.append("%s incluye la puerta de enlace del servidor (%s): la salida a "
+                              "internet sigue igual, pero el resto de esa red ira por el tunel" % (n, gw))
+        except ValueError:
+            pass
+        if str(n) not in nuevas:
+            nuevas.append(str(n))
+    return nuevas, errores, avisos
+
+def ovpn_respaldo():
+    """tar.gz de /etc/openvpn en /root/backups. Si no se puede, no se toca nada."""
+    import tarfile
+    os.makedirs(OVPN_BACKUPS, exist_ok=True)
+    ruta = os.path.join(OVPN_BACKUPS, "openvpn-%s.tar.gz" % time.strftime("%Y%m%d-%H%M%S"))
+    with tarfile.open(ruta + ".tmp", "w:gz") as t:
+        if os.path.isdir(OVPN_ETC):
+            t.add(OVPN_ETC, arcname="etc/openvpn")
+    os.chmod(ruta + ".tmp", 0o600)
+    os.replace(ruta + ".tmp", ruta)
+    return ruta
+
+OVPN_MARCA_CLI = "agregar_redes()"   # el openvpn.sh con ordenes sin menu (las que usa el panel)
+
+def ovpn_script_al_dia():
+    try:
+        return OVPN_MARCA_CLI in open(OVPN_SH, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return False
+
+def ovpn_asegurar_script():
+    """(ok, mensaje). Si /root/openvpn.sh falta o es el viejo (solo menu), se baja del
+    instalador publicado, se verifica con su huella y se instala; el anterior se respalda.
+    Hace falta porque la PRIMERA actualizacion por boton la ejecuta el actualizador viejo,
+    que no sabe renovarlo: sin esto habria que actualizar dos veces."""
+    if ovpn_script_al_dia():
+        return True, ""
+    try:
+        txt = urllib.request.urlopen(_REPO_RAW2 + "/install-suricata.sh", timeout=30).read().decode("utf-8")
+    except Exception as ex:
+        return False, "no se pudo bajar el instalador para renovar %s: %s" % (OVPN_SH, ex)
+    m = re.search(r'^OVPN_SHA="([0-9a-f]{64})"$', txt, re.M)
+    ini = txt.find("<<'OVPNSH'\n")
+    fin = txt.find("\nOVPNSH\n", ini)
+    if not m or ini < 0 or fin < 0:
+        return False, "el instalador publicado no trae openvpn.sh"
+    cuerpo = txt[ini + len("<<'OVPNSH'\n"):fin + 1]
+    if hashlib.sha256(cuerpo.encode("utf-8")).hexdigest() != m.group(1):
+        return False, "openvpn.sh no coincide con su huella: no se instala"
+    if OVPN_MARCA_CLI not in cuerpo:
+        return False, "el openvpn.sh publicado no tiene las ordenes sin menu"
+    try:
+        if os.path.isfile(OVPN_SH):
+            viejo = open(OVPN_SH, "rb").read()
+            with open(OVPN_SH + ".bak-" + time.strftime("%Y%m%d-%H%M%S"), "wb") as f:
+                f.write(viejo)
+        with open(OVPN_SH + ".tmp", "w", encoding="utf-8", newline="\n") as f:
+            f.write(cuerpo)
+        os.chmod(OVPN_SH + ".tmp", 0o750)
+        os.replace(OVPN_SH + ".tmp", OVPN_SH)
+    except OSError as ex:
+        return False, "no se pudo instalar %s: %s" % (OVPN_SH, ex)
+    bitacora("VPN-SCRIPT", "renovado %s (verificado con su huella)" % OVPN_SH, quien="panel")
+    return True, "renovado"
+
+def ovpn_correr(args, timeout=240):
+    """Una orden del script, sin shell (los argumentos ya vienen validados)."""
+    r = subprocess.run(["bash", OVPN_SH] + list(args), capture_output=True, timeout=timeout)
+    out = _RE_ANSI.sub("", (r.stdout + r.stderr).decode("utf-8", "replace"))
+    return r.returncode, out.strip()
+
+def ovpn_accion(accion, usuario="", redes=(), quien="?"):
+    """usuario | redes | quitar-redes | borrar. (ok, mensaje, datos)."""
+    if not os.path.isfile(OVPN_SH):
+        return False, ("Falta %s. Actualiza el panel (Ajustes > Actualizaciones): el "
+                       "instalador lo deja." % OVPN_SH), {}
+    if accion != "usuario" and not _RE_OVPN_USER.match(usuario or ""):
+        return False, "usuario de VPN no valido", {}
+    okv, msgv = ovpn_asegurar_script()
+    if not okv:
+        return False, msgv, {}
+    try:
+        resp = ovpn_respaldo()
+    except Exception as ex:
+        return False, "no se pudo respaldar %s (%s): no se toca nada" % (OVPN_ETC, ex), {}
+    if accion == "usuario":
+        rc, out = ovpn_correr(["--usuario"])
+        kv = {}
+        for l in out.splitlines():
+            m = re.match(r"^([A-Z0-9]+)=(.*)$", l)
+            if m:
+                kv[m.group(1)] = m.group(2)
+        if rc != 0 or not kv.get("USUARIO"):
+            return False, "no se pudo crear el usuario: " + out[-400:], {}
+        # la clave NO va a la bitacora: se muestra una vez y queda solo en el sistema
+        bitacora("VPN-USUARIO", "%s ip=%s respaldo=%s" % (kv["USUARIO"], kv.get("IPVPN", ""), resp), quien=quien)
+        return True, "", {k: kv.get(k, "") for k in ("USUARIO", "IPVPN", "CLAVE", "CONECTAR", "MT7", "MT6")}
+    args = {"redes": ["--redes", usuario] + list(redes),
+            "quitar-redes": ["--quitar-redes", usuario] + list(redes),
+            "borrar": ["--borrar", usuario]}[accion]
+    rc, out = ovpn_correr(args)
+    bitacora("VPN-" + accion.upper(), "%s %s rc=%d respaldo=%s" % (usuario, " ".join(redes), rc, resp), quien=quien)
+    return rc == 0, out[-800:] or ("hecho" if rc == 0 else "fallo sin mensaje"), {}
+
+def ovpn_instalar(quien="?"):
+    """Lanza la instalacion del servidor en una unidad propia de systemd. (ok, mensaje)"""
+    if not os.path.isfile(OVPN_SH):
+        return False, "Falta %s. Actualiza el panel: el instalador lo deja." % OVPN_SH
+    if _ovpn_conf() is not None:
+        return False, "OpenVPN ya esta instalado."
+    if ovpn_instalando():
+        return False, "Ya hay una instalacion en marcha."
+    okv, msgv = ovpn_asegurar_script()
+    if not okv:
+        return False, msgv
+    try:
+        resp = ovpn_respaldo() if os.path.isdir(OVPN_ETC) else ""
+    except Exception as ex:
+        return False, "no se pudo respaldar %s (%s): no se toca nada" % (OVPN_ETC, ex)
+    try:
+        with open(OVPN_LOG, "w", encoding="utf-8") as f:
+            f.write("Instalando OpenVPN (%s)\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+    except OSError:
+        pass
+    unidad = "suricata-ovpn-instalar-%d" % int(time.time())
+    cmd = ["systemd-run", "--unit", unidad,
+           "--property", "StandardOutput=append:" + OVPN_LOG,
+           "--property", "StandardError=append:" + OVPN_LOG,
+           "--setenv", "DEBIAN_FRONTEND=noninteractive",
+           "/bin/bash", "-c", 'bash "$0" --instalar; echo "FIN rc=$?"', OVPN_SH]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as ex:
+        return False, "no se pudo lanzar la instalacion: %s" % ex
+    if r.returncode != 0:
+        return False, "no se pudo lanzar la instalacion: %s" % (r.stderr or r.stdout)[-300:]
+    bitacora("VPN-INSTALAR", "lanzada (%s) respaldo=%s" % (unidad, resp or "-"), quien=quien)
+    return True, "instalacion en marcha"
+
+def ovpn_log():
+    """El avance de la instalacion: {corriendo, rc, log}. rc sale de la marca FIN del final."""
+    try:
+        txt = open(OVPN_LOG, encoding="utf-8", errors="replace").read()
+    except OSError:
+        txt = ""
+    m = re.search(r"FIN rc=(\d+)\s*$", txt)
+    rc = int(m.group(1)) if m else None
+    return {"corriendo": rc is None and ovpn_instalando(), "rc": rc,
+            "log": _RE_ANSI.sub("", txt[-6000:])}
+
+def _mb(n):
+    n = float(n or 0)
+    return ("%.1f GB" % (n / 1e9)) if n >= 1e9 else (("%.1f MB" % (n / 1e6)) if n >= 1e6 else ("%d KB" % (n / 1e3)))
+
+def _card_vpn():
+    """Ajustes > VPN: instalar el servidor, un usuario por MikroTik, sus redes. Todo desde
+    la web: el operador no tiene que entrar por consola."""
+    esc = html.escape
+    e = ovpn_estado()
+    cab = ("<section class=card><h2>VPN (OpenVPN) &mdash; el tunel de los MikroTik</h2>"
+           "<p class=hint style='margin:0 0 10px'>Los MikroTik mandan el espejo a este sensor "
+           "<b>por la VPN</b>. Aqui se instala el servidor, se da de alta cada MikroTik (te da "
+           "el comando para pegar en el router) y se le asignan las redes de sus abonados. "
+           "Cada cambio se respalda antes en <code>/root/backups/</code> y queda en la Bitacora.</p>")
+    if not e["script"]:
+        cuerpo = ("<p class=hint>Falta <code>/root/openvpn.sh</code>. Actualiza el panel "
+                  "(Actualizaciones): el instalador lo deja.</p>")
+    elif e["instalando"]:
+        cuerpo = ("<p><b>Instalacion de OpenVPN en marcha.</b> Tarda unos minutos.</p>"
+                  "<button type=button class=primary onclick='vpnVerLog()'>Ver el avance</button>")
+    elif not e["instalado"]:
+        cuerpo = ("<p>OpenVPN <b>no esta instalado</b> en este servidor.</p>"
+                  "<button type=button class=primary onclick=\"if(ask(this,'Instalar OpenVPN',"
+                  "'Se instala el servidor OpenVPN compatible con MikroTik (TCP 1194, red 100.64.0.0/24). "
+                  "Tarda unos minutos; sigue aunque cierres esta ventana.','Instalar',''))vpnInstalar()\">"
+                  "Instalar el servidor OpenVPN</button>")
+    else:
+        est_txt = ("<b style='color:#1a7f37'>&#9679; activo</b>" if e["activo"]
+                   else "<b style='color:#b52a2a'>&#9679; parado</b>")
+        filas = ""
+        for u in e["usuarios"]:
+            un = u["usuario"]
+            c = u["conexion"]
+            if c:
+                cx = ("<b style='color:#1a7f37'>&#9679; conectado</b><div class=vpnsub>desde %s &middot; %s"
+                      "<br>&darr; %s &middot; &uarr; %s</div>"
+                      % (esc(c["real"]), time.strftime("%d/%m %H:%M", time.localtime(c["desde"])) if c["desde"] else "?",
+                         _mb(c["rx"]), _mb(c["tx"])))
+            else:
+                cx = "<span style='color:#8a8a86'>&#9675; sin conectar</span>"
+            chips = "".join(
+                "<span class=vpnchip>%s<button type=button title='Quitar' onclick=\"if(ask(this,'Quitar %s',"
+                "'Se quita la ruta de %s hacia %s. Se reinicia OpenVPN: los tuneles se cortan unos segundos.',"
+                "'Quitar','danger'))vpnQuitarRed('%s','%s')\">&times;</button></span>"
+                % (esc(r), esc(r), esc(r), esc(un), esc(un), esc(r)) for r in u["redes"]) \
+                or "<span class=vpnsub>sin redes</span>"
+            filas += ("<tr><td class=mono>%s</td><td class=mono>%s</td><td>%s</td><td>%s"
+                      "<div class=vpnadd><input id=vpnr_%s placeholder='10.20.0.0/16, 192.168.50.0/24'>"
+                      "<button type=button class=cancelbtn onclick=\"if(ask(this,'Agregar redes a %s',"
+                      "'Esas redes iran por el tunel hacia este MikroTik. Se reinicia OpenVPN: los tuneles "
+                      "se cortan unos segundos (y el espejo con ellos).','Agregar',''))vpnRedes('%s')\">"
+                      "Agregar redes</button></div></td>"
+                      "<td><button type=button class='cancelbtn' style='color:#b52a2a' onclick=\"if(ask(this,"
+                      "'Eliminar %s de la VPN','Se borran su usuario, sus redes y sus rutas. Ese MikroTik "
+                      "ya no podra conectarse.','Eliminar','danger'))vpnBorrar('%s')\">Eliminar</button></td></tr>"
+                      % (esc(un), esc(u["ip"] or "?"), cx, chips, esc(un), esc(un), esc(un), esc(un), esc(un)))
+        tabla = ("<table><thead><tr><th>MikroTik (usuario)</th><th>IP en el tunel</th><th>Estado</th>"
+                 "<th>Redes de sus abonados</th><th></th></tr></thead><tbody>%s</tbody></table>"
+                 % filas) if filas else "<p class=hint>Todavia no hay ningun MikroTik dado de alta.</p>"
+        cuerpo = ("<p>Servidor %s &middot; %s %s en %s &middot; red <code>%s</code> &middot; "
+                  "este sensor es <code>%s</code> dentro del tunel</p>"
+                  % (est_txt, esc(e["proto"].upper()), esc(e["puerto"]), esc(e["local"] or "?"),
+                     esc(e["red"] or "?"), esc(e["servidor"] or "?"))
+                  + tabla
+                  + "<div class=actions style='margin-top:10px'><button type=button class=primary "
+                    "onclick=\"if(ask(this,'Agregar un MikroTik','Se crea su usuario de VPN y te da el "
+                    "comando para pegar en el router. La clave solo se muestra una vez.','Agregar',''))"
+                    "vpnUsuario()\">+ Agregar un MikroTik</button></div>")
+    return cab + cuerpo + _VPN_UI + "</section>"
+
+_VPN_UI = (
+    "<div id=vpnov class=vpnov><div class=vpnbox></div></div>"
+    "<style>.vpnov{display:none;position:fixed;inset:0;background:rgba(11,11,11,.5);z-index:130;"
+    "align-items:center;justify-content:center;padding:20px}"
+    ".vpnbox{background:#fff;border-radius:14px;padding:20px 22px;display:flex;gap:14px;align-items:flex-start;"
+    "max-width:780px;width:100%;max-height:calc(100vh - 40px);overflow:auto;box-shadow:0 12px 44px rgba(0,0,0,.3)}"
+    ".vpnspin{width:28px;height:28px;flex:none;border:3px solid #e7e6e2;border-top-color:#2a78d6;"
+    "border-radius:50%;animation:vpngira .8s linear infinite}@keyframes vpngira{to{transform:rotate(360deg)}}"
+    ".vpnico{font-size:28px;line-height:1;flex:none}"
+    ".vpnpre{background:#f8f9fa;border:1px solid #eaecf0;border-radius:6px;padding:8px 10px;margin:8px 0;"
+    "font:12px ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:42vh;overflow:auto}"
+    ".vpnsub{color:#52514e;font-size:12.5px;margin:3px 0}"
+    ".vpnwarn{background:#fff4e5;border:1px solid #f2d3ad;color:#7a4a12;border-radius:8px;padding:8px 10px;font-size:13px}"
+    ".vpnchip{display:inline-flex;align-items:center;gap:4px;background:#eef4fd;border:1px solid #cfe0f6;"
+    "border-radius:999px;padding:2px 4px 2px 9px;margin:2px;font:12px ui-monospace,Consolas,monospace}"
+    ".vpnchip button{border:0;background:none;cursor:pointer;color:#b52a2a;font-size:15px;line-height:1}"
+    ".vpnadd{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}"
+    ".vpnadd input{flex:1;min-width:170px;padding:6px 9px;border:1px solid #d7d6d2;border-radius:8px;"
+    "font:12.5px ui-monospace,Consolas,monospace}"
+    ".vpnav{margin:6px 0;padding-left:18px;font-size:13px;color:#a15c12}"
+    ".vpncmd{margin-top:8px}.vpncmd .cancelbtn{padding:3px 9px;font-size:12px;margin-left:6px}</style>"
+    "<script>"
+    "function _vpnEsc(t){return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}"
+    "function _vpnBox(h){var m=document.getElementById('vpnov');m.querySelector('.vpnbox').innerHTML=h;m.style.display='flex';}"
+    # al cerrar se recarga y se vuelve a abrir este apartado (#vpn)
+    "function _vpnCerrar(r){document.getElementById('vpnov').style.display='none';"
+    "if(r){location.hash='vpn';location.reload();}}"
+    "function _vpnSpin(t,x){_vpnBox(\"<div class=vpnspin></div><div><b>\"+t+\"</b>\"+"
+    "(x?\"<div class=vpnsub>\"+x+\"</div>\":\"\")+\"</div>\");}"
+    "function _vpnRes(j,tit){var av=(j.avisos||[]).map(function(a){return '<li>'+_vpnEsc(a)+'</li>';}).join('');"
+    "_vpnBox(\"<div class=vpnico>\"+(j.ok?'&#9989;':'&#9940;')+\"</div><div style='flex:1;min-width:0'><b>\"+"
+    "(j.ok?tit:'No se hizo')+\"</b>\"+(j.msg?\"<pre class=vpnpre>\"+_vpnEsc(j.msg)+\"</pre>\":\"\")+"
+    "(av?\"<ul class=vpnav>\"+av+\"</ul>\":\"\")+"
+    "\"<div class=actions><button type=button class=cancelbtn onclick='_vpnCerrar(1)'>Cerrar</button></div></div>\");}"
+    "function _vpnPost(ruta,datos,fn){var d=new URLSearchParams();for(var k in datos)d.set(k,datos[k]);"
+    "fetch(ruta,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:d.toString()})"
+    ".then(function(r){return r.json();}).then(fn).catch(function(e){_vpnRes({ok:false,msg:String(e)},'');});}"
+    "function _vpnCopiar(id,b){var t=document.getElementById(id).textContent;"
+    "try{navigator.clipboard.writeText(t);b.textContent='Copiado';}catch(e){}}"
+    "function vpnUsuario(){_vpnSpin('Creando el usuario del MikroTik\\u2026');"
+    "_vpnPost('/vpn/usuario',{},function(j){if(!j.ok){_vpnRes(j,'');return;}var d=j.datos||{};"
+    "_vpnBox(\"<div class=vpnico>&#9989;</div><div style='flex:1;min-width:0'><b>MikroTik agregado a la VPN</b>\"+"
+    "\"<div class=vpnsub>IP en el tunel: <b>\"+_vpnEsc(d.IPVPN)+\"</b> &middot; usuario <b>\"+_vpnEsc(d.USUARIO)+"
+    "\"</b> &middot; clave <b>\"+_vpnEsc(d.CLAVE)+\"</b></div>\"+"
+    "\"<p class=vpnwarn>La clave <b>solo se muestra ahora</b>. Copia el comando de tu version de RouterOS y "
+    "pegalo en el MikroTik (Terminal). Cuando conecte, aparecera como conectado aqui.</p>\"+"
+    "\"<div class=vpncmd><b>RouterOS v7</b><button type=button class=cancelbtn onclick=\\\"_vpnCopiar('vpnmt7',this)\\\">Copiar</button>\"+"
+    "\"<pre id=vpnmt7 class=vpnpre>\"+_vpnEsc(d.MT7)+\"</pre></div>\"+"
+    "\"<div class=vpncmd><b>RouterOS v6</b><button type=button class=cancelbtn onclick=\\\"_vpnCopiar('vpnmt6',this)\\\">Copiar</button>\"+"
+    "\"<pre id=vpnmt6 class=vpnpre>\"+_vpnEsc(d.MT6)+\"</pre></div>\"+"
+    "\"<div class=actions><button type=button class=primary onclick='_vpnCerrar(1)'>Ya lo copie</button></div></div>\");});}"
+    "function vpnRedes(u){var i=document.getElementById('vpnr_'+u);var v=i?i.value:'';"
+    "if(!v.trim()){if(i)i.focus();return;}"
+    "_vpnSpin('Agregando redes\\u2026','Se reinicia OpenVPN: los tuneles se cortan unos segundos.');"
+    "_vpnPost('/vpn/redes',{usuario:u,redes:v},function(j){_vpnRes(j,'Redes agregadas');});}"
+    "function vpnQuitarRed(u,r){_vpnSpin('Quitando '+r+'\\u2026');"
+    "_vpnPost('/vpn/quitar-redes',{usuario:u,redes:r},function(j){_vpnRes(j,'Red quitada');});}"
+    "function vpnBorrar(u){_vpnSpin('Eliminando '+u+'\\u2026');"
+    "_vpnPost('/vpn/borrar',{usuario:u},function(j){_vpnRes(j,'MikroTik eliminado de la VPN');});}"
+    "function vpnInstalar(){_vpnSpin('Lanzando la instalacion\\u2026');"
+    "_vpnPost('/vpn/instalar',{},function(j){if(!j.ok){_vpnRes(j,'');return;}vpnVerLog();});}"
+    "function vpnVerLog(){_vpnBox(\"<div class=vpnspin id=vpnsp></div><div style='flex:1;min-width:0'>\"+"
+    "\"<b id=vpnlt>Instalando OpenVPN\\u2026</b><div class=vpnsub>Tarda unos minutos (genera las claves). \"+"
+    "\"Puedes cerrar esta ventana: sigue en el servidor.</div><pre id=vpnlog class=vpnpre></pre>\"+"
+    "\"<div class=actions><button type=button class=cancelbtn onclick='_vpnCerrar(1)'>Cerrar</button></div></div>\");"
+    "(function tic(){fetch('/vpn/log').then(function(r){return r.json();}).then(function(j){"
+    "var p=document.getElementById('vpnlog');if(!p)return;p.textContent=j.log||'';p.scrollTop=p.scrollHeight;"
+    "if(j.corriendo||j.rc===null){setTimeout(tic,2000);return;}"
+    "var s=document.getElementById('vpnsp');if(s){s.className='vpnico';s.innerHTML=(j.rc===0?'&#9989;':'&#9940;');}"
+    "document.getElementById('vpnlt').textContent=(j.rc===0?'OpenVPN instalado':'La instalacion fallo: mira el registro');})"
+    ".catch(function(){setTimeout(tic,4000);});})();}"
+    "</script>")
 
 def _card_listas(m):
     """Las address-lists, separadas por tipo de abuso.
@@ -12011,6 +12461,8 @@ def perfil_page(msg="", ok=False, edit_user=None):
             "<th class=num>Indicadores</th><th>Ultima valida</th><th>Caduca</th></tr></thead>"
             f"<tbody>{filas}</tbody></table></section>")
     # --- tarjeta: conexion al MikroTik para la cuarentena (solo admin) ---
+    # --- VPN: el tunel de los MikroTik (solo admin) ------------------------------------
+    card_vpn = _card_vpn() if (es_admin and yo) else ""
     # --- DNS: a que resolutores preguntan tus CPEs -------------------------------------
     card_dns = ""
     if es_admin and yo:
@@ -12367,6 +12819,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
              + _tile("usuarios", "Usuarios y roles", _IC_USERS, bool(card_users))
              + _tile("acceso", "IPs de confianza", _IC_SHIELD, bool(card_acceso))
              + _tile("mikrotik", "MikroTik", _IC_RTR, bool(card_mk))
+             + _tile("vpn", "VPN", _IC_VPN, bool(card_vpn))
              + _tile("dns", "DNS", _IC_DNS, bool(card_dns))
              + _tile("feeds", "Reputacion", _IC_FEED, bool(card_feeds))
              + _tile("update", "Actualizaciones", _IC_DL, bool(card_update))
@@ -12382,6 +12835,7 @@ def perfil_page(msg="", ok=False, edit_user=None):
         return _modal(sid, card) if card else ""
     modals = (_mcard("perfil", card_pw) + _mcard("empresa", card_empresa) + _mcard("usuarios", card_users)
               + _mcard("acceso", card_acceso) + _mcard("mikrotik", card_mk + (_card_nodos() if card_mk else ""))
+              + _mcard("vpn", card_vpn)
               + _mcard("dns", card_dns) + _mcard("feeds", card_feeds)
               + _mcard("update", card_update))
     if es_admin:
@@ -12421,7 +12875,9 @@ def perfil_page(msg="", ok=False, edit_user=None):
              # Perfil; el admin no (cambia lo suyo desde SU fila de Usuarios), asi que a el se le
              # abre su fila. Despues se quita el # para que recargar no lo vuelva a abrir.
              "var _YO=" + json.dumps(yo or "").replace("<", "\\u003c") + ";"
-             "function _cuenta(h){if(h!=='cuenta'&&h!=='clave')return;"
+             "function _cuenta(h){if(h&&h!=='cuenta'&&h!=='clave'&&document.getElementById('m-'+h)){openm(h);"
+             "try{history.replaceState(null,'',location.pathname+location.search);}catch(e){}return;}"
+             "if(h!=='cuenta'&&h!=='clave')return;"
              "if(document.getElementById('m-perfil')){openm('perfil');"
              "if(h==='clave'){var i=document.querySelector('#m-perfil input[name=actual]');if(i)i.focus();}}"
              "else if(document.getElementById('m-usuarios')){openm('usuarios');"
@@ -13905,6 +14361,27 @@ re-ejecutando el instalador. Necesita salida a internet la primera vez.</li>
 </ul>
 <p class="muted" style="color:#52514e;font-size:12px">Mapa inspirado en
 <b>MikroDash</b> (MIT). Geometria del mundo: World Atlas / Natural Earth (dominio publico).</p>
+
+<h2>VPN (OpenVPN): el tunel de los MikroTik</h2>
+<p>Los MikroTik mandan el espejo a este sensor <b>por una VPN</b>, y el sensor es el servidor. Todo
+se hace desde <b>Ajustes &rarr; VPN</b>, sin entrar por consola:</p>
+<ul>
+<li><b>Instalar el servidor OpenVPN</b> (si no lo esta): compatible con RouterOS v6 y v7 (TCP 1194,
+AES-256-CBC, SHA1, sin tls-crypt), red del tunel <code>100.64.0.0/24</code>, el sensor es
+<code>100.64.0.1</code>. Tarda unos minutos y la ventana muestra el avance.</li>
+<li><b>Agregar un MikroTik</b>: crea su usuario y te da el comando <code>/interface ovpn-client</code>
+para v7 y para v6, listo para pegar en el router. La clave <b>solo se muestra esa vez</b>.</li>
+<li><b>Redes de sus abonados</b>: se le asignan a cada MikroTik (se enrutan por el tunel hacia el). No se
+admiten redes enormes (/0 a /7), ni que pisen la red del tunel, ni que se solapen con las de otro
+MikroTik. Agregar o quitar una red <b>reinicia OpenVPN</b>: todos los tuneles (y el espejo) se cortan
+unos segundos.</li>
+<li><b>Eliminar</b> un MikroTik: se borran su usuario, sus redes y sus rutas. Su cuenta del sistema se
+borra solo si es una de las que crea la VPN.</li>
+</ul>
+<p>La tabla dice que MikroTik estan <b>conectados</b> ahora (desde que IP, desde cuando y cuanto
+trafico). Antes de cada cambio se respalda <code>/etc/openvpn</code> en <code>/root/backups/</code>
+y todo queda en la <b>Bitacora</b>. Por debajo lo hace <code>/root/openvpn.sh</code>, que el
+instalador deja en cada caja y que tambien se puede usar por consola (sin argumentos abre su menu).</p>
 
 <h2>Reinstalar o actualizar</h2>
 <p>Todo esta en un instalador idempotente. Para actualizar a la ultima version
@@ -17703,6 +18180,10 @@ class H(BaseHTTPRequestHandler):
             return self._html(bitacora_page(embed=("embed=1" in (self.path.split("?", 1)[1] if "?" in self.path else ""))))
         if path == "/perfil":
             return self._redirect("/ajustes")
+        if path == "/vpn/log":
+            if not self._admin():
+                return self._deny()
+            return self._json(ovpn_log())
         if path == "/mi-foto":
             ft = foto_de(getattr(CTX, "user", None))
             if not ft:
@@ -18124,6 +18605,41 @@ class H(BaseHTTPRequestHandler):
             ne = sum(1 for v in ver if v["nivel"] == "error"); na = sum(1 for v in ver if v["nivel"] == "aviso")
             cab = "%d regla(s) \u00b7 %d error(es) \u00b7 %d aviso(s)" % (len(reglas), ne, na)
             return _txtv(cab + "\n" + "\n".join(lineas_verificacion(ver)))
+        if ruta in ("/vpn/instalar", "/vpn/usuario", "/vpn/redes", "/vpn/quitar-redes", "/vpn/borrar"):
+            # Ajustes > VPN. Solo admin. Respuesta JSON para el modal.
+            if not self._admin():
+                return self._deny()
+            quien = getattr(CTX, "user", "?")
+            try:
+                if ruta == "/vpn/instalar":
+                    okv, msgv = ovpn_instalar(quien=quien)
+                    return self._json({"ok": okv, "msg": msgv})
+                if ruta == "/vpn/usuario":
+                    okv, msgv, datos = ovpn_accion("usuario", quien=quien)
+                    return self._json({"ok": okv, "msg": msgv, "datos": datos})
+                usuario = (q.get("usuario", [""])[0]).strip()
+                est = ovpn_estado()
+                mio = next((x for x in est["usuarios"] if x["usuario"] == usuario), None)
+                if not mio:
+                    return self._json({"ok": False, "msg": "ese MikroTik no esta en la VPN"})
+                if ruta == "/vpn/redes":
+                    nuevas, errores, avisos = ovpn_redes_validas(q.get("redes", [""])[0], usuario, est)
+                    if errores:
+                        return self._json({"ok": False, "msg": "\n".join(errores), "avisos": avisos})
+                    if not nuevas:
+                        return self._json({"ok": True, "msg": "No habia redes nuevas.", "avisos": avisos})
+                    okv, msgv, _d = ovpn_accion("redes", usuario, nuevas, quien=quien)
+                    return self._json({"ok": okv, "msg": msgv, "avisos": avisos})
+                if ruta == "/vpn/quitar-redes":
+                    red = (q.get("redes", [""])[0]).strip()
+                    if red not in mio["redes"]:
+                        return self._json({"ok": False, "msg": "%s no es una red de %s" % (red, usuario)})
+                    okv, msgv, _d = ovpn_accion("quitar-redes", usuario, [red], quien=quien)
+                    return self._json({"ok": okv, "msg": msgv})
+                okv, msgv, _d = ovpn_accion("borrar", usuario, quien=quien)
+                return self._json({"ok": okv, "msg": msgv})
+            except Exception as ex:
+                return self._json({"ok": False, "msg": "error: %s" % ex})
         if ruta == "/mikrotik/listas/recargar":
             # Vuelve a cargar en el router las IPs en cuarentena que faltan en su lista.
             if not self._admin():
@@ -19294,13 +19810,15 @@ else
   log "API sin SHA; bajando ${REPO_BRANCH} con nocache"
 fi
 curl -fsSL "$URL" -o "$TMP" || { log "descarga fallo"; exit 1; }
-extraer() { # $1=linea-inicio (substr)  $2=marcador-fin  $3=destino  $4=validador(py|sh)
+extraer() { # $1=linea-inicio (substr)  $2=marcador-fin  $3=destino  $4=validador(py|sh|bash)
   # !f: solo marca el inicio la PRIMERA vez, asi las lineas del cuerpo que contengan el
   # marcador (p.ej. el propio actualizador) no rompen la extraccion.
   awk -v s="$1" -v e="$2" '!f && index($0,s){f=1;next} f&&$0==e{exit} f{print}' "$TMP" > "$3.new"
   [ -s "$3.new" ] || { log "extraccion vacia: $3"; return 1; }
   if [ "$4" = "sh" ]; then
     sh -n "$3.new" || { log "sh invalido: $3"; return 1; }
+  elif [ "$4" = "bash" ]; then
+    bash -n "$3.new" || { log "bash invalido: $3"; return 1; }
   else
     python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$3.new" || { log "py invalido: $3"; return 1; }
   fi
@@ -19311,6 +19829,22 @@ extraer "cat > /usr/local/bin/suricata-html-report <<'HREP'" "HREP" /usr/local/b
 extraer "cat > /usr/local/bin/suricata-feeds-update <<'FEEDS'" "FEEDS" /usr/local/bin/suricata-feeds-update py || log "no se autoactualizo feeds-update"
 # el actualizador se auto-actualiza tambien (si falla, se sigue con lo demas)
 extraer "cat > /usr/local/bin/suricata-panel-update <<'UPDSH'" "UPDSH" /usr/local/bin/suricata-panel-update sh || log "no se autoactualizo el updater"
+# /root/openvpn.sh (Ajustes > VPN lo usa sin menu): se renueva verificado con la huella que
+# trae el propio instalador; si habia uno distinto, se respalda antes
+_ovsha="$(sed -n 's/^OVPN_SHA="\([0-9a-f]\{64\}\)"$/\1/p' "$TMP" | head -n 1)"
+if extraer "cat > \"\$_ovpn_tmp\" <<'OVPNSH'" "OVPNSH" /root/openvpn.sh bash; then
+  if [ -n "$_ovsha" ] && [ "$(sha256sum /root/openvpn.sh.new | awk '{print $1}')" = "$_ovsha" ]; then
+    if [ -f /root/openvpn.sh ] && ! cmp -s /root/openvpn.sh.new /root/openvpn.sh; then
+      cp -p /root/openvpn.sh "/root/openvpn.sh.bak-$(date +%Y%m%d-%H%M%S)"
+    fi
+    install -m 0750 /root/openvpn.sh.new /root/openvpn.sh
+  else
+    log "openvpn.sh no coincide con su huella: no se renueva"
+  fi
+  rm -f /root/openvpn.sh.new
+else
+  log "no se renovo /root/openvpn.sh"
+fi
 # respaldo de la version ACTUAL antes de sobrescribir, para poder revertir si el panel no levanta
 BKP="/root/backups/panel/$(date +%F-%H%M%S)"
 mkdir -p "$BKP"
@@ -20501,15 +21035,24 @@ fi
 # administrador de OpenVPN (menu: 1 instala el servidor y crea el primer usuario, 2 un
 # usuario por cada MikroTik con su comando /interface ovpn-client para v6 y v7, 3 las
 # redes de los clientes). Compatible con RouterOS: TCP, AES-256-CBC, SHA1, sin tls-crypt.
-# Tal cual, sin tocar (huella abajo). Si en /root ya hay uno DISTINTO, se respalda antes.
+# El panel lo usa sin menu (Ajustes -> VPN: instalar, MikroTik, redes), para no tener que
+# entrar por consola. Verificado con su huella; si en /root ya hay uno DISTINTO, se respalda.
 OVPN_SH=/root/openvpn.sh
-OVPN_SHA="70028a17d8ccacbb47fd2d96344ffaf1d9222cf8c7b9a1d0f1c7d3c03c0163ae"
+OVPN_SHA="6440eebcfcfb9387839dea0b6ef48c0017dadce32814754ee5926770bf6c3832"
 _ovpn_tmp="$(mktemp /root/.openvpn.sh.XXXXXX)"
 cat > "$_ovpn_tmp" <<'OVPNSH'
 #!/usr/bin/env bash
 # Instalador y administrador OpenVPN para túneles MikroTik/ISP
 # Compatible con RouterOS v6 y v7. La interfaz del MikroTik se llama open-vpn.
 # Versión auditada: valida entradas, evita duplicados, mejora permisos y endurece configuración básica.
+#
+# Sin argumentos abre el menú. Con argumentos se usa sin menú (así lo llama el panel web
+# de suricata-ids-lab, en Ajustes -> VPN):
+#   --instalar                      instala el servidor (sin crear usuario)
+#   --usuario                       crea un usuario (uno por MikroTik); salida CLAVE=valor
+#   --redes USUARIO RED [RED...]    agrega redes de clientes a ese usuario
+#   --quitar-redes USUARIO RED...   quita redes de ese usuario
+#   --borrar USUARIO                borra el usuario, sus redes y su cuenta del sistema
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -20527,11 +21070,14 @@ MIKROTIK_INTERFACE_NAME="open-vpn"
 # Si todos sus MikroTik son RouterOS v7 modernos, puede cambiar a SHA256.
 OPENVPN_AUTH_DIGEST="SHA1"
 MIKROTIK_AUTH_DIGEST="sha1"
-CCD_DIR="/etc/openvpn/${VPN_NAME}"
-SERVER_DIR="/etc/openvpn/server"
-TMP_DIR="/etc/openvpn/tmp"
+# OVPN_RAIZ: SOLO para las pruebas automaticas (todo bajo un directorio temporal).
+OVPN_RAIZ="${OVPN_RAIZ:-}"
+CCD_DIR="${OVPN_RAIZ}/etc/openvpn/${VPN_NAME}"
+SERVER_DIR="${OVPN_RAIZ}/etc/openvpn/server"
+TMP_DIR="${OVPN_RAIZ}/etc/openvpn/tmp"
 ROUTES_FILE="${CCD_DIR}/rutas.sh"
 EASYRSA_VERSION="3.1.2"
+MAQUINA=0   # 1 = sin menu ni pantallas: salida para el panel web
 ###########################################################
 
 trap 'echo "ERROR: Falló el script en la línea $LINENO. Revise el mensaje anterior." >&2' ERR
@@ -20541,6 +21087,7 @@ warn() { echo -e "\033[1;33m[AVISO]\033[0m $*"; }
 die() { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
 
 need_root() {
+  [[ -n "$OVPN_RAIZ" ]] && return 0   # pruebas: no toca el sistema
   [[ "${EUID}" -eq 0 ]] || die "Este script debe ejecutarse como root. Use: sudo bash $0"
 }
 
@@ -20772,6 +21319,16 @@ EOF_USER
   pubip="$(public_ip)"
   [[ -n "$pubip" ]] || pubip="CAMBIE_POR_IP_PUBLICA_DEL_CLOUD"
 
+  if [[ "$MAQUINA" -eq 1 ]]; then
+    # el panel la muestra UNA vez: la clave no se guarda en claro en ningun sitio
+    printf 'IPVPN=%s\nUSUARIO=%s\nCLAVE=%s\nCONECTAR=%s\n' "$ipvpn" "$uservpn" "$passvpn" "$pubip"
+    printf 'MT7=/interface ovpn-client add connect-to=%s cipher=aes256-cbc auth=%s disabled=no name=%s password=%s user=%s port=%s protocol=%s mode=ip add-default-route=no use-peer-dns=no\n' \
+      "$pubip" "$MIKROTIK_AUTH_DIGEST" "$MIKROTIK_INTERFACE_NAME" "$passvpn" "$uservpn" "$PORT" "$PROTOCOL"
+    printf 'MT6=/interface ovpn-client add connect-to=%s cipher=aes256 auth=%s disabled=no name=%s password=%s user=%s port=%s mode=ip add-default-route=no\n' \
+      "$pubip" "$MIKROTIK_AUTH_DIGEST" "$MIKROTIK_INTERFACE_NAME" "$passvpn" "$uservpn" "$PORT"
+    return 0
+  fi
+
   clear || true
   echo "###########################################################"
   echo -e "                \033[0;31mDATOS USER VPN\033[0m (Guardar datos)             "
@@ -20837,16 +21394,31 @@ add_client_routes() {
   if [[ $rc -ne 0 ]]; then return 0; fi
 
   mapfile -t RANG <<< "$values"
-  local vpn_user="${RANG[0]:-}"
+  agregar_redes "${RANG[@]}"
+
+  if [[ "$AGREGADAS" -gt 0 ]]; then
+    dialog --title "ÉXITO" --msgbox "Los rangos fueron agregados correctamente." 10 50 || true
+  else
+    dialog --title "SIN CAMBIOS" --msgbox "No se agregó ningún rango nuevo." 10 50 || true
+  fi
+}
+
+# agregar_redes USUARIO RED [RED...]: lo que hacia el formulario, usable sin menu.
+# Deja en AGREGADAS cuantas se agregaron; reinicia el servidor solo si hubo alguna.
+AGREGADAS=0
+agregar_redes() {
+  local vpn_user="${1:-}"
+  shift || true
   valid_vpn_user "$vpn_user" || die "Usuario VPN inválido. Use solo letras minúsculas, números, guion o guion bajo."
   [[ -f "${CCD_DIR}/${vpn_user}" ]] || die "El usuario VPN no existe: ${vpn_user}"
 
-  local gateway cidr red mask added=0 route_line
+  local gateway cidr red mask route_line
+  AGREGADAS=0
   gateway="$(awk '$1 == "ifconfig-push" {print $2; exit}' "${CCD_DIR}/${vpn_user}")"
   valid_ipv4 "$gateway" || die "No pude obtener gateway/IP VPN del usuario ${vpn_user}."
 
-  for ((i=1; i<${#RANG[@]}; i++)); do
-    cidr="${RANG[$i]//[[:space:]]/}"
+  for cidr in "$@"; do
+    cidr="${cidr//[[:space:]]/}"
     [[ -z "$cidr" ]] && continue
     valid_cidr "$cidr" || { warn "Rango inválido omitido: ${cidr}"; continue; }
 
@@ -20860,19 +21432,80 @@ add_client_routes() {
     route_line="/sbin/ip route replace ${cidr} via ${gateway} # ${vpn_user} ${cidr}"
     echo "$route_line" >> "$ROUTES_FILE"
     echo "iroute ${red} ${mask}" >> "${CCD_DIR}/${vpn_user}"
-    added=1
+    AGREGADAS=$((AGREGADAS + 1))
     log "Agregado ${cidr} para ${vpn_user} vía ${gateway}."
   done
 
   chmod 0755 "$ROUTES_FILE"
   chmod 0600 "${CCD_DIR}/${vpn_user}"
 
-  if [[ "$added" -eq 1 ]]; then
+  if [[ "$AGREGADAS" -gt 0 ]]; then
     systemctl restart openvpn-server@server
-    dialog --title "ÉXITO" --msgbox "Los rangos fueron agregados correctamente." 10 50 || true
-  else
-    dialog --title "SIN CAMBIOS" --msgbox "No se agregó ningún rango nuevo." 10 50 || true
   fi
+}
+
+# quitar_redes USUARIO RED [RED...]: su linea en rutas.sh, su iroute y la ruta viva.
+quitar_redes() {
+  local vpn_user="${1:-}"
+  shift || true
+  valid_vpn_user "$vpn_user" || die "Usuario VPN inválido."
+  [[ -f "${CCD_DIR}/${vpn_user}" ]] || die "El usuario VPN no existe: ${vpn_user}"
+
+  local cidr red mask tmp quitadas=0
+  for cidr in "$@"; do
+    cidr="${cidr//[[:space:]]/}"
+    [[ -z "$cidr" ]] && continue
+    valid_cidr "$cidr" || { warn "Rango inválido omitido: ${cidr}"; continue; }
+    if ! grep -Fq "# ${vpn_user} ${cidr}" "$ROUTES_FILE" 2>/dev/null; then
+      warn "El rango ${cidr} no es de ${vpn_user}: no se quita."
+      continue
+    fi
+    red="${cidr%/*}"
+    mask="$(cidr_to_mask "${cidr#*/}")"
+    tmp="$(mktemp)"
+    grep -Fv "# ${vpn_user} ${cidr}" "$ROUTES_FILE" > "$tmp" || true
+    cat "$tmp" > "$ROUTES_FILE"
+    grep -Fxv "iroute ${red} ${mask}" "${CCD_DIR}/${vpn_user}" > "$tmp" || true
+    cat "$tmp" > "${CCD_DIR}/${vpn_user}"
+    rm -f "$tmp"
+    ip route del "$cidr" 2>/dev/null || true
+    quitadas=$((quitadas + 1))
+    log "Quitado ${cidr} de ${vpn_user}."
+  done
+
+  if [[ "$quitadas" -gt 0 ]]; then
+    systemctl restart openvpn-server@server
+  fi
+}
+
+# borrar_usuario USUARIO: sus redes, su archivo y su cuenta del sistema. La cuenta se borra
+# SOLO si es una de las que crea este script (sin shell y con su comentario): nunca una
+# cuenta real del servidor, aunque se llame igual.
+borrar_usuario() {
+  local vpn_user="${1:-}" cidr tmp gecos shell
+  valid_vpn_user "$vpn_user" || die "Usuario VPN inválido."
+  [[ -f "${CCD_DIR}/${vpn_user}" ]] || die "El usuario VPN no existe: ${vpn_user}"
+
+  while read -r cidr; do
+    [[ -n "$cidr" ]] && ip route del "$cidr" 2>/dev/null || true
+  done < <(awk -v u="$vpn_user" '$(NF-1) == u && $(NF-2) == "#" {print $NF}' "$ROUTES_FILE" 2>/dev/null)
+  tmp="$(mktemp)"
+  grep -Fv "# ${vpn_user} " "$ROUTES_FILE" > "$tmp" || true
+  cat "$tmp" > "$ROUTES_FILE"
+  rm -f "$tmp" "${CCD_DIR}/${vpn_user}"
+
+  if id "$vpn_user" >/dev/null 2>&1; then
+    gecos="$(getent passwd "$vpn_user" | cut -d: -f5)"
+    shell="$(getent passwd "$vpn_user" | cut -d: -f7)"
+    if [[ ( "$gecos" == "OpenVPN user" || "$gecos" == "${vpn_user},RoomNumber"* ) \
+          && ( "$shell" == */nologin || "$shell" == */false ) ]]; then
+      userdel "$vpn_user"
+    else
+      warn "La cuenta ${vpn_user} no la creo este script: no se borra (solo se quito de la VPN)."
+    fi
+  fi
+  systemctl restart openvpn-server@server
+  log "Usuario ${vpn_user} eliminado de la VPN."
 }
 
 install_openvpn_server() {
@@ -20890,6 +21523,11 @@ install_openvpn_server() {
     ip="$(ip -4 addr show scope global | awk '/inet / {print $2}' | cut -d/ -f1)"
   else
     number_of_ip="$(ip -4 addr show scope global | awk '/inet / {print $2}' | wc -l)"
+    if [[ "$MAQUINA" -eq 1 ]]; then
+      # sin nadie delante: la IP de la ruta por defecto
+      ip="$(ip -o -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+      [[ -n "$ip" ]] || ip="$(ip -4 addr show scope global | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1)"
+    else
     echo "Seleccionar IPv4 del servidor Cloud (pública o privada):"
     ip -4 addr show scope global | awk '/inet / {print $2}' | cut -d/ -f1 | nl -s ') '
     read -r -p "IPv4 address [1]: " ip_number
@@ -20899,6 +21537,7 @@ install_openvpn_server() {
     done
     [[ -z "$ip_number" ]] && ip_number="1"
     ip="$(ip -4 addr show scope global | awk '/inet / {print $2}' | cut -d/ -f1 | sed -n "${ip_number}p")"
+    fi
   fi
   valid_ipv4 "$ip" || die "IP local inválida: ${ip}"
 
@@ -20996,6 +21635,9 @@ EOF_CONF
   systemctl restart openvpn-server@server.service
 
   log "OpenVPN instalado y configurado en modo compatibilidad RouterOS v6/v7."
+  if [[ "$MAQUINA" -eq 1 ]]; then
+    return 0   # el panel crea los usuarios aparte, uno por MikroTik
+  fi
   create_vpn_user
 }
 
@@ -21034,7 +21676,35 @@ main_menu() {
   done
 }
 
-main_menu
+uso() {
+  sed -n '/^# Sin argumentos abre/,/^# *--borrar/p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+case "${1:-}" in
+  "") main_menu ;;
+  --instalar)
+    need_root; MAQUINA=1
+    [[ -f "$SERVER_DIR/server.conf" ]] && die "OpenVPN ya esta instalado (${SERVER_DIR}/server.conf): no se reinstala encima."
+    install_openvpn_server ;;
+  --usuario)
+    need_root; MAQUINA=1
+    [[ -x "$(command -v openvpn)" ]] || die "No está instalado OpenVPN. Use --instalar."
+    create_vpn_user ;;
+  --redes)
+    need_root; shift
+    [[ $# -ge 2 ]] || die "Uso: $0 --redes USUARIO RED [RED...]"
+    agregar_redes "$@" ;;
+  --quitar-redes)
+    need_root; shift
+    [[ $# -ge 2 ]] || die "Uso: $0 --quitar-redes USUARIO RED [RED...]"
+    quitar_redes "$@" ;;
+  --borrar)
+    need_root; shift
+    [[ $# -eq 1 ]] || die "Uso: $0 --borrar USUARIO"
+    borrar_usuario "$1" ;;
+  -h|--help) uso ;;
+  *) uso; exit 2 ;;
+esac
 OVPNSH
 if [ "$(sha256sum "$_ovpn_tmp" | awk '{print $1}')" != "$OVPN_SHA" ]; then
   rm -f "$_ovpn_tmp"

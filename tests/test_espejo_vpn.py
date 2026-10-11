@@ -16,6 +16,8 @@ Lo que se protege:
     /root que se borra aunque falle, y la clave no va en la linea de comandos;
   - dar de alta su API: HOST = IP del tunel, envio apagado, la clave fuera de la bitacora;
     la interfaz, la que le dara -m (no la primera libre);
+    si el sensor YA recibe su espejo por esa interfaz, otro nodo que la tuviera la suelta (y
+    su envio a cuarentena, si no es origen del receptor);
   - cada interfaz, de su router: el plan corrige los nodos (el de -m toma la suya; el que no
     esta en -m pierde la que pasa a otro y su envio a cuarentena) y se guarda al lanzar;
   - uno a la vez: dos Lanzar a la vez (dos hilos) lanzan UN instalador; unidad de nombre fijo;
@@ -63,7 +65,7 @@ PIEZAS = {
     "_vpn_bloque_sensor",
     "OVPN_UNIDAD", "OVPN_CERROJO", "ESPEJO_CERROJO", "_UnaVez", "_RE_CLAVE_LOG", "enmascarar_claves",
     "espejo_vpn_reasignar", "espejo_vpn_nodos_txt", "espejo_vpn_nodos_aplicar", "_iface_en_uso",
-    "_iface_vpn", "rid_por_iface", "ovpn_instalar"}
+    "_iface_vpn", "rid_por_iface", "ovpn_instalar", "_vpn_alta_soltar_iface"}
 
 
 class OsEspia(object):
@@ -196,7 +198,8 @@ def entorno(routers0=None, usuarios=("a", "b")):
         if nom in PIEZAS:
             exec(ast.get_source_segment(DASH, n), ns)
     mkbin = os.path.join(td, "suricata-mikrotik-init")
-    open(mkbin, "w").write("#!/usr/bin/env python3\n# --sin-registrar --plan\n")
+    # una herramienta "al dia": lleva la marca de version que busca el panel
+    open(mkbin, "w").write("#!/usr/bin/env python3\n# --sin-registrar --plan\n%s\n" % ns["MK_INIT_MARCA"])
     resp = os.path.join(td, "respaldar")
     os.makedirs(resp)
     for f in ("suricata.yaml", "tzsp-decap.service"):
@@ -487,6 +490,30 @@ def main():
     check("herramienta vieja: se baja del instalador publicado y se instala tal cual",
           ok and nueva == prog and "--sin-registrar" in nueva, msg)
     check("  y la vieja queda respaldada", any(f.startswith("suricata-mikrotik-init.bak-") for f in os.listdir(td)), "")
+    # la recien instalada ya no se vuelve a bajar
+    ns["urllib"] = types.SimpleNamespace(request=types.SimpleNamespace(
+        urlopen=lambda u, timeout=0: (_ for _ in ()).throw(IOError("no deberia bajar nada"))))
+    ok, msg = ns["mkinit_asegurar"]()
+    check("  la de esta version se reconoce y no se vuelve a bajar", ok and msg == "", msg)
+    # una que YA tiene --sin-registrar y --plan pero no es la de esta version (la de eafc4bc, si el
+    # actualizador no consiguio renovarla) tambien se renueva: con la marca vieja pasaba por nueva
+    viejas = [("sin la version de ahora", "\n".join(l for l in prog.split("\n")
+                                                   if not l.startswith("MKINIT_VERSION =")))]
+    try:
+        txt0 = subprocess.run(["git", "show", "eafc4bc:install-suricata.sh"], cwd=RAIZ, capture_output=True,
+                              timeout=30).stdout.decode("utf-8")
+        viejas.append(("de eafc4bc", txt0.split("<<'MKINIT'\n", 1)[1].split("\nMKINIT\n", 1)[0] + "\n"))
+    except (OSError, IndexError, subprocess.SubprocessError, UnicodeDecodeError):
+        print("  (aviso: sin el historial de git no se prueba la herramienta de eafc4bc, solo la sintetica)")
+    for nombre_v, vieja in viejas:
+        open(ns["MK_INIT_BIN"], "w", encoding="utf-8", newline="\n").write(vieja)
+        ns["urllib"] = types.SimpleNamespace(request=types.SimpleNamespace(
+            urlopen=lambda u, timeout=0: Resp(SRC.encode("utf-8"))))
+        ok, msg = ns["mkinit_asegurar"]()
+        nueva = open(ns["MK_INIT_BIN"], encoding="utf-8").read()
+        check("herramienta %s (con --sin-registrar y --plan): se detecta como vieja y se renueva" % nombre_v,
+              "--sin-registrar" in vieja and "--plan" in vieja and ok and msg == "renovado" and nueva == prog,
+              (msg, nueva == prog))
     # el boton Actualizar tambien la renueva (el trozo real del actualizador, con bash)
     upd = SRC.split("cat > /usr/local/bin/suricata-panel-update <<'UPDSH'\n", 1)[1].split("\nUPDSH\n", 1)[0]
     f_ini = upd.index("extraer() {")
@@ -661,6 +688,45 @@ def prueba_nodos():
         ok, msg = _lanzar(ns, p["args"], p.get("nodos"))
         _cada_interfaz_de_su_router(ns, p["mapa"], nombre)
         check("  el nodo dado de alta recibe sus alertas", ok and ns["rid_por_iface"](su_m) == nuevo["id"], msg)
+        check("  (el alta, ANTES de lanzar, no le quito nada al local: el receptor aun era suyo)",
+              not any("reasignada" in d for _a, d in bit), bit)
+
+    # --- Escenario C: el modo VPN se monto por consola (o con un panel anterior). El receptor ya
+    # recibe 100.64.0.2 por ids-in (ids-mon), pero el nodo local sigue con ids-mon y el envio
+    # encendido. "Dar de alta su API" daba ids-mon a los dos y rid_por_iface devolvia el local:
+    # las alertas y cuarentenas del MikroTik de la VPN iban al router local.
+    ENV_C = "Environment=TZSP_PORT=37008 TZSP_ALLOW=100.64.0.2 TZSP_MAP=100.64.0.2=ids-in TZSP_BYTES=65\n"
+    for usuarios, nombre in ((("a",), "C (un MikroTik en la VPN)"), (("a", "b"), "C (dos en la VPN)")):
+        ns, td, sub, bit, routers, orden = entorno([local], usuarios=usuarios)
+        sub.env = ENV_C
+        ns["mk_conectar"] = lambda d, timeout=6: types.SimpleNamespace(close=lambda: None)
+        ok, msg = ns["vpn_mk_alta"]("vpnaaaaaaaaaaaa", "Nodo Norte", "ids", "x", "", False, quien="admin")
+        nuevo = next((r for r in routers if r.get("HOST") == "100.64.0.2"), {})
+        r1 = next(r for r in routers if r["id"] == "r1")
+        check("%s: ids-mon (por donde llega su espejo) es del MikroTik de la VPN, no del local" % nombre,
+              ok and nuevo.get("iface") == "ids-mon" and ns["rid_por_iface"]("ids-mon") == nuevo.get("id"),
+              (msg, routers))
+        check("  el nodo local se queda sin interfaz y con el envio a cuarentena apagado (su clave, intacta)",
+              r1["iface"] == "" and r1["ENABLED"] == "0" and r1["PASS"] == "p", r1)
+        check("  la bitacora apunta la reasignacion",
+              any(a == "CONFIG-NODO" and "reasignada" in d and "r1" in d and "ids-mon->-" in d and "enviar=no" in d
+                  for a, d in bit), bit)
+        check("  y el mensaje del alta lo dice", "Local" in msg and "ids-mon" in msg and "cuarentena" in msg, msg)
+
+    # C, variantes: el local es origen del receptor por OTRA interfaz libre -> pasa a esa y sigue
+    # enviando; si el receptor dice que ids-mon es TAMBIEN suya (no deberia pasar) -> no se toca y avisa
+    for env, iface_r1, enabled_r1, aviso, nombre in (
+            ("TZSP_MAP=100.64.0.2=ids-in,192.0.2.1=ids-in2", "ids-mon2", "1", "pasa a ids-mon2",
+             "C' (el local recibe por ids-mon2)"),
+            ("TZSP_MAP=100.64.0.2=ids-in,192.0.2.1=ids-in", "ids-mon", "1", "OJO",
+             "C'' (el receptor da ids-mon a los dos)")):
+        ns, td, sub, bit, routers, orden = entorno([local], usuarios=("a",))
+        sub.env = "Environment=TZSP_PORT=37008 TZSP_ALLOW=100.64.0.2,192.0.2.1 %s TZSP_BYTES=65\n" % env
+        ns["mk_conectar"] = lambda d, timeout=6: types.SimpleNamespace(close=lambda: None)
+        ok, msg = ns["vpn_mk_alta"]("vpnaaaaaaaaaaaa", "Nodo Norte", "ids", "x", "", False, quien="admin")
+        r1 = next(r for r in routers if r["id"] == "r1")
+        check("%s: el local queda con %s y el envio %s" % (nombre, iface_r1 or "ninguna", enabled_r1),
+              ok and r1["iface"] == iface_r1 and r1["ENABLED"] == enabled_r1 and aviso in msg, (r1, msg))
 
     # --- si el sensor YA recibe su espejo, el alta respeta esa interfaz (es la verdad de ahora)
     ns, td, sub, bit, routers, orden = entorno()
@@ -836,9 +902,12 @@ def handler_real(ns_extra):
           "traceback": traceback, "SimpleCookie": SimpleCookie, "PROXIES_OK": set(),
           "CTX": types.SimpleNamespace(), "ip_confiable": lambda ip: True,
           "cargar_usuarios": lambda: [{"usuario": "ana"}], "cargar_confianza": lambda: [],
-          "bitacora": lambda *a, **k: None, "SESSIONS": {}}
+          "bitacora": lambda *a, **k: None, "SESSIONS": {},
+          # sin PANEL_URL en la configuracion (el CSRF lo lee en cada POST)
+          "conf_dash_get": lambda k, d="": d}
     for n in ARBOL.body:
-        if isinstance(n, ast.FunctionDef) and n.name in ("origen_ajeno", "_host_puerto"):
+        if isinstance(n, ast.FunctionDef) and n.name in ("origen_ajeno", "_host_puerto",
+                                                          "_forwarded_host"):
             exec(ast.get_source_segment(DASH, n), ns)
     ns.update(ns_extra)
     metodos = {}

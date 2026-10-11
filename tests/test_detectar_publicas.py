@@ -22,6 +22,11 @@ Dos casos reales que esto protege:
 4. El resultado viajaba como TEXTO en la URL (/reputacion?msg=...) y el panel lo pintaba
    en su modal oficial: phishing con el logo del panel. Ahora es un codigo de un uso.
 
+5. Una lectura del router que fallaba (timeout, usuario sin permiso) se tomaba por una
+   tabla vacia: con /ip/address/print fallido y la WAN encontrada, todas las WAN declaradas
+   antes salian "ya no detectadas" y llegaban PRE-MARCADAS para quitar. Ahora el resultado
+   se da por parcial, se avisa y no se marca nada (tampoco si no vino ninguna publica).
+
 Lo que se protege:
   - solo cuentan las direcciones de las interfaces WAN: la interface-list WAN mas la
     interfaz de la ruta por defecto activa (v7 immediate-gw, v6 gateway-status, PPPoE);
@@ -114,7 +119,8 @@ RUTA_V6 = [{"dst-address": "0.0.0.0/0", "gateway": "198.51.100.1",
 
 
 class Router(object):
-    """Contesta a cada comando con su tabla, y apunta lo que se le pidio."""
+    """Contesta a cada comando con su tabla, y apunta lo que se le pidio. Una tabla puede
+    ser una excepcion (timeout) o Trap("motivo") (el router contesta !trap: sin permiso)."""
     def __init__(self, tablas):
         self.tablas = tablas
         self.pedidos = []
@@ -145,6 +151,21 @@ def _ipaddress_con_documentacion():
 IPADDRESS = _ipaddress_con_documentacion()
 
 
+class Trap(object):
+    def __init__(self, motivo):
+        self.motivo = motivo
+
+
+def _responder(s):
+    """Lo que devolveria _mk_reply: (ok, frases, error), como la API de verdad."""
+    t = s.tablas.get(s.pedidos[-1][0], [])
+    if isinstance(t, BaseException):
+        raise t
+    if isinstance(t, Trap):
+        return False, [["!trap", "=message=" + t.motivo], ["!done"]], t.motivo
+    return True, [["!re"] + ["=%s=%s" % kv for kv in f.items()] for f in t] + [["!done"]], ""
+
+
 def entorno(router, conf=None):
     conf = dict(conf or {})
     conf.setdefault("HOST", "192.0.2.1")
@@ -154,8 +175,7 @@ def entorno(router, conf=None):
           "cargar_mk_de": lambda r: conf,
           "mk_conectar": lambda d, timeout=6: router,
           "_mk_send": lambda s, w: s.pedidos.append(w),
-          "_mk_reply": lambda s: (True, [["!re"] + ["=%s=%s" % kv for kv in f.items()]
-                                         for f in s.tablas.get(s.pedidos[-1][0], [])], "")}
+          "_mk_reply": _responder}
     for n in ARBOL.body:
         nom = getattr(n, "name", None) or (
             getattr(n.targets[0], "id", "") if isinstance(n, ast.Assign) and n.targets else "")
@@ -264,6 +284,9 @@ def rutas_del_panel():
     def mk(r):
         if isinstance(deteccion["r"], Exception):
             raise deteccion["r"]
+        if isinstance(deteccion["r"], dict):
+            # la deteccion REAL contra un router de mentira (lo que contesta cada tabla)
+            return entorno(Router(deteccion["r"]))["mk_publicas_detectadas"]()
         return deteccion["r"]
 
     g = _Globales({
@@ -340,12 +363,28 @@ def rutas_del_panel():
     check("sin WAN (resultado parcial) no se marca nada como 'ya no es de la WAN'",
           "ya no son de la WAN" not in msg and not marcar and "interfaces WAN" in msg,
           (msg, marcar))
-    # WAN encontrada pero nada publico: todo lo detectado antes ya no vale
+    # nada publico: un vacio es mas facil que sea un fallo que una WAN sin publicas. Antes
+    # se marcaban TODAS las declaradas desde el MikroTik para quitar
     deteccion["r"] = ([], "")
     msg, marcar = abrir(pulsar_detectar())
-    check("WAN sin nada publico: tambien avisa de las que ya no salen",
-          "ya no son de la WAN" in msg and "198.51.100.0/30" in msg
-          and "198.51.100.77" not in msg, msg)
+    check("deteccion vacia: no marca nada ni acusa a nadie de 'ya no es de la WAN'",
+          not marcar and "ya no son de la WAN" not in msg
+          and "ninguna direccion publica" in msg, (msg, marcar))
+
+    # de punta a punta: la deteccion de verdad con /ip/address/print fallando (timeout)
+    # y la WAN encontrada. Antes salia solo el pool y la WAN 198.51.100.0/30 llegaba
+    # PRE-MARCADA para quitar
+    antes = list(disco["nodos"]["r1"])
+    for nombre, falla in (("timeout", TimeoutError("timed out")),
+                          ("sin permiso (!trap)", Trap("not enough permissions (9)"))):
+        deteccion["r"] = tablas(dirs=falla)
+        msg, marcar = abrir(pulsar_detectar())
+        check("lectura parcial (/ip/address/print: %s): no marca nada" % nombre,
+              not marcar and "ya no son de la WAN" not in msg, (msg, marcar))
+        check("  y avisa de que la lectura fue parcial y de cual fallo",
+              "PARCIAL" in msg and "/ip/address/print" in msg, msg)
+        check("  y no se borra nada", all(e in disco["nodos"]["r1"] for e in antes),
+              disco["nodos"]["r1"])
     # el error del router llega igual, pero por codigo
     deteccion["r"] = RuntimeError("timeout")
     url = pulsar_detectar()
@@ -469,6 +508,20 @@ def main():
     check("  y se le dice al usuario que cree la lista o revise la ruta",
           "WAN" in aviso and "ruta por defecto" in aviso, aviso)
     check("  sin colar el DNS de otros tampoco aqui", "1.1.1.1" not in res, res)
+
+    # --- 6b. una lectura que falla no es una tabla vacia ------------------------------------------
+    for nombre, falla in (("timeout", TimeoutError("timed out")),
+                          ("sin permiso (!trap)", Trap("not enough permissions (9)"))):
+        res, aviso = detectar(tablas(dirs=falla))
+        check("/ip/address/print falla (%s) con la WAN encontrada: aviso de lectura parcial"
+              % nombre, "PARCIAL" in aviso and "/ip/address/print" in aviso, aviso)
+        check("  y trae lo que si pudo leer (los pools)", res == ["203.0.113.0/29"], res)
+    res, aviso = detectar(tablas(nat=Trap("not enough permissions (9)")))
+    check("si falla la lectura del NAT tambien se avisa (faltan pools y el filtro de LAN)",
+          "PARCIAL" in aviso and "/ip/firewall/nat/print" in aviso, aviso)
+    res, aviso = detectar(tablas(lista=[], rutas=TimeoutError("timed out")))
+    check("sin WAN porque fallo la ruta: dice las dos cosas",
+          "PARCIAL" in aviso and "/ip/route/print" in aviso and "interfaces WAN" in aviso, aviso)
 
     # --- 7. lo privado nunca ----------------------------------------------------------------------
     res, _ = detectar(tablas(dirs=[{"address": "10.255.0.2/30", "interface": "ether1"},

@@ -32,7 +32,9 @@ PIEZAS = ("MK_SENT", "MK_SENT_DNS", "MK_LOG", "ROUTERS_CONF", "ROUTERS_MAP",
           "router_por_id", "router_defecto", "cargar_mk", "cargar_mk_de",
           "mk_configurado", "mk_listo", "_ttl_efectivo",
           "clave_cpe", "ip_de", "rid_de", "router_de_clave", "_suf_nodo",
-          "_motivo_bloqueo", "cargar_enviados", "guardar_enviados", "quitar_enviados")
+          "_motivo_bloqueo", "cargar_enviados", "guardar_enviados", "quitar_enviados",
+          "_REP_AVISOS", "_REP_AVISOS_TTL", "rep_aviso_guardar", "rep_aviso_tomar",
+          "rep_aviso_url", "cuar_aviso_url")
 
 fallos = 0
 def check(d, c, e=""):
@@ -56,6 +58,7 @@ def entorno(tmp):
     """Las piezas reales del panel, con los archivos apuntando a un directorio de prueba."""
     ns = {"json": json, "os": os, "html": __import__("html"), "time": __import__("time"),
           "threading": __import__("threading"), "ipaddress": __import__("ipaddress"),
+          "secrets": __import__("secrets"),
           "_up": __import__("urllib.parse", fromlist=["parse"])}
     piezas = [(getattr(n, "name", None) or (getattr(n.targets[0], "id", "")
                if isinstance(n, ast.Assign) and n.targets else ""), n)
@@ -181,8 +184,11 @@ def main():
 
     # --- 3) liberar uno no libera al otro ---
     v = llamar(ns, mk, "/cuarentena/quitar", {"ip": "r2|10.6.1.165"})
+    # el aviso viaja como codigo (/cuarentena?msg=<codigo>): se lee como lo haria el GET
+    _cod = v.get("redirect", "").split("msg=", 1)[-1]
+    _txt = ns["rep_aviso_tomar"](_cod)[0]
     check("quitar acepta la identidad (antes: 'IP invalida')",
-          "invalida" not in v.get("redirect", ""), v)
+          _txt.startswith("10.6.1.165") and "invalida" not in _txt, (v, _txt))
     check("se quita del router correcto y de la lista DONDE ESTA",
           mk.rem[-1:] == [("10.6.1.165", "clientes-botnet", "r2")], mk.rem)
     # importa: la lista se guarda al enviar. Si manana cambia la categoria del CPE o se

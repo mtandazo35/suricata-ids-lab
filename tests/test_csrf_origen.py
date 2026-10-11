@@ -12,6 +12,13 @@ que llama), con el resto de dobles:
     igual; Origin "null" (iframe con sandbox): igual; mismo nombre y otro puerto: igual;
   - sin Origin ni Referer (curl, scripts): pasa;
   - detras de un proxy: Host sin puerto (nginx manda $host) o X-Forwarded-Host: pasa.
+  - Sec-Fetch-Site (lo pone el navegador): cross-site/same-site -> 403 siempre;
+    same-origin -> pasa aunque Host no cuadre (proxy que no reenvia el Host original);
+  - Origin "null" de un proxy con Referrer-Policy: no-referrer: pasa con Sec-Fetch-Site
+    same-origin (o none); con cross-site o SIN Sec-Fetch-Site, 403 (decision: un null sin
+    esa cabecera no se distingue de un iframe con sandbox);
+  - un proxy sin Host original ni X-Forwarded-Host: pasa con Forwarded: host= (RFC 7239)
+    o si el Origin es exactamente el PANEL_URL de la configuracion.
 """
 import ast
 import os
@@ -41,9 +48,12 @@ def clase():
     apunta si llego a ejecutarse."""
     import html
     ns = {"urllib": urllib, "sys": sys, "traceback": traceback, "html": html,
-          "bitacora": lambda *a, **k: None}
+          "bitacora": lambda *a, **k: None,
+          # la configuracion del panel: PANEL_URL es la unica clave que se mira aqui
+          "conf_dash_get": lambda k, d="": CONF.get(k, d)}
     for n in ARBOL.body:
-        if isinstance(n, ast.FunctionDef) and n.name in ("origen_ajeno", "_host_puerto"):
+        if isinstance(n, ast.FunctionDef) and n.name in ("origen_ajeno", "_host_puerto",
+                                                          "_forwarded_host"):
             exec(ast.get_source_segment(DASH, n), ns)
     cls = next(n for n in ARBOL.body if isinstance(n, ast.ClassDef) and n.name == "H")
     metodos = {}
@@ -54,6 +64,7 @@ def clase():
     return type("HPrueba", (object,), metodos)
 
 
+CONF = {}
 H = clase()
 
 
@@ -117,6 +128,73 @@ def main():
     check("tambien el login (no se puede forzar a entrar con otra cuenta)", not p.ejecutado and p.resp == [403], p.resp)
     p = post({"Host": panel, "Origin": "https://ataque.example.net"})
     check("el rechazo cierra la conexion (el cuerpo no se leyo)", p.close_connection is True, "")
+
+    # --- Sec-Fetch-Site y proxies que no pasan el Host original -----------------------------
+    # nginx sin proxy_set_header Host: el panel recibe el Host del upstream
+    upstream = "127.0.0.1:5637"
+    casos_ok2 = [
+        ("Origin null + Sec-Fetch-Site same-origin (proxy con Referrer-Policy: no-referrer)",
+         {"Host": panel, "Origin": "null", "Sec-Fetch-Site": "same-origin"}, "/vpn/sensor-aplicar"),
+        ("  tambien el login", {"Host": panel, "Origin": "null", "Sec-Fetch-Site": "same-origin"},
+         "/login"),
+        ("Origin null + Sec-Fetch-Site none (lo inicia el usuario)",
+         {"Host": panel, "Origin": "null", "Sec-Fetch-Site": "none"}, "/vpn/sensor-aplicar"),
+        ("Origin distinto de Host pero Sec-Fetch-Site same-origin (proxy sin Host original)",
+         {"Host": upstream, "Origin": "https://ids.example.com", "Sec-Fetch-Site": "same-origin"},
+         "/vpn/sensor-aplicar"),
+        ("proxy que manda Forwarded: host= (RFC 7239)",
+         {"Host": upstream, "Forwarded": 'for=192.0.2.60;proto=https;host="ids.example.com"',
+          "Origin": "https://ids.example.com"}, "/vpn/sensor-aplicar"),
+        ("Forwarded con varios saltos: cuenta el primero",
+         {"Host": upstream,
+          "Forwarded": "for=192.0.2.60;host=ids.example.com, for=10.0.0.2;host=10.0.0.5:5637",
+          "Origin": "https://ids.example.com"}, "/vpn/sensor-aplicar"),
+    ]
+    for nombre, cab, ruta in casos_ok2:
+        p = post(cab, ruta=ruta)
+        check("pasa: %s" % nombre, p.ejecutado and p.resp == [200], (p.resp, cab))
+    casos_mal2 = [
+        ("Origin null + Sec-Fetch-Site cross-site",
+         {"Host": panel, "Origin": "null", "Sec-Fetch-Site": "cross-site"}),
+        ("Origin null + Sec-Fetch-Site same-site (otra app del mismo dominio)",
+         {"Host": panel, "Origin": "null", "Sec-Fetch-Site": "same-site"}),
+        ("Origin null SIN Sec-Fetch-Site (decision: se rechaza)",
+         {"Host": panel, "Origin": "null"}),
+        ("Origin ajeno + Sec-Fetch-Site cross-site",
+         {"Host": panel, "Origin": "https://ataque.example.net", "Sec-Fetch-Site": "cross-site"}),
+        ("Sec-Fetch-Site cross-site aunque el Origin coincida con Host",
+         {"Host": panel, "Origin": "http://192.0.2.10:5637", "Sec-Fetch-Site": "cross-site"}),
+        ("Sec-Fetch-Site cross-site sin Origin ni Referer",
+         {"Host": panel, "Sec-Fetch-Site": "cross-site"}),
+        ("proxy sin Host original ni PANEL_URL: el Origin no cuadra con nada",
+         {"Host": upstream, "Origin": "https://ids.example.com"}),
+        ("Forwarded: host= de otro sitio",
+         {"Host": upstream, "Forwarded": "for=192.0.2.60;host=ids.example.com",
+          "Origin": "https://ataque.example.net"}),
+        ("Forwarded sin host= no vale como comodin",
+         {"Host": upstream, "Forwarded": "for=192.0.2.60;proto=https",
+          "Origin": "https://ids.example.com"}),
+    ]
+    for nombre, cab in casos_mal2:
+        p = post(cab)
+        check("403 y NO se ejecuta: %s" % nombre, not p.ejecutado and p.resp == [403], (p.resp, cab))
+
+    # PANEL_URL: la URL publica del panel en /etc/suricata-dashboard.conf
+    CONF["PANEL_URL"] = "https://ids.example.com/"
+    try:
+        p = post({"Host": upstream, "Origin": "https://ids.example.com"})
+        check("pasa: proxy sin Host original, Origin igual al PANEL_URL de la configuracion",
+              p.ejecutado and p.resp == [200], p.resp)
+        p = post({"Host": upstream, "Referer": "https://ids.example.com/ajustes"})
+        check("  tambien solo con Referer", p.ejecutado and p.resp == [200], p.resp)
+        for nombre, org in (("otro puerto", "https://ids.example.com:8443"),
+                            ("otro esquema", "http://ids.example.com"),
+                            ("otro sitio", "https://ataque.example.net")):
+            p = post({"Host": upstream, "Origin": org})
+            check("403 con PANEL_URL puesto: %s" % nombre, not p.ejecutado and p.resp == [403],
+                  (p.resp, org))
+    finally:
+        CONF.clear()
 
     print("\n" + ("TODO OK" if not fallos else "%d fallo(s)" % fallos))
     return 1 if fallos else 0

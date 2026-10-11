@@ -18,7 +18,8 @@ Lo que protege, por orden de lo que costaria el fallo:
   - Que con api-ssl y sin huella previa conecte (antes moria con un NameError).
   - Que se pare en el PRIMER fallo (y sin respaldo /export no toque nada): seguir podia dejar
     el espejo nuevo creado y el viejo sin apagar, dos espejos llenando el enlace.
-  - Que la clave llegue tal cual (espacios o comillas en los bordes son parte de ella).
+  - Que la clave llegue tal cual entre comillas (espacios o comillas en los bordes son parte de
+    ella: asi la escribe el panel) y, escrita a mano sin comillas, sin los blancos de los bordes.
 """
 import contextlib
 import ast
@@ -312,15 +313,21 @@ def main():
 
     # --- la clave tal cual (hallazgo 10): espacios o comillas en los bordes son parte de ella --
     for linea, esperada in (('PASS=" con espacios "\n', " con espacios "), ("PASS=acaba-en-comilla'\n", "acaba-en-comilla'"),
-                            ("PASS='entre simples'\n", "entre simples"), ("PASS=sin comillas \r\n", "sin comillas "),
-                            ('PASS=""doble""\n', '"doble"')):
+                            ("PASS='entre simples'\n", "entre simples"), ('PASS=""doble""\n', '"doble"'),
+                            # el formato del panel (mkinit_correr): PASS="..." con lo raro en los bordes
+                            ('PASS=" \'clave rara" "\n', " 'clave rara\" "), ('PASS="\t con tab\t"\n', "\t con tab\t"),
+                            # escrita a mano, sin comillas: los blancos de los bordes NO son de la clave
+                            ("PASS=sin comillas \r\n", "sin comillas"), ("PASS=clave \n", "clave"),
+                            ("PASS = clave\n", "clave"), ("PASS=clave\t\n", "clave"), ("  PASS =\tclave  \n", "clave"),
+                            # a mano, con comillas y blancos por fuera: lo de dentro, exacto
+                            ('PASS = " con espacios "  \n', " con espacios "), ("PASS= 'simples' \n", "simples")):
         f = os.path.join(tmp2, "cred-clave")
         io.open(f, "w", encoding="utf-8", newline="").write("HOST=100.64.0.2\nUSER=ids\n" + linea)
         ns = {"__name__": "prueba"}
         exec(compile(PROG, "<mkinit>", "exec"), ns)
         with contextlib.redirect_stdout(io.StringIO()):
             leida = ns["leer_credenciales"](f)["PASS"]
-        check("clave %r -> %r (solo se quita un par de comillas que la envuelva y el fin de linea)"
+        check("clave %r -> %r (entre comillas, lo de dentro exacto; sin comillas, sin blancos en los bordes)"
               % (linea.rstrip("\r\n"), esperada), leida == esperada, leida)
 
     # --- api-ssl sin huella previa: antes moria con NameError (guardar_mk no existe aqui) ----

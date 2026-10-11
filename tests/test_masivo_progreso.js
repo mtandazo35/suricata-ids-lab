@@ -64,8 +64,9 @@ check('muestra el motivo del fallo',
 check('la barra llega al 100%', els.masbar.style.width==='100%', els.masbar.style.width);
 check('resume 2 quitadas y 1 con error',
   /2<\/b> quitada/.test(els.massub.innerHTML)&&/1<\/b> con error/.test(els.massub.innerHTML), els.massub.innerHTML);
-check('recarga con el resumen en el mensaje',
-  destino&&destino.indexOf('2%20entrada')>0&&destino.indexOf('1%20con%20error')>0, destino);
+// el resumen viaja como dos NUMEROS: el panel no pinta texto libre de la URL (phishing)
+check('recarga con el resumen (2 quitadas, 1 con error) y sin texto en la URL',
+  destino==='/cuarentena?quitadas=2&errores=1', destino);
 check('desmarca las casillas que si salieron',
   casillas[0].checked===false&&casillas[1].checked===true, casillas.map(c=>c.checked));
 check('bloquea el cierre MIENTRAS corre', bloqueadoDurante===true, bloqueadoDurante);

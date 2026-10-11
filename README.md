@@ -159,9 +159,14 @@ entrar por consola (por debajo usa el mismo `/root/openvpn.sh` y `suricata-mikro
 5. **Recibir el espejo por la VPN** (debajo de la tabla): el panel calcula las opciones
    (`-t -e vpn -m <IPs de los MikroTik en el tunel> -n <sus redes>`), ensena el comando exacto
    y **relanza el instalador** (baja a `/root/install-suricata.sh`). Antes respalda en
-   `/root/backups/` lo que va a reescribir (`suricata.yaml`, receptor, firewall de
-   solo-tunel). **Nunca pasa `-P`**: las claves no cambian. El avance se ve en vivo y aguanta
-   el reinicio del panel.
+   `/root/backups/` (tar.gz con permisos 600: lleva las claves de los routers) todo lo que va
+   a reescribir: `/etc/suricata/suricata.yaml`, el receptor (`tzsp-decap.service`), el
+   firewall de solo-tunel (`/usr/local/sbin/suricata-ids-fw` y su servicio), los routers del
+   panel (`/etc/suricata-routers.json`), la configuracion y los usuarios del panel
+   (`/etc/suricata-dashboard.conf`, `/etc/suricata-dashboard-users.json`),
+   `/etc/evebox/evebox.yaml`, `/etc/suricata-mikrotik.conf` y los programas
+   `/usr/local/bin/suricata-*`. **Nunca pasa `-P`**: las claves no cambian. El avance se ve
+   en vivo y aguanta el reinicio del panel.
 
 > **Para no quedarte fuera.** En modo VPN el panel y EveBox se cierran por la interfaz de
 > internet (ver arriba). Por eso `-a` viene relleno con **tu IP** (la que llega al sensor;
@@ -471,9 +476,14 @@ abriendo el puerto solo a tu IP.
   **IP literal** (`http://<IP>:5637`), no por hostname, y en Advanced usa
   `proxy_http_version 1.1;` con `proxy_set_header Connection "";` para que no arrastre latencia.
 - **Proteccion CSRF**: el panel rechaza (403) todo POST cuyo `Origin` o `Referer` sea de otro
-  sitio, haya usuarios o no. Detras de un proxy, este tiene que pasar el `Host` original (o
-  `X-Forwarded-Host`), como hace Nginx Proxy Manager; si no, los formularios del propio panel
-  se rechazan. Las peticiones sin esas cabeceras (curl, scripts) siguen entrando.
+  sitio, haya usuarios o no, y todo POST con `Sec-Fetch-Site: cross-site` o `same-site`. Con
+  `Sec-Fetch-Site: same-origin` pasa siempre (lo certifica el navegador). Detras de un proxy el
+  origen se compara con el `Host`, `X-Forwarded-Host`, el `host=` de `Forwarded` (RFC 7239) y
+  `PANEL_URL` de `/etc/suricata-dashboard.conf`: basta con que el proxy pase uno (Nginx Proxy
+  Manager pasa el Host) o con poner `PANEL_URL` con la URL publica. Si el proxy anade
+  `Referrer-Policy: no-referrer`, el navegador manda `Origin: null`: se acepta solo con
+  `Sec-Fetch-Site: same-origin` (o `none`); sin esa cabecera se rechaza (no se distingue de un
+  iframe con sandbox). Las peticiones sin `Origin` ni `Referer` (curl, scripts) siguen entrando.
 
 ## Apartado de estadisticas (panel web)
 
@@ -495,7 +505,8 @@ Ademas de EveBox, el instalador levanta un **panel de estadisticas** propio en s
   interface-list WAN de Ajustes mas la de la ruta por defecto activa) y los pools de las
   reglas **srcnat**. Sin ninguna de las dos, trae solo los pools y avisa. Las LAN no entran, aunque usen rangos que parecen publicos. **Solo
   anade, nunca borra**: lo declarado antes que ya no sale como WAN se avisa y queda marcado
-  para **Quitar marcadas**. Limite: una LAN que se NATea solo por `out-interface` (sin
+  para **Quitar marcadas**; si una lectura del router falla o no trae ninguna publica, el
+  resultado es parcial, se avisa y no se marca nada. Limite: una LAN que se NATea solo por `out-interface` (sin
   `src-address`) no se distingue de la WAN; revisa lo que trae.
 - **Ajustes → VPN**: la VPN de los MikroTik y el espejo, desde la web. Ver
   [Todo desde la web](#o-todo-desde-la-web-ajustes--vpn).

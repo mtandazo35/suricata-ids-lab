@@ -6027,11 +6027,18 @@ def mk_publicas_detectadas(router=None):
     el servidor de otro. Los ISP suelen forzar el DNS de sus clientes con un dstnat, asi
     que sin este filtro la deteccion traia 1.1.1.1, 9.9.9.9 y 208.67.220.123 como si
     fueran IPs publicas del cliente. Declararlas seria pedirle al panel que vigile la
-    reputacion de Cloudflare."""
+    reputacion de Cloudflare.
+
+    Si alguna lectura del router falla (timeout, usuario de la API sin permiso para esa
+    tabla) el resultado es PARCIAL y el aviso lo dice. Importa: con /ip/address/print
+    fallido y la WAN encontrada, todas las WAN declaradas antes saldrian "ya no
+    detectadas" y llegarian marcadas para quitar. Aviso no vacio = resultado parcial: quien
+    llama no debe sacar conclusiones de lo que falta."""
     d = cargar_mk_de(router) if router else cargar_mk()
     lista_wan = _params_accion("wan", d)["wan"]      # "" si el usuario puso "ninguna"
     s_ = mk_conectar(d)
     encontradas = []
+    fallidas = []          # lecturas que el router no contesto: el resultado es parcial
 
     def _sumar(txt):
         for c in _a_cidr(txt):            # _a_cidr ya descarta lo privado
@@ -6039,10 +6046,16 @@ def mk_publicas_detectadas(router=None):
                 encontradas.append(c)
 
     def _filas(cmd, props, consulta=()):
+        # una lectura que falla devuelve [] como antes, pero queda apuntada: [] callado
+        # era "esa tabla esta vacia" y con /ip/address/print eso marcaba la WAN para quitar
         try:
             _mk_send(s_, [cmd, "=.proplist=" + ",".join(props)] + list(consulta))
             _ok, frases, _err = _mk_reply(s_)
-        except Exception:
+        except Exception as ex:
+            fallidas.append("%s (%s)" % (cmd, str(ex)[:80] or type(ex).__name__))
+            return []
+        if not _ok:
+            fallidas.append("%s (%s)" % (cmd, (_err or "el router lo rechazo")[:80]))
             return []
         out = []
         for f in frases:
@@ -6136,6 +6149,11 @@ def mk_publicas_detectadas(router=None):
         "las interfaces que salen a internet (o revisa la ruta por defecto 0.0.0.0/0). "
         "Mientras tanto solo se tomaron los pools de src-nat."
         % (lista_wan or "WAN"))
+    if fallidas:
+        aviso = ("Lectura PARCIAL del MikroTik: fallo %s. Lo que falte no quiere decir que "
+                 "haya dejado de ser tuyo: no se marca nada como 'ya no detectada'. Revisa "
+                 "los permisos del usuario de la API (read) y vuelve a detectar."
+                 % "; ".join(fallidas)) + (" " + aviso if aviso else "")
     return sorted(c for c in encontradas if not _es_lan(c)), aviso
 
 def publicas_ya_no_detectadas(actuales, origen, halladas):
@@ -6166,11 +6184,11 @@ def publicas_ya_no_detectadas(actuales, origen, halladas):
             fuera.append(e)
     return fuera
 
-# El resultado de una accion de "Tus IPs publicas" viaja a /reputacion tras el redirect.
-# Antes iba el TEXTO en la URL (?msg=...) y el panel lo pintaba en su modal oficial: un
-# enlace /reputacion?msg=Tu+sesion+caduco,+entra+en+... era phishing con el logo del panel.
-# Ahora el texto se queda en el servidor y la URL solo lleva un codigo de un solo uso;
-# un codigo inventado no pinta nada.
+# El resultado de una accion viaja a la pagina (/reputacion, /cuarentena, /conducta) tras
+# el redirect. Antes iba el TEXTO en la URL (?msg=...) y el panel lo pintaba en su modal o
+# su aviso oficial: un enlace /cuarentena?msg=Tu+sesion+caduco,+entra+en+... era phishing
+# con el logo del panel. Ahora el texto se queda en el servidor y la URL solo lleva un
+# codigo de un solo uso; un codigo inventado no pinta nada.
 _REP_AVISOS = {}
 _REP_AVISOS_TTL = 600
 
@@ -6193,8 +6211,12 @@ def rep_aviso_tomar(cod):
         return "", {}
     return v[1], v[2]
 
-def rep_aviso_url(texto, marcar=None):
-    return "/reputacion?msg=" + rep_aviso_guardar(texto, marcar)
+def rep_aviso_url(texto, marcar=None, pagina="/reputacion"):
+    return pagina + "?msg=" + rep_aviso_guardar(texto, marcar)
+
+def cuar_aviso_url(texto):
+    """/cuarentena?msg=<codigo> con el resultado de una accion de Cuarentena."""
+    return rep_aviso_url(texto, pagina="/cuarentena")
 
 # ---------------------------------------------------------------------------------
 # Bloqueo en el BORDE: los que nos atacan desde internet
@@ -11964,7 +11986,10 @@ def ovpn_log():
 #      -t -e vpn -m <IPs de los MikroTik en el tunel>. Va en una unidad propia de systemd
 #      porque el instalador reinicia el panel a mitad (la web se corta unos segundos).
 MK_INIT_BIN = "/usr/local/bin/suricata-mikrotik-init"
-MK_INIT_MARCA = "--sin-registrar"    # la version que sabe hacer vista previa sin tocar el panel
+# La version de suricata-mikrotik-init que necesita este panel: la constante MKINIT_VERSION de
+# ese programa. Una opcion (--sin-registrar...) no vale de marca: sigue ahi en versiones que
+# ya no sirven, y una herramienta vieja que el actualizador no consiguio renovar pasaba por nueva.
+MK_INIT_MARCA = 'MKINIT_VERSION = "2026-10-10b"'
 CRED_DIR = "/root"                   # credenciales temporales: en /root, nunca en /tmp
 SURI_YAML = "/etc/suricata/suricata.yaml"
 IDS_FW_BIN = "/usr/local/sbin/suricata-ids-fw"
@@ -12046,10 +12071,10 @@ def enmascarar_claves(txt):
     return _RE_CLAVE_LOG.sub(lambda m: m.group(1) + "********", txt or "")
 
 def mkinit_asegurar():
-    """(ok, mensaje). Si suricata-mikrotik-init es el viejo (sin vista previa ni
-    --sin-registrar), se baja del instalador publicado y se instala; el anterior se
-    respalda. Hace falta porque la PRIMERA actualizacion por boton la ejecuta el
-    actualizador viejo, que no renovaba esta herramienta."""
+    """(ok, mensaje). Si suricata-mikrotik-init no es el de esta version (sin MK_INIT_MARCA),
+    se baja del instalador publicado y se instala; el anterior se respalda. Hace falta porque
+    la PRIMERA actualizacion por boton la ejecuta el actualizador viejo, que no renovaba esta
+    herramienta, y porque el actualizador nuevo puede no conseguir renovarla."""
     try:
         if MK_INIT_MARCA in open(MK_INIT_BIN, encoding="utf-8", errors="replace").read():
             return True, ""
@@ -12065,7 +12090,7 @@ def mkinit_asegurar():
         return False, "el instalador publicado no trae suricata-mikrotik-init"
     cuerpo = txt[ini + len("<<'MKINIT'\n"):fin + 1]
     if MK_INIT_MARCA not in cuerpo:
-        return False, "el suricata-mikrotik-init publicado no sabe hacer la vista previa"
+        return False, "el suricata-mikrotik-init publicado no es el de esta version del panel"
     try:
         compile(cuerpo, MK_INIT_BIN, "exec")
     except SyntaxError as ex:
@@ -12580,6 +12605,46 @@ def router_de_ip(ip, routers=None):
             return r
     return None
 
+def _vpn_alta_soltar_iface(nuevo, rs):
+    """(textos para la bitacora, avisos para el mensaje). Si el sensor YA recibe por la
+    interfaz del nodo recien dado de alta el espejo de su IP (TZSP_MAP), esa interfaz es suya
+    y de nadie mas: otro nodo que la conservara (el MikroTik local de cuando el modo VPN se
+    monto por consola o con un panel anterior) se quedaria con sus alertas y sus cuarentenas
+    (rid_por_iface devuelve el primero que la tenga). A ese otro se le quita; y si su HOST no
+    es origen del espejo en el receptor, nada de lo que el sensor detecte es suyo: se apaga
+    su envio a cuarentena. Si es origen por otra interfaz que nadie tiene, se le da esa. Si
+    el receptor dice que es origen por ESA MISMA interfaz (no deberia pasar), no se toca y se
+    avisa. Cambia `rs` en sitio."""
+    iface = nuevo.get("iface") or ""
+    if not iface or _iface_en_uso((nuevo.get("HOST") or "").strip()) != iface:
+        return [], []
+    bit, avisos = [], []
+    for o in rs:
+        if o is nuevo or (o.get("iface") or "") != iface:
+            continue
+        h = (o.get("HOST") or "").strip()
+        n = o.get("nombre") or h or o.get("id", "")
+        suya = _iface_en_uso(h) if h else ""
+        if suya == iface:
+            avisos.append("OJO: el nodo '%s' (%s) tambien tiene %s y el receptor dice que es suya: no se ha "
+                          "tocado; revisa las interfaces en Ajustes > MikroTik." % (n, h, iface))
+            continue
+        libre = suya and not any(x.get("iface") == suya for x in rs if x is not o)
+        o["iface"] = suya if libre else ""
+        apagar = not suya and o.get("ENABLED") == "1"
+        if apagar:
+            o["ENABLED"] = "0"
+        bit.append("nodo=%s host=%s %s->%s%s (el sensor recibe por %s el espejo de %s)" % (
+            o.get("id", ""), h or "-", iface, o["iface"] or "-", " enviar=no" if apagar else "",
+            iface, nuevo.get("HOST")))
+        avisos.append("El nodo '%s' (%s) tenia %s, por donde el sensor recibe el espejo de este MikroTik: "
+                      "se le quita%s%s." % (
+                          n, h or "sin IP", iface,
+                          " (pasa a %s, la suya en el receptor)" % o["iface"] if o["iface"] else "",
+                          " y se apaga su envio a cuarentena (nada de lo que este sensor detecte es suyo; "
+                          "se reactiva en Ajustes > MikroTik)" if apagar else ""))
+    return bit, avisos
+
 def vpn_mk_alta(usuario, nombre, user, clave, puerto, tls, quien="?"):
     """(ok, mensaje). Da de alta como router del panel al MikroTik de la VPN, con HOST = su
     IP en el tunel. Es el mismo registro que Ajustes > MikroTik (guardar_routers: archivo
@@ -12613,9 +12678,13 @@ def vpn_mk_alta(usuario, nombre, user, clave, puerto, tls, quien="?"):
     # su interfaz: la que le dara -m (sin la suya, cuenta como uno que rellena hueco)
     previa, r["iface"] = r.get("iface") or "", ""
     r["iface"] = _iface_vpn(u["ip"], est, rs) or previa
+    reasignados, avisos = _vpn_alta_soltar_iface(r, rs)
     guardar_routers(rs)
     bitacora("CONFIG-NODO", "nodo=%s host=%s (MikroTik de la VPN %s) enviar=no" % (nombre, u["ip"], usuario),
              quien=quien)
+    for t in reasignados:
+        bitacora("CONFIG-NODO", "reasignada %s" % t, quien=quien)
+    extra = "".join(" " + t for t in avisos)
     # se prueba ya: mejor saber ahora que la clave esta mal que al montar el espejo
     try:
         s_ = mk_conectar(cargar_mk_de(r))
@@ -12627,8 +12696,8 @@ def vpn_mk_alta(usuario, nombre, user, clave, puerto, tls, quien="?"):
     except Exception as ex:
         prueba = "OJO: guardado, pero la API no respondio (%s). Revisa usuario, clave, puerto y que " \
                  "el servicio api este habilitado en el router." % ex
-    return True, "%s dado de alta como router '%s' (%s), con el envio a cuarentena apagado. %s" % (
-        usuario, nombre, u["ip"], prueba)
+    return True, "%s dado de alta como router '%s' (%s), con el envio a cuarentena apagado. %s%s" % (
+        usuario, nombre, u["ip"], prueba, extra)
 
 def vpn_mk_espejo(usuario, aplicar=False, quien="?"):
     """(ok, mensaje). Monta el espejo en ese MikroTik hacia la IP del sensor DENTRO del
@@ -14475,9 +14544,15 @@ en <code>/etc/suricata-dashboard-users.json</code>; nunca en texto plano. El pri
 <code>USER</code>/<code>PASS</code> de <code>/etc/suricata-dashboard.conf</code> la primera vez.</p>
 <p><b>Formularios de otra web.</b> Todo POST que traiga <code>Origin</code> o <code>Referer</code> de otro
 sitio se rechaza (403), haya usuarios o no: una pagina ajena abierta en tu navegador no puede mandar
-acciones al panel. Las peticiones sin esas cabeceras (curl, scripts) siguen entrando. Detras de un proxy,
-este tiene que pasar el <code>Host</code> original (o <code>X-Forwarded-Host</code>), como hace Nginx
-Proxy Manager.</p>
+acciones al panel. Tambien se rechaza si el navegador dice <code>Sec-Fetch-Site: cross-site</code> o
+<code>same-site</code>; si dice <code>same-origin</code>, pasa siempre (lo certifica el navegador). Las
+peticiones sin esas cabeceras (curl, scripts) siguen entrando. Detras de un proxy, el origen se compara con
+el <code>Host</code>, con <code>X-Forwarded-Host</code>, con el <code>host=</code> de <code>Forwarded</code>
+y con <code>PANEL_URL</code> de <code>/etc/suricata-dashboard.conf</code>: basta con que el proxy pase
+uno de ellos (Nginx Proxy Manager pasa el Host) o con poner <code>PANEL_URL</code> con la URL publica.
+Si el proxy anade <code>Referrer-Policy: no-referrer</code>, el navegador manda <code>Origin: null</code>:
+se acepta solo con <code>Sec-Fetch-Site: same-origin</code> (o <code>none</code>); un <code>null</code>
+sin esa cabecera se rechaza, porque no se distingue de un iframe con sandbox de otra web.</p>
 
 <h2>Abuso saliente: el numero que hay que poder enseñar</h2>
 <h3>Reporte de 3 dias: que hizo cada CPE</h3>
@@ -15278,7 +15353,10 @@ interfaces LAN no van en la lista WAN. Si el router no tiene ni lista WAN ni rut
 trae los pools y avisa: crea la lista y vuelve a pulsar.</p>
 <p>Detectar <b>solo anade</b>, nunca borra. Si una entrada que trajo antes del MikroTik ya no sale (una
 deteccion anterior se equivoco, o cambiaste la WAN), el aviso la nombra y la deja <b>marcada</b>: revisala
-y quitala con <b>Quitar marcadas</b>. Las que declaraste a mano no se ponen en duda.</p>
+y quitala con <b>Quitar marcadas</b>. Las que declaraste a mano no se ponen en duda. Si alguna lectura
+del router falla (timeout, usuario de la API sin permiso para esa tabla) o no trae <b>ninguna</b>
+publica, el resultado es parcial: el aviso dice que lectura fallo y <b>no se marca nada</b>, porque lo
+que falta no quiere decir que haya dejado de ser tuyo.</p>
 <p>Se revisan solas <b>cada 6 horas</b>. Cuando una publica <b>cruza</b> el 25&nbsp;% de abuso llega un
 aviso por Telegram (una vez, no en cada vuelta) y queda en la bitacora. De cada publica se guarda la
 <b>serie por dia</b> durante 180 dias: es lo que permite enseñar que despues de limpiar, el puntaje
@@ -18988,8 +19066,8 @@ def cuarentena_page(msg="", es_admin=False):
             # restauraria la posicion y la pagina saltaria arriba: se deja marcada a mano
             "try{sessionStorage.setItem('pos:'+location.pathname,String(window.scrollY||0));"
             "sessionStorage.setItem('posact:'+location.pathname,'1');}catch(e){}"
-            "setTimeout(function(){location.href='/cuarentena?msg='"
-            "+encodeURIComponent(ok+' entrada(s) quitada(s)'+(mal?'; '+mal+' con error':''));},900);}"
+            # dos numeros, no texto: el panel no pinta texto libre de la URL (phishing)
+            "setTimeout(function(){location.href='/cuarentena?quitadas='+ok+'&errores='+mal;},900);}"
             "function paso(){if(i>=filas.length)return fin();var fila=filas[i];"
             "fila.li.classList.add('yendo');fila.est.textContent='\\u2026';"
             # la que se esta quitando, siempre a la vista (con 40 la lista no cabe)
@@ -19021,22 +19099,50 @@ def _host_puerto(netloc):
     except ValueError:
         return None
 
-def origen_ajeno(headers):
+def _forwarded_host(valor):
+    """El host= del primer elemento de una cabecera Forwarded (RFC 7239), o "".
+    Forwarded: for=192.0.2.60;proto=https;host=ids.example.com"""
+    primero = (valor or "").split(",")[0]
+    for par in primero.split(";"):
+        k, _s, v = par.strip().partition("=")
+        if k.strip().lower() == "host":
+            return v.strip().strip('"')
+    return ""
+
+def origen_ajeno(headers, panel_url=""):
     """"" si un POST viene de este mismo panel; si no, el motivo para rechazarlo (CSRF).
 
     La cookie va con SameSite=Strict, pero sin usuarios (modo sin-auth, tras VPN o proxy)
     no hay cookie que proteger: cualquier pagina abierta en el navegador del operador podia
     mandar un formulario a /vpn/sensor-aplicar. El navegador pone Origin (o Referer) en
     esos POST y una pagina ajena no puede falsearlos: si vienen y su host:puerto no es el
-    de la cabecera Host (o el X-Forwarded-Host que pone un proxy que reescribe Host), se
-    rechaza. Sin Origin ni Referer se deja pasar: es curl o un script, no un navegador."""
+    de la cabecera Host (o el X-Forwarded-Host / Forwarded host= que pone un proxy que
+    reescribe Host, o el PANEL_URL de la configuracion), se rechaza. Sin Origin ni Referer
+    se deja pasar: es curl o un script, no un navegador.
+
+    Sec-Fetch-Site lo pone el navegador y una pagina no lo puede tocar (como Origin):
+    - "cross-site"/"same-site": el formulario es de otra web -> se rechaza, sin mas.
+    - "same-origin": el navegador certifica que viene de esta misma URL -> pasa aunque
+      Host no cuadre con Origin (un proxy que no reenvia el Host original).
+    - Origin "null" sale tambien de un proxy que pone Referrer-Policy: no-referrer (el
+      navegador anula el Origin de los formularios, el login incluido): pasa SOLO con
+      Sec-Fetch-Site same-origin o none. Sin Sec-Fetch-Site se rechaza: los navegadores
+      que mandan Origin null hoy mandan tambien Sec-Fetch-Site, y un null sin el no se
+      distingue de un iframe con sandbox."""
     org = (headers.get("Origin") or "").strip()
     ref = (headers.get("Referer") or "").strip()
+    sfs = (headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if sfs in ("cross-site", "same-site"):
+        return "Sec-Fetch-Site: %s" % sfs
+    if sfs == "same-origin":
+        return ""
     fuente = org or ref
     if not fuente:
         return ""
     if org.lower() == "null":
-        return "Origin: null"
+        if sfs == "none":
+            return ""
+        return "Origin: null" + (" (Sec-Fetch-Site: %s)" % sfs[:40] if sfs else " sin Sec-Fetch-Site")
     try:
         u = urllib.parse.urlsplit(fuente)
         h, p = (u.hostname or "").lower(), u.port
@@ -19045,12 +19151,24 @@ def origen_ajeno(headers):
     if u.scheme not in ("http", "https") or not h:
         return "origen %s" % fuente[:80]
     p = p or (443 if u.scheme == "https" else 80)
-    for cab in ("Host", "X-Forwarded-Host"):
-        hp = _host_puerto((headers.get(cab) or "").split(",")[0])
+    candidatos = [(headers.get(cab) or "").split(",")[0] for cab in ("Host", "X-Forwarded-Host")]
+    candidatos.append(_forwarded_host(headers.get("Forwarded")))
+    for cand in candidatos:
+        hp = _host_puerto(cand)
         # Host sin puerto: un proxy con nginx manda $host, que no lo lleva aunque se entre por
         # :8443; ahi cuenta el nombre (un sitio ajeno tiene otro nombre)
-        if hp and hp[0] == h and (hp[1] is None or hp[1] == p):
+        if hp and hp[0] and hp[0] == h and (hp[1] is None or hp[1] == p):
             return ""
+    # la URL publica del panel (PANEL_URL): un proxy que no pasa el Host original ni
+    # X-Forwarded-Host sigue funcionando si el Origin es exactamente esa URL
+    if panel_url:
+        try:
+            pu = urllib.parse.urlsplit(panel_url.strip())
+            if (pu.scheme == u.scheme and (pu.hostname or "").lower() == h
+                    and (pu.port or (443 if pu.scheme == "https" else 80)) == p):
+                return ""
+        except ValueError:
+            pass
     return "origen %s://%s:%s distinto del panel (Host %s)" % (u.scheme, h, p, (headers.get("Host") or "?")[:80])
 
 class H(BaseHTTPRequestHandler):
@@ -19205,7 +19323,7 @@ class H(BaseHTTPRequestHandler):
 
     def _post_mismo_origen(self):
         # CSRF: TODO POST pasa por aqui (tambien el login y el modo sin usuarios)
-        motivo = origen_ajeno(self.headers)
+        motivo = origen_ajeno(self.headers, conf_dash_get("PANEL_URL", ""))
         if motivo:
             try:
                 sys.stderr.write("POST rechazado %s: %s\n" % (self.path.split("?", 1)[0], motivo))
@@ -19371,8 +19489,10 @@ class H(BaseHTTPRequestHandler):
                 _pg = int(_qc.get("p", ["1"])[0])
             except (ValueError, TypeError):
                 _pg = 1
+            # ?msg= es un codigo de un solo uso (rep_aviso_url), no texto: ver /cuarentena
             return self._html(conducta_page(q=_qc.get("q", [""])[0],
-                                            msg=_qc.get("msg", [""])[0], pag=_pg,
+                                            msg=rep_aviso_tomar(_qc.get("msg", [""])[0])[0],
+                                            pag=_pg,
                                             por=_qc.get("n", [""])[0]))
         if path == "/historico":
             _qh = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
@@ -19385,7 +19505,18 @@ class H(BaseHTTPRequestHandler):
             return self._html(historico_page(_dn))
         if path == "/cuarentena":
             _qs = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
-            return self._html(cuarentena_page(msg=_qs.get("msg", [""])[0], es_admin=self._operador()))
+            # ?msg= es un CODIGO de un solo uso (cuar_aviso_url), no el texto: un texto
+            # metido en la URL a mano no se pinta en el aviso del panel (phishing)
+            _cmsg = rep_aviso_tomar(_qs.get("msg", [""])[0])[0]
+            if not _cmsg and "quitadas" in _qs:
+                # el quitado masivo (JS) vuelve con dos NUMEROS; el texto lo pone el panel
+                try:
+                    _nq = max(0, int(_qs.get("quitadas", ["0"])[0]))
+                    _ne = max(0, int(_qs.get("errores", ["0"])[0] or 0))
+                    _cmsg = "%d entrada(s) quitada(s)" % _nq + ("; %d con error" % _ne if _ne else "")
+                except (ValueError, TypeError):
+                    _cmsg = ""
+            return self._html(cuarentena_page(msg=_cmsg, es_admin=self._operador()))
         if path == "/cuarentena/ficha":
             if not self._operador():
                 return self._redirect("/")
@@ -20135,9 +20266,11 @@ class H(BaseHTTPRequestHandler):
             actuales = cargar_publicas().get(rid, [])
             # Detectar solo anade. Lo que una deteccion anterior declaro mal (una LAN, el
             # DNS de otro) se quedaria para siempre: se dice cuales son y se dejan
-            # MARCADAS, pero no se borra nada solo. Sin WAN el resultado es parcial (solo
-            # pools) y todas las de la WAN parecerian "ya no detectadas": ahi no se mira.
-            viejas = ([] if aviso_wan else
+            # MARCADAS, pero no se borra nada solo. Con aviso el resultado es parcial (sin
+            # WAN solo hay pools; o una lectura del router fallo) y todas las de la WAN
+            # parecerian "ya no detectadas": ahi no se mira. Y si no vino NADA tampoco:
+            # un vacio es mas facil que sea un fallo que una WAN sin ninguna publica.
+            viejas = ([] if (aviso_wan or not halladas) else
                       publicas_ya_no_detectadas(actuales, origen_publicas().get(rid, {}),
                                                 halladas))
             nota_viejas = (
@@ -20252,8 +20385,8 @@ class H(BaseHTTPRequestHandler):
             # No se genera dentro de la peticion: recorrer 3 dias de logs puede tardar
             # minutos y el navegador cortaria por timeout. Lo hace el hilo de fondo.
             globals()["FORCE_CONDUCTA"] = True
-            return self._redirect("/conducta?msg=" + _up.quote(
-                "Generando en segundo plano; recarga en un rato."))
+            return self._redirect(rep_aviso_url(
+                "Generando en segundo plano; recarga en un rato.", pagina="/conducta"))
         if ruta == "/cuarentena/enviar":
             if not self._operador():
                 return self._deny()
@@ -20266,7 +20399,7 @@ class H(BaseHTTPRequestHandler):
                     self.send_header("Content-Length", str(len(b)))
                     self.end_headers(); self.wfile.write(b)
                     return
-                return self._redirect("/cuarentena?msg=" + _up.quote(texto))
+                return self._redirect(cuar_aviso_url(texto))
             # Llega la IDENTIDAD del CPE ("IP" con un solo nodo, "router|IP" con varios).
             # Guardarla pelada era el fallo: el registro y los candidatos van por identidad,
             # asi que el Top y la pestana seguian mostrando "sin enviar" algo ya bloqueado,
@@ -20330,7 +20463,7 @@ class H(BaseHTTPRequestHandler):
             ip = (q.get("ip", [""])[0]).strip()
             ok_d, porque = destino_bloqueable(ip)
             if not ok_d:
-                return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {porque}"))
+                return self._redirect(cuar_aviso_url(f"{ip}: {porque}"))
             quitar = ruta.endswith("/quitar")
             hechos, errores = 0, []
             # se manda a TODOS los nodos: el destino es malo para todos los abonados,
@@ -20366,7 +20499,7 @@ class H(BaseHTTPRequestHandler):
                        getattr(CTX, "user", "?"), f"nodos={hechos}")
             msg = (f"{ip}: {'desbloqueado' if quitar else 'bloqueado'} en {hechos} nodo(s)"
                    if hechos else f"No se pudo: {'; '.join(errores[:2]) or 'ningun MikroTik habilitado'}")
-            return self._redirect("/cuarentena?msg=" + _up.quote(msg))
+            return self._redirect(cuar_aviso_url(msg))
         if ruta == "/cuarentena/graduada":
             # Corte PARCIAL: se le cortan los puertos de abuso y se le deja el resto. El
             # abonado sigue navegando, no llama a soporte, y por eso el corte aguanta.
@@ -20381,7 +20514,7 @@ class H(BaseHTTPRequestHandler):
                     self.send_header("Content-Length", str(len(b)))
                     self.end_headers(); self.wfile.write(b)
                     return
-                return self._redirect("/cuarentena?msg=" + _up.quote(texto))
+                return self._redirect(cuar_aviso_url(texto))
             clave = (q.get("ip", [""])[0]).strip()
             ip = ip_de(clave)
             score = (q.get("score", [""])[0]).strip()[:8]
@@ -20431,7 +20564,7 @@ class H(BaseHTTPRequestHandler):
             try:
                 ipaddress.ip_address(ip)
             except Exception:
-                return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+                return self._redirect(cuar_aviso_url("IP invalida"))
             lst = cargar_mk_de(rt).get("LIST_GRAD", "suricata-graduada")
             try:
                 ok, err = mk_remove(ip, lista=lst, router=rt)
@@ -20441,14 +20574,14 @@ class H(BaseHTTPRequestHandler):
                 quitar_enviados([clave], MK_SENT_GRAD)
             mk_log("GRADUADA-QUITADA" if ok else "ERROR-QUITAR", ip,
                    getattr(CTX, "user", "?"), f"lista={lst} {err}" + _suf_nodo(clave))
-            return self._redirect("/cuarentena?msg=" + _up.quote(
+            return self._redirect(cuar_aviso_url(
                 f"{ip}: corte parcial retirado" if ok else f"No se pudo quitar {ip}: {err}"))
         if ruta == "/cuarentena/enviar-todos":
             if not self._operador():
                 return self._deny()
             m = cargar_mk()
             if not (mk_configurado() and m.get("ENABLED") == "1"):
-                return self._redirect("/cuarentena?msg=" + _up.quote("Configura y HABILITA el MikroTik en Ajustes primero"))
+                return self._redirect(cuar_aviso_url("Configura y HABILITA el MikroTik en Ajustes primero"))
             try:
                 cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8")).get("candidatos", [])
             except Exception:
@@ -20490,7 +20623,7 @@ class H(BaseHTTPRequestHandler):
                 enviar_telegram(f"\U0001f6a8 Cuarentena masiva [{_hostname()}]: {ok_n} CPE confirmados (2+ pruebas) "
                                 f"a la lista '{m.get('LIST')}' por {getattr(CTX, 'user', '?')}")
             resumen = f"Enviados {ok_n} a cuarentena" + (f", {err_n} con error ({ult_err})" if err_n else "")
-            return self._redirect("/cuarentena?msg=" + _up.quote(resumen))
+            return self._redirect(cuar_aviso_url(resumen))
         if ruta == "/cuarentena/quitar":
             if not self._operador():
                 return self._deny()
@@ -20501,7 +20634,7 @@ class H(BaseHTTPRequestHandler):
             try:
                 ipaddress.ip_address(ip)
             except Exception:
-                return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+                return self._redirect(cuar_aviso_url("IP invalida"))
             # de la lista donde esta DE VERDAD, no de la que toque hoy por categoria
             _guardada = (cargar_enviados(MK_SENT).get(clave) or {}).get("lista", "")
             try:
@@ -20515,7 +20648,7 @@ class H(BaseHTTPRequestHandler):
             if ok:
                 quitar_enviados([clave])
             mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), err)
-            return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
+            return self._redirect(cuar_aviso_url(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
         if ruta == "/cuarentena/quitar-uno":
             # Quita UNA IP y responde JSON enseguida. La usa el quitado masivo para ir
             # marcando el avance: cada IP es una llamada al MikroTik y en bloque puede
@@ -20558,7 +20691,7 @@ class H(BaseHTTPRequestHandler):
                 return self._deny()
             sels = q.get("sel", [])
             if not sels:
-                return self._redirect("/cuarentena?msg=" + _up.quote("No seleccionaste ninguna IP"))
+                return self._redirect(cuar_aviso_url("No seleccionaste ninguna IP"))
             m = cargar_mk(); lst_dns = m.get("LIST_DNS", "suricata-dns-sospechoso")
             quien = getattr(CTX, "user", "?")
             TOPE = 500                          # tope defensivo por si llega un POST enorme
@@ -20608,12 +20741,12 @@ class H(BaseHTTPRequestHandler):
                     resumen += f" y {len(errores)-3} mas"
             if sobran:
                 resumen += f". Quedan {sobran} sin procesar (tope de {TOPE} por peticion): repite la operacion."
-            return self._redirect("/cuarentena?msg=" + _up.quote(resumen + corte))
+            return self._redirect(cuar_aviso_url(resumen + corte))
         if ruta == "/cuarentena/excluir-destino":
             if not self._operador():
                 return self._deny()
             n, msg = excluir_destino((q.get("destino", [""])[0]).strip())
-            return self._redirect("/cuarentena?msg=" + _up.quote(msg))
+            return self._redirect(cuar_aviso_url(msg))
         if ruta == "/cuarentena/quitar-destino":
             if not self._operador():
                 return self._deny()
@@ -20621,7 +20754,7 @@ class H(BaseHTTPRequestHandler):
             cur = _dest_ok_set(); cur.discard(d); guardar_dest_ok_set(cur)
             globals()["FORCE_REGEN"] = True
             bitacora("QUITAR-DESTINO-CONFIABLE", d)
-            return self._redirect("/cuarentena?msg=" + _up.quote(f"'{d}' ya no es destino confiable"))
+            return self._redirect(cuar_aviso_url(f"'{d}' ya no es destino confiable"))
         if ruta in ("/cuarentena/dns/enviar", "/cuarentena/dns/quitar", "/cuarentena/dns/enviar-todos"):
             if not self._operador():
                 return self._deny()
@@ -20630,29 +20763,29 @@ class H(BaseHTTPRequestHandler):
                 clave = (q.get("ip", [""])[0]).strip()
                 ip = ip_de(clave); rt = router_de_clave(clave)
                 try: ipaddress.ip_address(ip)
-                except Exception: return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+                except Exception: return self._redirect(cuar_aviso_url("IP invalida"))
                 lst = cargar_mk_de(rt).get("LIST_DNS", lst)
                 try: ok, err = mk_remove(ip, lista=lst, router=rt)
                 except Exception as ex: ok, err = False, str(ex)
                 if ok:                      # igual que la de infectados: solo si el router confirmo
                     quitar_enviados([clave], MK_SENT_DNS)
                 mk_log("QUITADO" if ok else "ERROR-QUITAR", ip, getattr(CTX, "user", "?"), f"lista={lst} {err}")
-                return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
+                return self._redirect(cuar_aviso_url(f"{ip}: {err}" if ok else f"No se pudo quitar {ip}: {err}"))
             if not (mk_configurado() and m.get("ENABLED") == "1"):
-                return self._redirect("/cuarentena?msg=" + _up.quote("Configura y HABILITA el MikroTik en Ajustes primero"))
+                return self._redirect(cuar_aviso_url("Configura y HABILITA el MikroTik en Ajustes primero"))
             if ruta == "/cuarentena/dns/enviar":
                 clave = (q.get("ip", [""])[0]).strip()
                 ip = ip_de(clave); score = (q.get("score", [""])[0]).strip()[:8]
                 try: ipaddress.ip_address(ip)
-                except Exception: return self._redirect("/cuarentena?msg=" + _up.quote("IP invalida"))
+                except Exception: return self._redirect(cuar_aviso_url("IP invalida"))
                 if not es_mi_cpe(ip):
-                    return self._redirect("/cuarentena?msg=" + _up.quote(
+                    return self._redirect(cuar_aviso_url(
                         f"{ip} no es de tus redes: se corta en el borde, no en la cuarentena de CPEs"))
                 if nunca_bloquear(ip):
-                    return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} esta en la lista 'Nunca bloquear'"))
+                    return self._redirect(cuar_aviso_url(f"{ip} esta en la lista 'Nunca bloquear'"))
                 rt = router_de_clave(clave); dr = cargar_mk_de(rt)
                 if not mk_listo(dr):
-                    return self._redirect("/cuarentena?msg=" + _up.quote("Ese MikroTik no esta habilitado para enviar"))
+                    return self._redirect(cuar_aviso_url("Ese MikroTik no esta habilitado para enviar"))
                 lst = dr.get("LIST_DNS", lst); ttl = _ttl_efectivo(dr, "TTL_DNS")
                 try: ok, err = mk_add(ip, comment=f"suricata DNS-sospechoso riesgo {score} {time.strftime('%Y-%m-%d %H:%M')}", lista=lst, ttl=ttl, router=rt)
                 except Exception as ex: ok, err = False, str(ex)
@@ -20663,9 +20796,9 @@ class H(BaseHTTPRequestHandler):
                     guardar_enviados(env, MK_SENT_DNS)
                     mk_log("ENVIADO", ip, getattr(CTX, "user", "?"), f"lista={lst} (dns)" + _suf_nodo(clave))
                     notificar_cuarentena(ip, "DNS sospechoso", lst, quien=getattr(CTX, "user", "?"))
-                    return self._redirect("/cuarentena?msg=" + _up.quote(f"{ip} enviado a la lista {lst}"))
+                    return self._redirect(cuar_aviso_url(f"{ip} enviado a la lista {lst}"))
                 mk_log("ERROR-ENVIO", ip, getattr(CTX, "user", "?"), f"lista={lst} {err}")
-                return self._redirect("/cuarentena?msg=" + _up.quote(f"No se pudo enviar {ip}: {err}"))
+                return self._redirect(cuar_aviso_url(f"No se pudo enviar {ip}: {err}"))
             # enviar-todos DNS
             try:
                 cq = json.load(open(f"{LOGDIR}/cuarentena.json", encoding="utf-8")).get("dns_candidatos", [])
@@ -20698,7 +20831,7 @@ class H(BaseHTTPRequestHandler):
             if ok_n:
                 enviar_telegram(f"\U0001f6a8 DNS sospechoso masivo [{_hostname()}]: {ok_n} CPE confirmados (2+ pruebas) "
                                 f"a la lista '{lst}' por {getattr(CTX, 'user', '?')}")
-            return self._redirect("/cuarentena?msg=" + _up.quote(f"Enviados {ok_n} a {lst}" + (f", {err_n} con error ({ult_err})" if err_n else "")))
+            return self._redirect(cuar_aviso_url(f"Enviados {ok_n} a {lst}" + (f", {err_n} con error ({ult_err})" if err_n else "")))
         return self._html("<h1>No encontrado</h1>", 404)
 
     def _post_perfil(self, q):
@@ -23368,6 +23501,11 @@ DASHBOARD = "/usr/local/bin/suricata-dashboard"
 MK_CONF = "/etc/suricata-mikrotik.conf"
 ROUTERS_CONF = "/etc/suricata-routers.json"
 COMENTARIO = "espejo IDS"          # marca de las reglas nuestras
+# Version de esta herramienta. El panel (mkinit_asegurar) busca ESTA linea para saber si la
+# instalada es la de su version: si no la encuentra, la renueva desde el instalador
+# publicado. Se cambia cada vez que el panel necesite algo nuevo de aqui (y MK_INIT_MARCA
+# en el panel con ella).
+MKINIT_VERSION = "2026-10-10b"
 
 
 def cliente_api():
@@ -23415,12 +23553,16 @@ def leer_credenciales(ruta):
         k, v = l.split("=", 1)
         k = k.strip().upper()
         if k == "PASS":
-            # La clave, intacta: un espacio o una comilla al principio o al final pueden ser
-            # parte de ella (el panel la acepta). Solo se quita UN par de comillas que la
-            # envuelva entera, que es como la escribe el panel (PASS="...") y como se suele
-            # escribir a mano; sin comillas, se usa tal cual.
-            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-                v = v[1:-1]
+            # Entre comillas (dobles o simples que envuelven todo el valor, quitados los
+            # espacios de fuera), lo de dentro EXACTAMENTE: un espacio o una comilla en los
+            # bordes pueden ser parte de la clave (el panel la acepta y la escribe asi,
+            # PASS="..."). Sin comillas, como se escribe a mano (PASS=clave, PASS = clave),
+            # sin los espacios ni tabuladores de los bordes, que no son de la clave.
+            t = v.strip()
+            if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
+                v = t[1:-1]
+            else:
+                v = t
             d[k] = v
         else:
             d[k] = v.strip().strip('"').strip("'")

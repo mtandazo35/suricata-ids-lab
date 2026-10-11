@@ -1,8 +1,22 @@
 # -*- coding: utf-8 -*-
 """/cuarentena/quitar-varios (respaldo sin JS) con dobles."""
-import ipaddress, os, sys, urllib.parse as _up, textwrap
+import ast, ipaddress, os, secrets, sys, time, urllib.parse as _up, textwrap
 _DIR = sys.argv[1] if len(sys.argv) > 1 else "."
 CODIGO = open(os.path.join(_DIR, "ruta_masivo.py"), encoding="utf-8").read()
+
+# el aviso viaja como CODIGO de un solo uso (/cuarentena?msg=<codigo>): se usan las
+# funciones reales del panel para guardarlo y para leerlo
+_RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SRC = open(os.path.join(_RAIZ, "install-suricata.sh"), encoding="utf-8").read()
+_DASH = _SRC[_SRC.index("cat > /usr/local/bin/suricata-dashboard <<'DASH'"):].split("\n", 1)[1]
+_DASH = _DASH.split("\nDASH\n", 1)[0]
+AV = {"time": time, "secrets": secrets}
+for _n in ast.parse(_DASH).body:
+    _nom = getattr(_n, "name", None) or (getattr(_n.targets[0], "id", "")
+                                         if isinstance(_n, ast.Assign) and _n.targets else "")
+    if _nom in ("_REP_AVISOS", "_REP_AVISOS_TTL", "rep_aviso_guardar", "rep_aviso_tomar",
+                "rep_aviso_url", "cuar_aviso_url"):
+        exec(ast.get_source_segment(_DASH, _n), AV)
 
 def correr(sels, operador=True, fallan=(), caido=False, estado=None, intentos=None,
            tras_quitar=None):
@@ -32,11 +46,20 @@ def correr(sels, operador=True, fallan=(), caido=False, estado=None, intentos=No
           "router_de_clave": lambda k: {"id": (k.split("|", 1)[0] if "|" in k else "r1")},
           "cargar_mk_de": lambda r: {"LIST_DNS": "lista-dns"},
           "_suf_nodo": lambda k: "",
-          "CTX": type("C", (), {"user": "ana"})()}
+          "CTX": type("C", (), {"user": "ana"})(),
+          "cuar_aviso_url": AV.get("cuar_aviso_url")}
     exec(compile("def _f():\n" + textwrap.indent(CODIGO, "    "), "<r>", "exec"), ns)
     return ns["_f"](), estado
 
-def msg(r): return _up.unquote(r[1].split("msg=", 1)[1])
+_LEIDOS = {}
+def msg(r):
+    """El texto que vera el usuario: la URL lleva un codigo y el panel lo traduce. El
+    codigo es de un solo uso: se recuerda lo leido para poder mirarlo varias veces."""
+    assert r[1].startswith("/cuarentena?msg="), r
+    cod = _up.unquote(r[1].split("msg=", 1)[1])
+    if cod not in _LEIDOS:
+        _LEIDOS[cod] = AV["rep_aviso_tomar"](cod)[0]
+    return _LEIDOS[cod]
 
 fallos = 0
 def check(d, c, e=""):
@@ -45,6 +68,8 @@ def check(d, c, e=""):
     if not c: fallos += 1
 
 r, estado = correr(["cuar|10.6.1.89", "dns|198.51.100.5", "cuar|10.6.2.82"])
+check("la URL del redirect no lleva el texto, solo un codigo",
+      "entrada" not in _up.unquote(r[1]) and " " not in _up.unquote(r[1]), r[1])
 check("quita de ambas listas y lo resume", msg(r) == "3 entrada(s) quitada(s)", msg(r))
 check("cada una sale de SU registro",
       estado["cuar"] == {"10.6.0.208": {}} and estado["dns"] == {}, estado)

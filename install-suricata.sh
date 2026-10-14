@@ -8407,27 +8407,44 @@ def feeds_auth_configurada():
 def feeds_auth_set(val):
     return _feeds_conf_set("ABUSE_CH_AUTH_KEY", val)
 
+ABUSECH_PRUEBA_URL = "https://threatfox-api.abuse.ch/api/v1/"
+_ABUSECH_MALA = ("unknown_auth_key", "illegal_auth_key")
+
 def feeds_auth_probar(key):
-    """Valida una Auth-Key contra abuse.ch (URLhaus). Devuelve (estado, msg):
-    True=valida, False=invalida (rechazada/HTML), None=no se pudo comprobar (sin red)."""
+    """Valida una Auth-Key contra la API de ThreatFox (abuse.ch). Devuelve (estado, msg):
+    True=valida, False=invalida, None=no se pudo comprobar (sin red).
+
+    No vale descargar una lista: las descargas de URLhaus (hostfile) se sirven SIN clave, asi
+    que cualquier texto (hasta la clave de AbuseIPDB) salia «valida». La API de ThreatFox si la
+    exige: con una clave mala responde 403 y query_status=unknown_auth_key. Se pregunta por una
+    IP de documentacion (192.0.2.1): respuesta corta y no es de nadie."""
     key = (key or "").strip()
     if not key:
         return False, "vacia"
+    req = urllib.request.Request(
+        ABUSECH_PRUEBA_URL, data=json.dumps({"query": "search_ioc", "search_term": "192.0.2.1"}).encode(),
+        headers={"Auth-Key": key, "Content-Type": "application/json", "User-Agent": "suricata-feeds/2.0"})
+    st = ""
     try:
-        req = urllib.request.Request("https://urlhaus.abuse.ch/downloads/hostfile/",
-                                     headers={"Auth-Key": key, "User-Agent": "suricata-feeds/2.0"})
         with urllib.request.urlopen(req, timeout=15) as r:
-            body = r.read(2048).decode("utf-8", "replace")
-        low = body.lstrip()[:200].lower()
-        if low.startswith("<!doctype html") or "<html" in low or "<title" in low:
-            return False, "abuse.ch respondio una pagina HTML (clave invalida o login requerido)"
-        return True, "valida"
+            st = str((json.loads(r.read(65536).decode("utf-8", "replace")) or {}).get("query_status", ""))
     except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            return False, f"abuse.ch rechazo la clave (HTTP {e.code})"
-        return None, f"no se pudo comprobar (HTTP {e.code})"
+        try:
+            st = str((json.loads(e.read(4096).decode("utf-8", "replace")) or {}).get("query_status", ""))
+        except Exception:
+            st = ""
+        if e.code in (401, 403) or st in _ABUSECH_MALA:
+            return False, "abuse.ch rechazo la clave (%s)" % (st or "HTTP %d" % e.code)
+        return None, "no se pudo comprobar (HTTP %d)" % e.code
+    except (ValueError, AttributeError):
+        return None, "respuesta ilegible de abuse.ch"
     except Exception:
         return None, "no se pudo comprobar ahora (sin red?)"
+    if st in _ABUSECH_MALA:
+        return False, "abuse.ch rechazo la clave (%s)" % st
+    if st in ("ok", "no_result"):
+        return True, "valida"
+    return None, "respuesta inesperada de abuse.ch (%s)" % (st or "sin estado")
 
 def cargar_feeds_meta():
     try:

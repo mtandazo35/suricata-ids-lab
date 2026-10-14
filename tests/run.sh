@@ -87,6 +87,7 @@ correr "publicas: limpiar todas de una vez" "$PY" tests/test_publicas_limpiar.py
 correr "fecha y hora de la ultima actualizacion" "$PY" tests/test_fecha_actualizacion.py
 correr "la ficha dice que CPE privado esta detras" "$PY" tests/test_culpables_ficha.py
 correr "AbuseIPDB: cuota, cache, privacidad y categorias" "$PY" tests/test_abuseipdb.py
+correr "abuse.ch: la Auth-Key se valida contra la API (no la acepta cualquiera)" "$PY" tests/test_authkey_abusech.py
 correr "denuncias a AbuseIPDB: apagadas por defecto y con frenos" "$PY" tests/test_abuseipdb_denuncia.py
 correr "documentacion: paginas, categorias, buscador y modal" "$PY" tests/test_documentacion.py
 correr "parse_ts con memoria: mismo resultado, mas barato" "$PY" tests/test_parse_ts.py

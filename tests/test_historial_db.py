@@ -150,6 +150,26 @@ def main():
     check("y conserva las mas frecuentes, no las primeras que llegaron",
           "10.0.0.1" in quedan and "10.0.0.39" not in quedan, quedan)
 
+    # --- poda con un CPE de miles de destinos: no se atasca --------------------------
+    # La version con subconsulta correlacionada reordenaba el grupo entero por cada fila: con un
+    # CPE de 21 955 destinos en un dia no terminaba y el hilo de fondo se quedaba parado.
+    c = ns2["_hist_con"]()
+    try:
+        dia = time.strftime("%Y-%m-%d")
+        c.executemany("INSERT INTO detalle(dia,cpe,tipo,clave,n) VALUES(?,?,?,?,?)",
+                      [(dia, "192.168.4.4", "destino", "198.51.100.%d:%d" % (i % 250, i), i)
+                       for i in range(4000)])
+        c.commit()
+        t0 = time.time()
+        ns2["hist_podar"](c)
+        dur = time.time() - t0
+        ns_top = sorted((r[0] for r in c.execute(
+            "SELECT n FROM detalle WHERE cpe='192.168.4.4'")), reverse=True)
+    finally:
+        c.close()
+    check("la poda de un grupo de 4000 claves tarda menos de 3 s", dur < 3.0, "%.1f s" % dur)
+    check("y deja las HIST_TOP de mas n", ns_top == list(range(3999, 3999 - ns2["HIST_TOP"], -1)), ns_top)
+
     # --- LO QUE FALLO EN PRODUCCION: log grande, tope agotado, contador parado ------
     # Marcas de tiempo distintas, como en un log real: con todas iguales no se puede
     # distinguir lo ya contado de lo nuevo y la prueba no probaria nada.
